@@ -5,9 +5,11 @@ using Octo.Models.Settings;
 using Octo.Models.Download;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
+using Octo.Services.Audio;
 using Octo.Services.Local;
 using Octo.Services.Metadata;
 using Octo.Services.Subsonic;
+using Octo.Services.Tagging;
 using TagLib;
 using IOFile = System.IO.File;
 
@@ -317,6 +319,7 @@ public abstract class BaseDownloadService : IDownloadService
                 CoverArtUrl = cover,
                 SizeBytes = size,
                 TranscodedFrom = song.TranscodedFrom,
+                Tagging = song.TagPlan?.ToReport(),
                 DownloadedAt = DateTime.UtcNow.ToString("o"),
                 RequestedBy = requestedBy is { Count: > 0 } ? [.. requestedBy] : null,
             });
@@ -383,7 +386,8 @@ public abstract class BaseDownloadService : IDownloadService
     protected async Task<string> DownloadSongInternalAsync(string externalProvider, string externalId,
         bool triggerAlbumDownload, CancellationToken cancellationToken = default,
         bool forcePermanent = false, bool suppressNotify = false,
-        DownloadSource? sourceOverride = null, IReadOnlyList<string>? requestedBy = null)
+        DownloadSource? sourceOverride = null, IReadOnlyList<string>? requestedBy = null,
+        AlbumTagContext? albumContext = null)
     {
         if (externalProvider != ProviderName)
         {
@@ -530,24 +534,45 @@ public abstract class BaseDownloadService : IDownloadService
                 externalId, song, silence, sourceOverride, cancellationToken);
             song.LocalPath = landedPath;
             Track(t => t.Stage(externalProvider, externalId, AcquisitionState.Importing));
+            var finalize = System.Diagnostics.Stopwatch.StartNew();
 
-            // Enrich from Deezer before the file is placed: the album it finds names the folder
-            // (#50) and its main artist names the artist folder (#49). Reads only; nothing is
-            // written to the file until it sits where it will stay.
-            await EnrichAsync(song, landedPath, CancellationToken.None);
+            // The loudness is measured while the file is identified: ffmpeg works the disk and
+            // the lookups work the network, so the two overlap. Both finish before the file is
+            // placed, since nothing may read a file while it moves.
+            var loudness = StartLoudness(landedPath);
+
+            // Identify before the file is placed: the album the chooser settles on names the
+            // folder (#50) and its main artist names the artist folder (#49). Reads only; nothing
+            // is written to the file until it sits where it will stay.
+            await IdentifyAsync(song, requested, landedPath, albumContext, CancellationToken.None);
+            await ApplyLoudnessAsync(song, loudness, landedPath);
 
             // Placed from the Song, so the path and the tags come from one decision (#48). The
             // file used to be moved inside DownloadTrackAsync, before any of this was known.
             var placement = await PlaceInLibraryAsync(song, requested, landedPath);
             var localPath = placement.Path;
             song.LocalPath = localPath;
+            if (albumContext is not null && song.TagPlan is not null)
+                albumContext.Loudness[localPath] = song.TagPlan.IntegratedLufs is { } lufs
+                    ? new Loudness(lufs, 0, song.TagPlan.TruePeakDbfs ?? 0) : null;
 
             // Rich tags and real album art, written where the file will stay. Downloads
             // otherwise arrive bare (YouTube: artist/title and a video thumbnail; Soulseek:
             // whatever the peer tagged), so this is what makes every fetched song a
             // properly-tagged library citizen.
+            var writing = System.Diagnostics.Stopwatch.StartNew();
             var cover = await WriteMetadataAsync(localPath, song, CancellationToken.None);
             if (!isCache) await WriteSidecarsAsync(song, placement, cover, CancellationToken.None);
+            if (song.TagPlan is { } tagPlan)
+            {
+                tagPlan.StageSeconds["write"] = writing.Elapsed.TotalSeconds;
+                tagPlan.StageSeconds["total"] = finalize.Elapsed.TotalSeconds;
+                Logger.LogInformation("{Summary}", tagPlan.Describe(song));
+                if (finalize.Elapsed > FinalizeBudget)
+                    Logger.LogWarning("finalizing '{Artist} - {Title}' took {Seconds:0.0}s; stages: {Stages}",
+                        song.Artist, song.Title, finalize.Elapsed.TotalSeconds,
+                        string.Join(", ", tagPlan.StageSeconds.Select(s => $"{s.Key} {s.Value:0.0}s")));
+            }
 
             downloadInfo.Status = DownloadStatus.Completed;
             downloadInfo.LocalPath = localPath;
@@ -686,6 +711,10 @@ public abstract class BaseDownloadService : IDownloadService
         // Per-track notifications are muted below; these feed one summary instead.
         int succeeded = 0, lossless = 0, failed = 0;
 
+        // Every track of the walk shares the release the first one settled on, and the walk
+        // measures each track so the album gain can be written once it ends.
+        var albumContext = new AlbumTagContext(albumExternalId, album.Title, album.Artist);
+
         foreach (var track in tracksToDownload)
         {
             try
@@ -723,7 +752,8 @@ public abstract class BaseDownloadService : IDownloadService
                 var path = await DownloadSongInternalAsync(
                     ProviderName, track.ExternalId!, triggerAlbumDownload: false,
                     cancellationToken, forcePermanent: true, suppressNotify: true,
-                    sourceOverride: sourceOverride, requestedBy: requestedBy);
+                    sourceOverride: sourceOverride, requestedBy: requestedBy,
+                    albumContext: albumContext);
                 succeeded++;
                 if (path.EndsWith(".flac", StringComparison.OrdinalIgnoreCase)) lossless++;
 
@@ -745,11 +775,45 @@ public abstract class BaseDownloadService : IDownloadService
 
         Logger.LogInformation("Completed background download for album '{AlbumTitle}'", album.Title);
 
+        if (MetadataSettingsValue.ReplayGain) WriteAlbumGain(albumContext, album.Title);
+
         var summary = BuildAlbumSummary(album, succeeded, lossless, failed);
         // Hide an intermediate failure while another source remains, but still report
         // success when an earlier priority step completes the album acquisition.
         if ((!suppressSummary || failed == 0) && summary is not null) Notifications.Notify(summary);
         return failed == 0;
+    }
+
+    /// <summary>
+    /// The album gain and peak, written into every file the walk measured, once the walk ends.
+    /// Only when every track was measured: an album gain for half an album is worse than none.
+    /// A rewrite in place, so the library server keeps each file's id.
+    /// </summary>
+    internal void WriteAlbumGain(AlbumTagContext context, string albumTitle)
+    {
+        if (context.Loudness.IsEmpty) return;
+        var album = ReplayGainTags.ForAlbum(context.Loudness.Values.ToList());
+        if (album is null)
+        {
+            Logger.LogInformation("No album gain for '{Album}': not every track could be measured", albumTitle);
+            return;
+        }
+        foreach (var path in context.Loudness.Keys)
+        {
+            try
+            {
+                if (!IOFile.Exists(path)) continue;
+                using var tagFile = TagLib.File.Create(path);
+                TagWriterExtras.SetReplayGain(tagFile, null, null, album.GainDb, album.Peak);
+                tagFile.Save();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("Could not write the album gain to {Path}: {M}", path, ex.Message);
+            }
+        }
+        Logger.LogInformation("Album gain {Gain} (peak {Peak}) written to {Count} tracks of '{Album}'",
+            album.GainText, album.PeakText, context.Loudness.Count, albumTitle);
     }
 
     /// <summary>
@@ -786,16 +850,33 @@ public abstract class BaseDownloadService : IDownloadService
     
     #region Common Metadata Writing
     
+    /// <summary>The finalize phase runs under the download lock, so past this it is logged with
+    /// its stage timings. Nothing is cut short beyond the per-stage caps.</summary>
+    private static readonly TimeSpan FinalizeBudget = TimeSpan.FromSeconds(20);
+
+    private ReleaseIdentifier? _identifier;
+
+    /// <summary>Resolved per use like the other services; built on the spot where a host did not
+    /// register one, so placement tests need nothing but the provider they already have.</summary>
+    private ReleaseIdentifier Identifier => _identifier ??= _serviceProvider.GetService<ReleaseIdentifier>()
+        ?? new ReleaseIdentifier(_serviceProvider, Microsoft.Extensions.Logging.Abstractions.NullLogger<ReleaseIdentifier>.Instance);
+
+    /// <summary>Whether a landed file came from the video site's staging folder, whose tags are
+    /// an uploader's and not evidence of anything.</summary>
+    internal static bool IsStagedUpload(string path) =>
+        path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Any(segment => string.Equals(segment, Octo.Services.Soulseek.SoulseekDownloadService.IncomingFolderName, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>
-    /// Writes ID3/Vorbis metadata and cover art to the audio file
+    /// Works out what the file is and sets the Song from it. Every candidate release the
+    /// fingerprint service, the music database and the catalog offer is weighed against what was
+    /// asked for and what landed; a sure match sets the album-level tags, a doubtful one only
+    /// fills blanks, the way the catalog always did. Reads only: the tags are written by
+    /// WriteMetadataAsync once the file has been placed. Best-effort; a miss never breaks the
+    /// download.
     /// </summary>
-    /// <summary>
-    /// Fills any missing metadata on <paramref name="song"/> from Deezer. Existing values win (a
-    /// well-tagged Soulseek FLAC is enriched, not overwritten); Deezer fills the gaps and
-    /// supplies the cover. Reads only: the tags are written by WriteMetadataAsync once the file
-    /// has been placed. Best-effort; a miss never breaks the download.
-    /// </summary>
-    protected async Task EnrichAsync(Song song, string filePath, CancellationToken cancellationToken)
+    protected async Task IdentifyAsync(Song song, RequestedIdentity requested, string filePath,
+        AlbumTagContext? album, CancellationToken cancellationToken)
     {
         // Last.fm/YouTube titles often carry a redundant "Artist - " prefix (e.g.
         // "Radiohead - No Surprises") which mislabels the file, so it goes from the written
@@ -804,55 +885,192 @@ public abstract class BaseDownloadService : IDownloadService
         // tagged with the studio album's cover, track number and year.
         song.Title = StripArtistPrefix(song.Artist, song.Title);
         var queryTitle = song.Title;
+        var settings = MetadataSettingsValue;
 
+        TagPlan? plan = null;
+        try
+        {
+            var request = ReleaseIdentifier.RequestFor(song, song.Artist, queryTitle, requested.Album, requested.Track);
+            plan = await Identifier.IdentifyAsync(song, request, filePath, !IsStagedUpload(filePath), album, cancellationToken);
+            song.TagPlan = plan;
+
+            if (settings.TagRehearsal) plan.ApplyRehearsalTo(song);
+            else
+            {
+                plan.ApplyTo(song);
+                if (plan.AlbumFromCandidate && plan.Fields.TryGetValue("album", out var chosenAlbum)
+                    && plan.Evidence?.File.Album is { Length: > 0 } fileAlbum
+                    && SongIdentity.Key(fileAlbum) != SongIdentity.Key(chosenAlbum.Value))
+                    Logger.LogInformation("'{Album}' replaces the file's own '{FileAlbum}' ({Confidence})",
+                        chosenAlbum.Value, fileAlbum, plan.Confidence);
+            }
+            FillBlanksFromCatalog(song, plan.CatalogBest);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Identification failed for '{Artist} - {Title}'; filling blanks the old way", song.Artist, song.Title);
+            await FillBlanksFromCatalogAsync(song, queryTitle, cancellationToken);
+        }
+
+        FillAlbumFromFile(song, filePath);
+        ApplySingleFallback(song, settings.AlbumFromTitle);
+
+        if (plan is not null && !settings.TagRehearsal)
+        {
+            if (album is not null)
+            {
+                album.Pin(song);
+                album.Capture(plan, song);
+            }
+            else if (SubsonicSettings.FolderStructure == FolderStructure.Organized)
+                PinToSibling(song, requested, filePath);
+        }
+    }
+
+    /// <summary>The old catalog enrichment, asked for on its own when identification itself failed.</summary>
+    private async Task FillBlanksFromCatalogAsync(Song song, string queryTitle, CancellationToken cancellationToken)
+    {
         try
         {
             var deezer = _serviceProvider.GetService<Octo.Services.Metadata.DeezerMetadataService>();
-            if (deezer != null)
-            {
-                var m = await deezer.EnrichTrackFullAsync(song.Artist, queryTitle, cancellationToken);
-                if (m != null)
-                {
-                    // Deezer's main artist names the folder when the request carried a list of
-                    // credits (#49); its contributors give every credited artist a value of
-                    // their own, so Navidrome files a collaboration under each of them.
-                    if (string.IsNullOrEmpty(song.PrimaryArtist) && !string.IsNullOrEmpty(m.ArtistName)) song.PrimaryArtist = m.ArtistName;
-                    if (song.Artists.Count == 0 && m.Contributors is { Count: > 1 } contributors) song.Artists = contributors.ToList();
-                    if (string.IsNullOrEmpty(song.Album) && !string.IsNullOrEmpty(m.AlbumTitle)) song.Album = m.AlbumTitle;
-                    // The album's own artist, not the track's: the two differ on every feature and
-                    // every compilation.
-                    if (string.IsNullOrEmpty(song.AlbumArtist) && (m.AlbumArtistName ?? m.ArtistName) is { Length: > 0 } albumArtist)
-                        song.AlbumArtist = albumArtist;
-                    if (IsVariousArtists(m.AlbumArtistName)
-                        || string.Equals(m.RecordType, "compile", StringComparison.OrdinalIgnoreCase))
-                        song.IsCompilation = true;
-                    if (string.IsNullOrEmpty(song.CoverArtUrlLarge)) song.CoverArtUrlLarge = m.AlbumCoverUrl;
-                    if (!song.Year.HasValue) song.Year = m.Year;
-                    if (!song.Track.HasValue) song.Track = m.TrackNumber;
-                    if (!song.DiscNumber.HasValue) song.DiscNumber = m.DiscNumber;
-                    if (!song.TotalTracks.HasValue) song.TotalTracks = m.TotalTracks;
-                    if (!song.Duration.HasValue) song.Duration = m.Duration;
-                    if (string.IsNullOrEmpty(song.Genre)) song.Genre = m.Genre;
-                    if (string.IsNullOrEmpty(song.Isrc)) song.Isrc = m.Isrc;
-                    if (string.IsNullOrEmpty(song.Label)) song.Label = m.Label;
-                    if (string.IsNullOrEmpty(song.ReleaseDate)) song.ReleaseDate = m.ReleaseDate;
-                }
-            }
+            if (deezer != null) FillBlanksFromCatalog(song, await deezer.EnrichTrackFullAsync(song.Artist, queryTitle, cancellationToken));
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Deezer enrichment for tagging failed for '{Artist} - {Title}'", song.Artist, song.Title);
         }
-
-        FillAlbumFromFile(song, filePath);
-        ApplySingleFallback(song, MetadataSettingsValue.AlbumFromTitle);
     }
 
-    /// <summary>A source's own album tag beats nothing, and beats filing the track under its title.</summary>
+    /// <summary>
+    /// Fills any missing metadata on <paramref name="song"/> from the catalog's best hit.
+    /// Existing values win (a well-tagged Soulseek FLAC is enriched, not overwritten); the
+    /// catalog fills the gaps and supplies the cover. The album's own facts (its cover, its
+    /// compilation flag) are taken only when the hit is the album the song is filed under,
+    /// since the chooser may have put the song on another release than the catalog's first hit.
+    /// </summary>
+    internal static void FillBlanksFromCatalog(Song song, DeezerMetadataService.FullTrackMeta? m)
+    {
+        if (m is null) return;
+        var sameAlbum = string.IsNullOrEmpty(song.Album) || string.IsNullOrEmpty(m.AlbumTitle)
+            || SongIdentity.Key(song.Album) == SongIdentity.Key(m.AlbumTitle);
+
+        // Deezer's main artist names the folder when the request carried a list of
+        // credits (#49); its contributors give every credited artist a value of
+        // their own, so Navidrome files a collaboration under each of them.
+        if (string.IsNullOrEmpty(song.PrimaryArtist) && !string.IsNullOrEmpty(m.ArtistName)) song.PrimaryArtist = m.ArtistName;
+        if (song.Artists.Count == 0 && m.Contributors is { Count: > 1 } contributors) song.Artists = contributors.ToList();
+        if (string.IsNullOrEmpty(song.Album) && !string.IsNullOrEmpty(m.AlbumTitle)) song.Album = m.AlbumTitle;
+        if (sameAlbum)
+        {
+            // The album's own artist, not the track's: the two differ on every feature and
+            // every compilation.
+            if (string.IsNullOrEmpty(song.AlbumArtist) && (m.AlbumArtistName ?? m.ArtistName) is { Length: > 0 } albumArtist)
+                song.AlbumArtist = albumArtist;
+            if (IsVariousArtists(m.AlbumArtistName)
+                || string.Equals(m.RecordType, "compile", StringComparison.OrdinalIgnoreCase))
+                song.IsCompilation = true;
+            if (string.IsNullOrEmpty(song.CoverArtUrlLarge)) song.CoverArtUrlLarge = m.AlbumCoverUrl;
+            if (!song.Year.HasValue) song.Year = m.Year;
+            if (!song.Track.HasValue) song.Track = m.TrackNumber;
+            if (!song.DiscNumber.HasValue) song.DiscNumber = m.DiscNumber;
+            if (!song.TotalTracks.HasValue) song.TotalTracks = m.TotalTracks;
+            if (string.IsNullOrEmpty(song.Label)) song.Label = m.Label;
+            if (string.IsNullOrEmpty(song.Barcode)) song.Barcode = m.Barcode;
+            if (string.IsNullOrEmpty(song.ReleaseDate)) song.ReleaseDate = m.ReleaseDate;
+        }
+        if (!song.Duration.HasValue) song.Duration = m.Duration;
+        if (string.IsNullOrEmpty(song.Genre)) song.Genre = m.Genre;
+        if (string.IsNullOrEmpty(song.Isrc)) song.Isrc = m.Isrc;
+    }
+
+    /// <summary>
+    /// A single joining an album folder that is already there takes that album's release facts
+    /// from one of its files, when the two agree on the album and its artist, so the album the
+    /// library server shows keeps one label, one catalogue number and one year.
+    /// </summary>
+    private void PinToSibling(Song song, RequestedIdentity requested, string currentPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(song.Album) || string.IsNullOrEmpty(DownloadPath)) return;
+            var choice = ChooseLayout(song, requested, SoulseekSettingsValue.NameFromMatch);
+            var target = PathHelper.BuildLayoutPath(FolderStructure.Organized, DownloadPath,
+                string.IsNullOrWhiteSpace(choice.FolderArtist) ? "Unknown Artist" : choice.FolderArtist,
+                choice.Album, PathHelper.FileTitle(choice.Title, choice.FileArtist), choice.Track, Path.GetExtension(currentPath));
+            var dir = Path.GetDirectoryName(target);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            var sibling = Directory.EnumerateFiles(dir)
+                .FirstOrDefault(file => AudioExtensions.Contains(Path.GetExtension(file))
+                    && !string.Equals(Path.GetFullPath(file), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase));
+            if (sibling is null) return;
+
+            var facts = TagWriterExtras.ReadFacts(sibling, tagsAreEvidence: true);
+            if (SongIdentity.Key(facts.Album) != SongIdentity.Key(song.Album)) return;
+            var albumArtist = song.AlbumArtist ?? song.PrimaryArtist ?? song.Artist;
+            if (!string.IsNullOrEmpty(facts.AlbumArtist) && !string.IsNullOrEmpty(albumArtist)
+                && !SongIdentity.SameArtistName(facts.AlbumArtist, albumArtist)) return;
+
+            if (facts.Year is > 0) song.Year = facts.Year;
+            if (!string.IsNullOrEmpty(facts.Label)) song.Label = facts.Label;
+            if (!string.IsNullOrEmpty(facts.CatalogNumber)) song.CatalogNumber = facts.CatalogNumber;
+            if (!string.IsNullOrEmpty(facts.Barcode)) song.Barcode = facts.Barcode;
+            song.TagPlan?.Notes.Add($"album facts taken from the album folder's own '{Path.GetFileName(sibling)}'");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug("could not read the album folder's sibling for {Path}: {M}", currentPath, ex.Message);
+        }
+    }
+
+    /// <summary>Start measuring a landed file, beside identification, when ReplayGain is on.</summary>
+    private Task<Loudness?>? StartLoudness(string path)
+    {
+        var settings = MetadataSettingsValue;
+        if (!settings.ReplayGain) return null;
+        var meter = _serviceProvider.GetService<ILoudnessMeter>();
+        if (meter is null) return null;
+        return Task.Run(() => meter.MeasureAsync(path, settings.EffectiveReplayGainTimeoutSeconds, CancellationToken.None));
+    }
+
+    /// <summary>Wait for the measurement, which has its own cap, and set the song's ReplayGain.</summary>
+    private async Task ApplyLoudnessAsync(Song song, Task<Loudness?>? measurement, string path)
+    {
+        if (measurement is null) return;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Loudness? loudness = null;
+        try
+        {
+            loudness = await measurement;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug("loudness measurement failed for {Path}: {M}", path, ex.Message);
+        }
+        if (song.TagPlan is { } plan)
+        {
+            plan.StageSeconds["loudness"] = clock.Elapsed.TotalSeconds;
+            plan.IntegratedLufs = loudness?.IntegratedLufs;
+            plan.TruePeakDbfs = loudness?.TruePeakDbfs;
+        }
+        var tags = ReplayGainTags.ForTrack(loudness);
+        if (tags is null)
+        {
+            song.TagPlan?.Notes.Add("the loudness could not be measured, so the file has no ReplayGain");
+            return;
+        }
+        song.ReplayGainTrackGainDb = tags.GainDb;
+        song.ReplayGainTrackPeak = tags.Peak;
+    }
+
+    /// <summary>A source's own album tag beats nothing, and beats filing the track under its title.
+    /// Its compilation flag counts only for that album: a song the chooser filed elsewhere is not
+    /// a compilation because the file it came from was ripped from one.</summary>
     private static void FillAlbumFromFile(Song song, string filePath)
     {
         var (album, albumArtist, compilation) = TagWriterExtras.ReadAlbum(filePath);
-        if (compilation || IsVariousArtists(albumArtist)) song.IsCompilation = true;
+        var sameAlbum = string.IsNullOrWhiteSpace(song.Album) || string.IsNullOrWhiteSpace(album)
+            || SongIdentity.Key(song.Album) == SongIdentity.Key(album);
+        if (sameAlbum && (compilation || IsVariousArtists(albumArtist))) song.IsCompilation = true;
         if (!string.IsNullOrWhiteSpace(song.Album) || string.IsNullOrWhiteSpace(album)) return;
         song.Album = album.Trim();
         if (string.IsNullOrEmpty(song.AlbumArtist) && !string.IsNullOrWhiteSpace(albumArtist))
@@ -904,12 +1122,14 @@ public abstract class BaseDownloadService : IDownloadService
     {
         if (settings.Fallback == GenreFallbackSource.MusicBrainz)
         {
-            // The MusicBrainz option rides the AcoustID lookup's meta= response rather than a
-            // second client. Until that is wired up it behaves as Last.fm and says so, because
-            // a setting that appears to work and silently does nothing is worse than one that
-            // is missing.
+            // The release lookup already carries the genres people voted on for the chosen
+            // release. Two votes or more count, so one person's tag cannot name a genre. With
+            // no votes it behaves as Last.fm and says so, because a setting that appears to work
+            // and silently does nothing is worse than one that is missing.
+            var voted = song.TagPlan?.Details?.TopGenres() ?? [];
+            if (voted.Count > 0) return voted;
             Logger.LogInformation(
-                "MusicBrainz genres are not wired up yet; using Last.fm top tags for {Artist} - {Title}",
+                "MusicBrainz lists no voted genres for {Artist} - {Title}; using Last.fm top tags",
                 song.Artist, song.Title);
         }
 
@@ -1041,24 +1261,39 @@ public abstract class BaseDownloadService : IDownloadService
             if (!string.IsNullOrEmpty(song.Copyright))
                 tagFile.Tag.Copyright = song.Copyright;
             
-            var comments = new List<string>();
-            if (!string.IsNullOrEmpty(song.Isrc))
-                comments.Add($"ISRC: {song.Isrc}");
-            
-            if (comments.Count > 0)
-                tagFile.Tag.Comment = string.Join(" | ", comments);
-
             // What the fingerprint proved (#48), so no later pass has to identify this file
             // again. No album id: Navidrome groups albums by MUSICBRAINZ_ALBUMID before the
             // album name, so one track carrying it beside another without it splits an album.
             // The group id is written only when the album really is that release.
             if (!string.IsNullOrEmpty(song.MusicBrainzRecordingId))
                 TagWriterExtras.SetRecordingId(tagFile, song.MusicBrainzRecordingId);
-            if (!string.IsNullOrEmpty(song.MusicBrainzReleaseGroupId)
-                && Octo.Services.Fingerprint.VerificationResult.AlbumIsFromRelease(song))
-                tagFile.Tag.MusicBrainzReleaseGroupId = song.MusicBrainzReleaseGroupId;
-            if (song.MusicBrainzArtistIds.Count == 1) tagFile.Tag.MusicBrainzArtistId = song.MusicBrainzArtistIds[0];
+            var albumIsRelease = !string.IsNullOrEmpty(song.MusicBrainzReleaseGroupId)
+                && Octo.Services.Fingerprint.VerificationResult.AlbumIsFromRelease(song);
+            if (albumIsRelease) tagFile.Tag.MusicBrainzReleaseGroupId = song.MusicBrainzReleaseGroupId;
+            if (song.MusicBrainzArtistIds.Count > 0) TagWriterExtras.SetMulti(tagFile, TagFields.ArtistId, song.MusicBrainzArtistIds);
+            // The flag is album-level: when the chooser set the album, a peer's stale flag from
+            // the compilation the file was ripped from would file the studio album as one.
             if (song.IsCompilation) TagWriterExtras.SetCompilation(tagFile, true);
+            else if (song.TagPlan is { AlbumFromCandidate: true, Rehearsed: false }) TagWriterExtras.SetCompilation(tagFile, false);
+
+            // The rest of what a release is: its code, its label and catalogue number, its barcode,
+            // its kind and status, where and when it came out, and the ids that name it. The code
+            // has its own field now; the "ISRC: x" comment is no longer written, and a comment the
+            // file arrived with is left alone. Every setter skips an empty value.
+            TagWriterExtras.SetText(tagFile, TagFields.Isrc, SongIdentity.NormalizeIsrc(song.Isrc));
+            TagWriterExtras.SetText(tagFile, TagFields.Label, song.Label);
+            TagWriterExtras.SetText(tagFile, TagFields.CatalogNumber, song.CatalogNumber);
+            TagWriterExtras.SetText(tagFile, TagFields.Barcode, song.Barcode);
+            if (song.ReleaseType is { Length: > 0 } releaseType)
+                TagWriterExtras.SetMulti(tagFile, TagFields.ReleaseType, releaseType.Split("; ", StringSplitOptions.RemoveEmptyEntries));
+            TagWriterExtras.SetText(tagFile, TagFields.ReleaseStatus, song.ReleaseStatus);
+            TagWriterExtras.SetText(tagFile, TagFields.ReleaseCountry, song.ReleaseCountry);
+            TagWriterExtras.SetOriginalDate(tagFile, song.OriginalDate);
+            if (albumIsRelease) TagWriterExtras.SetReleaseTrackId(tagFile, song.MusicBrainzReleaseTrackId);
+            if (albumIsRelease) TagWriterExtras.SetMulti(tagFile, TagFields.AlbumArtistId, song.MusicBrainzAlbumArtistIds);
+            TagWriterExtras.SetText(tagFile, TagFields.FingerprintId, song.AcoustId);
+            TagWriterExtras.SetReplayGain(tagFile, song.ReplayGainTrackGainDb, song.ReplayGainTrackPeak,
+                song.ReplayGainAlbumGainDb, song.ReplayGainAlbumPeak);
             
             // One chain (#51) instead of one Deezer URL: Apple's master of the album, the Cover
             // Art Archive when a fingerprint named the release, the catalog's own cover, then

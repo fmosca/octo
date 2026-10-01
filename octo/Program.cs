@@ -246,6 +246,9 @@ builder.Services.AddHttpClient(Octo.Services.Fingerprint.MusicBrainzClient.Clien
 });
 builder.Services.AddSingleton<Octo.Services.Fingerprint.MusicBrainzClient>();
 
+builder.Services.AddSingleton<Octo.Services.Audio.ILoudnessMeter, Octo.Services.Audio.LoudnessMeter>();
+builder.Services.AddSingleton<Octo.Services.Tagging.ReleaseIdentifier>();
+builder.Services.AddSingleton<Octo.Services.Tagging.TagPreview>();
 builder.Services.AddSingleton<Octo.Services.Fingerprint.AudioFingerprinter>();
 builder.Services.AddSingleton<Octo.Services.Fingerprint.SpectrumAnalyzer>();
 

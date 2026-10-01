@@ -568,7 +568,8 @@ public sealed class DownloadPlacementTests : IDisposable
 
         public Task Write(string path, Song song) => WriteMetadataAsync(path, song, CancellationToken.None);
 
-        public Task Enrich(string path, Song song) => EnrichAsync(song, path, CancellationToken.None);
+        public Task Enrich(string path, Song song) =>
+            IdentifyAsync(song, new RequestedIdentity(song.Artist, song.Title, song.Album ?? "", song.Track), path, null, CancellationToken.None);
 
         public Task Sidecars(Song song, Placement placement, byte[]? cover) =>
             WriteSidecarsAsync(song, placement, cover, CancellationToken.None);

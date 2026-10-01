@@ -105,4 +105,65 @@ public class MetadataSettings
     /// Environment variable: LYRICS_WRITE_BESIDE_ALL
     /// </summary>
     public bool WriteLyricsBesideAllSongs { get; set; } = false;
+
+    /// <summary>
+    /// File a song that arrived without an album under the first release of its recording
+    /// (its original album), even when the file's own tags name a compilation or a later
+    /// pressing it was ripped from. Off keeps the file's own album when the source tagged one.
+    /// Environment variable: PREFER_ORIGINAL_ALBUM
+    /// </summary>
+    public bool PreferOriginalAlbum { get; set; } = true;
+
+    /// <summary>
+    /// The year a song shows is its recording's first release, not the pressing it was matched
+    /// to. A 2011 remaster of a 1991 album reads 1991. The pressing's own date stays in the
+    /// download's tag report. Off writes the pressing's date.
+    /// Environment variable: YEAR_FROM_ORIGINAL_RELEASE
+    /// </summary>
+    public bool YearFromOriginalRelease { get; set; } = true;
+
+    /// <summary>
+    /// Countries whose pressings win a tie, in order, as two-letter codes ("US, XW, GB").
+    /// Empty means no preference.
+    /// Environment variable: PREFERRED_COUNTRIES
+    /// </summary>
+    public string PreferredCountries { get; set; } = string.Empty;
+
+    public IReadOnlyList<string> EffectivePreferredCountries => (PreferredCountries ?? "")
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(code => code.ToUpperInvariant()).Where(code => code.Length == 2).Distinct().ToList();
+
+    /// <summary>
+    /// Ask the music database for the chosen release's label, catalogue number, barcode, status
+    /// and track ids (one request per download, about a second), and search it by name when
+    /// the fingerprint named nothing. Needs no key. Off tags from the fingerprint and the
+    /// catalog alone.
+    /// Environment variable: RELEASE_DETAILS_LOOKUP
+    /// </summary>
+    public bool ReleaseDetailsLookup { get; set; } = true;
+
+    /// <summary>
+    /// Measure each download's loudness and write ReplayGain track tags, which both Octo apps
+    /// and most players use to even out volume. Decodes the whole file once, beside the
+    /// lookups, so it rarely adds time.
+    /// Environment variable: REPLAYGAIN
+    /// </summary>
+    public bool ReplayGain { get; set; } = true;
+
+    /// <summary>
+    /// How long the loudness measurement may take before the download goes on without it.
+    /// A FLAC on local disk takes a few seconds; a slow mount can take far longer.
+    /// Environment variable: REPLAYGAIN_TIMEOUT_SECONDS
+    /// </summary>
+    public int ReplayGainTimeoutSeconds { get; set; } = 45;
+
+    public int EffectiveReplayGainTimeoutSeconds => Math.Clamp(ReplayGainTimeoutSeconds, 10, 300);
+
+    /// <summary>
+    /// Rehearse the release matching: work out what every download would be tagged as and show
+    /// it in Fetched songs, but write only what Octo wrote before. For trying the matching on
+    /// real downloads before trusting it.
+    /// Environment variable: TAG_REHEARSAL
+    /// </summary>
+    public bool TagRehearsal { get; set; } = false;
 }

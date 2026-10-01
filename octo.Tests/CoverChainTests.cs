@@ -346,6 +346,30 @@ public class CoverChainTests
         Assert.DoesNotContain(calls, url => url.Contains("deezer.example"));
     }
 
+    /// <summary>A barcode the chooser found asks Apple by barcode, never by search: one lookup,
+    /// then the master from the match it primed.</summary>
+    [Fact]
+    public async Task Resolve_ABarcodeOnTheSongPrimesApple_AndNoSearchIsMade()
+    {
+        var calls = new List<string>();
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("itunes.apple.com/lookup") && url.Contains("724384960629") => Json(ITunesAnswer(
+                ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/disc/100x100bb.jpg"))),
+            var url when url.Contains("/disc/5000x5000bb") => Picture(Jpeg(3000, 3000)),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        }, calls);
+        var song = new Song { Artist = "Daft Punk", Title = "One More Time", Album = "Discovery", Barcode = "0724384960629",
+            CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        var choice = await ResolverWithITunes(http, new FixedSource(Catalog)).ResolveAsync(song, null, CancellationToken.None);
+
+        Assert.Equal("iTunes", choice!.Source);
+        Assert.Equal((3000, 3000), CoverImage.Measure(choice.Bytes));
+        Assert.Single(calls, url => url.Contains("itunes.apple.com/lookup"));
+        Assert.DoesNotContain(calls, url => url.Contains("itunes.apple.com/search"));
+    }
+
     /// <summary>Another album by the same artist is a wrong tag, not a soft picture.</summary>
     [Fact]
     public async Task Resolve_AppleIsSkippedWhenNoReleaseHasTheAlbumsName()

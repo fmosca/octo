@@ -75,6 +75,10 @@ public sealed class DownloadCoverResolver
         // A compilation's album artist is nobody Apple would list it under.
         if (_itunes is not null && !song.IsCompilation)
         {
+            // A barcode the chooser found names one release outright, so Apple is asked by it
+            // first and the master lookup below answers from that match without a search.
+            if (song.Barcode is { Length: > 0 } barcode && !string.IsNullOrWhiteSpace(song.Album))
+                await _itunes.PrimeByBarcodeAsync([(song.PrimaryArtist ?? song.Artist, song.Album, barcode)], null, ct);
             var master = await _itunes.TryFetchAlbumMasterAsync(song.PrimaryArtist ?? song.Artist, song.Album, song.Title, ct);
             if (Offer(master, "iTunes")) return best;
         }

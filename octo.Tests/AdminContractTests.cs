@@ -1,6 +1,7 @@
 using System.Net;
 using System.Reflection;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Octo.Controllers;
 using Octo.Middleware;
 using Octo.Models.Settings;
@@ -250,4 +251,90 @@ public class AdminContractTests
 
     private static System.Text.Json.Nodes.JsonObject JsonNodeObject(string json) =>
         System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+
+    // ---- the tag preview cannot be pointed at any file ----------------------------------
+
+    /// <summary>With a session, a path that walks out of the music folder is refused before
+    /// anything is read; the tool cannot be used to read arbitrary files.</summary>
+    [Theory]
+    [InlineData("../../etc/passwd")]
+    [InlineData("C:\\Windows\\win.ini")]
+    [InlineData("/etc/passwd")]
+    public async Task TagPreview_PathOutsideTheMusicFolder_IsRefused(string path)
+    {
+        using var factory = new AdminWebFactory();
+        using var client = factory.CreateClient();
+        var token = factory.Services.GetRequiredService<Octo.Services.Admin.BrowseSessionStore>().Create("admin");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/tags/preview");
+        request.Headers.Add(AdminRequestGuard.HeaderName, "1");
+        request.Headers.Add("X-Octo-Browse-Token", token);
+        request.Content = System.Net.Http.Json.JsonContent.Create(new { path });
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("inside the music folder", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task TagPreview_NeitherAPathNorAName_IsRefused()
+    {
+        using var factory = new AdminWebFactory();
+        using var client = factory.CreateClient();
+        var token = factory.Services.GetRequiredService<Octo.Services.Admin.BrowseSessionStore>().Create("admin");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/tags/preview");
+        request.Headers.Add(AdminRequestGuard.HeaderName, "1");
+        request.Headers.Add("X-Octo-Browse-Token", token);
+        request.Content = System.Net.Http.Json.JsonContent.Create(new { artist = "Only an artist" });
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public void ResolveUnderRoot_RefusesDotDotRootedAndMissing_AcceptsAFileInside()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "octo-root-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, "Artist"));
+        var inside = Path.Combine(root, "Artist", "song.flac");
+        File.WriteAllBytes(inside, [1]);
+        var outside = Path.Combine(Path.GetTempPath(), "octo-outside-" + Guid.NewGuid().ToString("N") + ".flac");
+        File.WriteAllBytes(outside, [1]);
+        try
+        {
+            Assert.Equal(Path.GetFullPath(inside), AdminController.ResolveUnderRoot(inside, root));
+            Assert.Equal(Path.GetFullPath(inside), AdminController.ResolveUnderRoot(Path.Combine(root, "Artist", "..", "Artist", "song.flac"), root));
+            Assert.Null(AdminController.ResolveUnderRoot(Path.Combine(root, "..", Path.GetFileName(outside)), root));
+            Assert.Null(AdminController.ResolveUnderRoot(outside, root));
+            Assert.Null(AdminController.ResolveUnderRoot(Path.Combine(root, "Artist", "missing.flac"), root));
+            Assert.Null(AdminController.ResolveUnderRoot(root, root));
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); File.Delete(outside); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>A link inside the folder that points outside is refused. Skipped where the OS
+    /// will not let the test create one (Windows without developer mode).</summary>
+    [Fact]
+    public void ResolveUnderRoot_RefusesASymlink()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "octo-root-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var outside = Path.Combine(Path.GetTempPath(), "octo-outside-" + Guid.NewGuid().ToString("N") + ".flac");
+        File.WriteAllBytes(outside, [1]);
+        var link = Path.Combine(root, "link.flac");
+        try
+        {
+            try { File.CreateSymbolicLink(link, outside); }
+            catch (Exception) { return; }
+            Assert.Null(AdminController.ResolveUnderRoot(link, root));
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); File.Delete(outside); } catch { /* best effort */ }
+        }
+    }
 }

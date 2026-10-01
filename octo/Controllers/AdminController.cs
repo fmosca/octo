@@ -528,6 +528,61 @@ public class AdminController : ControllerBase
         return Ok(new { downloads = _history.GetRecent(200) });
     }
 
+    /// <summary>A file inside the music folder, or an artist and a title, to try the matching on.</summary>
+    public sealed record TagPreviewRequest(string? Path, string? Artist, string? Title, string? Album);
+
+    /// <summary>
+    /// How a song would be matched and tagged, without touching anything. Gated on the browse
+    /// sign-in like the other endpoints that read files, and a path is only ever a file inside
+    /// the music folder, resolved in full, with no link on the way.
+    /// </summary>
+    [HttpPost("tags/preview")]
+    public async Task<IActionResult> PreviewTags([FromBody] TagPreviewRequest request,
+        [FromHeader(Name = "X-Octo-Browse-Token")] string? token, CancellationToken ct)
+    {
+        if (!HasBrowseSession(token))
+            return Unauthorized(new { error = "Sign in with your Navidrome admin account first." });
+        if (HttpContext.RequestServices.GetService<Octo.Services.Tagging.TagPreview>() is not { } preview)
+            return StatusCode(503, new { error = "The matching is not available on this host." });
+
+        string? path = null;
+        if (!string.IsNullOrWhiteSpace(request.Path))
+        {
+            var root = _navIdentity.EffectiveDownloadPath(_config["Library:DownloadPath"] ?? "./downloads");
+            path = ResolveUnderRoot(request.Path, root);
+            if (path is null) return BadRequest(new { error = "The path must be a file inside the music folder." });
+        }
+        else if (string.IsNullOrWhiteSpace(request.Artist) || string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest(new { error = "Give a path inside the music folder, or an artist and a title." });
+
+        return Ok(await preview.PreviewAsync(path, request.Artist, request.Title, request.Album, ct));
+    }
+
+    /// <summary>
+    /// The full path of a file that really sits under the root: no ".." out of it, no path of
+    /// its own, and no link on the way, so the preview cannot be pointed at any other file.
+    /// </summary>
+    internal static string? ResolveUnderRoot(string candidate, string root)
+    {
+        try
+        {
+            var full = System.IO.Path.GetFullPath(candidate);
+            var rootFull = System.IO.Path.GetFullPath(root).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+            var relative = System.IO.Path.GetRelativePath(rootFull, full);
+            if (relative == "." || relative.StartsWith("..", StringComparison.Ordinal) || System.IO.Path.IsPathRooted(relative)) return null;
+
+            var info = new FileInfo(full);
+            if (!info.Exists || info.LinkTarget is not null) return null;
+            for (var dir = info.Directory; dir is not null && dir.FullName.Length > rootFull.Length; dir = dir.Parent)
+                if (dir.LinkTarget is not null) return null;
+            return full;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Every hearted download in flight or ended in the last half hour, everyone's, newest
     /// first. The rows the app reads through getAcquisitions, plus the provider key, and who
@@ -749,6 +804,13 @@ public class AdminController : ControllerBase
                 ["LyricsSources"] = _metadataOpts.CurrentValue.LyricsSources ?? "",
                 ["PreferWordTimedLyrics"] = _metadataOpts.CurrentValue.PreferWordTimedLyrics,
                 ["WriteLyricsBesideAllSongs"] = _metadataOpts.CurrentValue.WriteLyricsBesideAllSongs,
+                ["PreferOriginalAlbum"] = _metadataOpts.CurrentValue.PreferOriginalAlbum,
+                ["YearFromOriginalRelease"] = _metadataOpts.CurrentValue.YearFromOriginalRelease,
+                ["PreferredCountries"] = _metadataOpts.CurrentValue.PreferredCountries ?? "",
+                ["ReleaseDetailsLookup"] = _metadataOpts.CurrentValue.ReleaseDetailsLookup,
+                ["ReplayGain"] = _metadataOpts.CurrentValue.ReplayGain,
+                ["ReplayGainTimeoutSeconds"] = _metadataOpts.CurrentValue.ReplayGainTimeoutSeconds,
+                ["TagRehearsal"] = _metadataOpts.CurrentValue.TagRehearsal,
             },
             ["GeneratedPlaylists"] = new Dictionary<string, object>
             {
@@ -1476,6 +1538,13 @@ public class AdminController : ControllerBase
                 ["LyricsSources"] = _metadataOpts.CurrentValue.LyricsSources ?? "",
                 ["PreferWordTimedLyrics"] = _metadataOpts.CurrentValue.PreferWordTimedLyrics,
                 ["WriteLyricsBesideAllSongs"] = _metadataOpts.CurrentValue.WriteLyricsBesideAllSongs,
+                ["PreferOriginalAlbum"] = _metadataOpts.CurrentValue.PreferOriginalAlbum,
+                ["YearFromOriginalRelease"] = _metadataOpts.CurrentValue.YearFromOriginalRelease,
+                ["PreferredCountries"] = _metadataOpts.CurrentValue.PreferredCountries ?? "",
+                ["ReleaseDetailsLookup"] = _metadataOpts.CurrentValue.ReleaseDetailsLookup,
+                ["ReplayGain"] = _metadataOpts.CurrentValue.ReplayGain,
+                ["ReplayGainTimeoutSeconds"] = _metadataOpts.CurrentValue.ReplayGainTimeoutSeconds,
+                ["TagRehearsal"] = _metadataOpts.CurrentValue.TagRehearsal,
             },
             ["GeneratedPlaylists"] = new JsonObject
             {
@@ -1668,6 +1737,9 @@ public class AdminController : ControllerBase
             "Metadata:ReplaceVideoCovers", "Metadata:WriteCoverFile", "Metadata:EmbedFullSizeCovers",
             "Metadata:FetchLyrics", "Metadata:LyricsSources", "Metadata:PreferWordTimedLyrics",
             "Metadata:WriteLyricsBesideAllSongs",
+            "Metadata:PreferOriginalAlbum", "Metadata:YearFromOriginalRelease", "Metadata:PreferredCountries",
+            "Metadata:ReleaseDetailsLookup", "Metadata:ReplayGain", "Metadata:ReplayGainTimeoutSeconds",
+            "Metadata:TagRehearsal",
             "GeneratedPlaylists:Enabled", "GeneratedPlaylists:Genres", "GeneratedPlaylists:Decades",
             "GeneratedPlaylists:TrackCount", "GeneratedPlaylists:MaxPerArtist", "GeneratedPlaylists:CreateAt",
             "GeneratedPlaylists:RemoveBelow", "GeneratedPlaylists:MaxPlaylists", "GeneratedPlaylists:RefreshHours",

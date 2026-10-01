@@ -224,6 +224,8 @@ public class GenreBackfillEndpointTests
         // path, so both are gated the same way.
         { "GET", "/api/admin/library-actions" },
         { "GET", "/api/admin/library/resolve?id=abc" },
+        // The tag preview reads a file the caller names, so it is gated the same way.
+        { "POST", "/api/admin/tags/preview" },
     };
 
     [Theory]
