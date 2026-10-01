@@ -1343,16 +1343,41 @@ document.getElementById('genre-backfill-undo')?.addEventListener('click', async 
 });
 
 // ---- Upgrade cover art -----------------------------------------------------
-// The genre backfill's flow: preview, then apply what was previewed, with resume and undo.
+// Scan (reads the songs only), pick, then preview or upgrade the picked albums. Undo puts every
+// replaced cover back.
 
 let coverUpgradePoll = null;
 let lastCoverRun = null;
-let coverScopeInitialised = false;
+let coverControlsInitialised = false;
+// The albums picked on the list, by id. Reset each time a run finishes with a new list.
+let coverPicked = new Set();
+let coverListRunId = null;
 
 const coverScopeLabels = { OctoDownloads: 'downloads Octo made', WholeLibrary: 'the whole library' };
+const coverResultWords = { soft: '', found: '', upgraded: 'upgraded', none: 'nothing larger' };
 
 function coverNote(message, kind = 'ok') {
   note(document.querySelector('#cover-upgrade-actions .genre-preset-actions'), message, kind);
+}
+
+function coverListRows(run) {
+  return run?.preview || [];
+}
+
+function renderCoverPicked(run) {
+  const rows = coverListRows(run);
+  const running = run.status === 'Running';
+  const listed = !running && !run.undo && rows.length > 0 && run.mode !== 'Apply';
+  const count = rows.filter(row => coverPicked.has(row.id)).length;
+  const label = document.getElementById('cover-upgrade-picked');
+  if (label) label.textContent = listed ? `${count} of ${rows.length} album${rows.length === 1 ? '' : 's'} picked` : 'Nothing picked';
+  document.getElementById('cover-upgrade-preview').hidden = !listed || count === 0;
+  document.getElementById('cover-upgrade-apply').hidden = !listed || count === 0;
+  const all = document.getElementById('cover-pick-all');
+  if (all) {
+    all.checked = count > 0 && count === rows.length;
+    all.indeterminate = count > 0 && count < rows.length;
+  }
 }
 
 function renderCoverUpgrade(run) {
@@ -1361,73 +1386,83 @@ function renderCoverUpgrade(run) {
   if (!status || !results) return;
 
   const running = run.status === 'Running';
-  const previewed = run.status === 'Completed' && run.dryRun && !run.undo;
-  const scopeSelect = document.getElementById('cover-upgrade-scope');
-  const folderBox = document.getElementById('cover-upgrade-folder');
-  const changedSince = previewed && ((scopeSelect && scopeSelect.value !== run.scope)
-    || (folderBox && folderBox.checked !== run.folderCovers));
-
   document.getElementById('cover-upgrade-cancel').hidden = !running;
-  document.getElementById('cover-upgrade-apply').hidden = !previewed || run.upgraded === 0 || changedSince;
   document.getElementById('cover-upgrade-resume').hidden = !run.canResume;
   document.getElementById('cover-upgrade-undo').hidden = !run.canUndo || running;
-  document.getElementById('cover-upgrade-preview').disabled = running;
+  document.getElementById('cover-upgrade-scan').disabled = running;
 
   if (run.status === 'Idle') {
     status.innerHTML = '';
     results.innerHTML = '';
+    renderCoverPicked(run);
     return;
   }
 
+  const verb = { Scan: 'Scanning', Preview: 'Previewing', Apply: 'Upgrading' }[run.mode] ?? 'Working';
+  const doneWord = { Scan: 'Scan finished', Preview: 'Preview finished', Apply: 'Upgrade finished' }[run.mode] ?? 'Finished';
   const label = run.undo
     ? ({ Running: 'Putting covers back', Completed: 'Covers put back' }[run.status] ?? run.status)
-    : ({
-      Running: run.dryRun ? 'Previewing' : 'Upgrading',
-      Completed: run.dryRun ? 'Preview finished' : 'Finished',
-      Cancelled: 'Stopped',
-      Interrupted: 'Interrupted',
-      Failed: 'Stopped',
-    }[run.status] ?? run.status);
+    : ({ Running: verb, Completed: doneWord, Cancelled: 'Stopped', Interrupted: 'Interrupted', Failed: 'Stopped' }[run.status] ?? run.status);
 
-  const counts = run.undo
-    ? [`${run.processed} of ${run.total}`, `${run.files} put back`, run.failed ? `${run.failed} failed` : null]
-    : [
-      `${run.processed} of ${run.total} folders`,
-      `${run.upgraded} album${run.upgraded === 1 ? '' : 's'} ${run.dryRun ? 'would get' : 'got'} a larger cover`,
-      `${run.files} song${run.files === 1 ? '' : 's'}`,
-      run.kept ? `${run.kept} already sharpest` : null,
-      run.failed ? `${run.failed} failed` : null,
-    ];
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  let counts;
+  if (run.undo) counts = [`${run.processed} of ${run.total}`, `${run.files} put back`, run.failed ? `${run.failed} failed` : null];
+  else if (run.mode === 'Scan') counts = [
+    `${run.processed} of ${run.total} folders`,
+    `${plural(run.soft, 'album')} under ${run.smallerThan} px`,
+    run.kept ? `${run.kept} already sharp` : null,
+  ];
+  else counts = [
+    `${run.processed} of ${run.total} folders`,
+    `${plural(run.upgraded, 'album')} ${run.mode === 'Apply' ? 'upgraded' : 'would get a larger cover'}`,
+    run.mode === 'Apply' ? plural(run.files, 'song') : null,
+    run.kept ? `${run.kept} with nothing larger` : null,
+    run.failed ? `${run.failed} failed` : null,
+  ];
   status.innerHTML = `
     <div class="set-info">
       <div class="set-info-t">${esc(label)}</div>
       <div class="set-info-d">${esc(counts.filter(Boolean).join(' · '))}${run.reason ? `. ${esc(run.reason)}` : ''}</div>
     </div>`;
 
+  // A fresh list from a finished run: pick what is worth upgrading.
+  const rows = coverListRows(run);
+  if (!running && run.runId !== coverListRunId) {
+    coverListRunId = run.runId;
+    coverPicked = new Set(rows.filter(row => row.result === 'soft' || row.result === 'found').map(row => row.id));
+  }
+
   const lastError = run.errors?.length ? `<div class="field-error" role="alert">${esc(run.errors[run.errors.length - 1])}</div>` : '';
-  if (!run.preview?.length) {
+  if (!rows.length || run.undo) {
     results.innerHTML = lastError;
+    renderCoverPicked(run);
     return;
   }
 
   const px = side => (side > 0 ? `${side} px` : 'none');
-  const rows = run.preview.slice(0, 200).map(change => `
-    <div class="config-row genre-change-row">
-      <span class="key">${esc(change.artist)} · ${esc(change.album || '(no album)')}</span>
-      <span class="value">${esc(px(change.fromSide))}</span>
-      <span class="value">${esc(px(change.toSide))}</span>
-      <span class="value">${esc(change.source)}${change.folderCover ? ' + folder' : ''}</span>
+  const pickable = !running && run.mode !== 'Apply';
+  const shown = rows.slice(0, 2000);
+  const body = shown.map(row => `
+    <div class="config-row cover-row">
+      <span>${pickable ? `<input type="checkbox" data-cover-pick="${esc(row.id)}" aria-label="Pick ${esc(row.album || row.artist)}"${coverPicked.has(row.id) ? ' checked' : ''}>` : ''}</span>
+      <span class="cover-thumb-box"><img class="cover-thumb" loading="lazy" alt="" src="/api/admin/covers/upgrade/thumb/${encodeURIComponent(row.id)}" onerror="this.removeAttribute('src')"></span>
+      <span class="cover-album">${esc(row.artist)} · ${esc(row.album || '(no album)')}<span class="cover-folder">${esc(row.folder)}</span></span>
+      <span class="value">${esc(px(row.fromSide))}</span>
+      <span class="value${row.toSide ? '' : ' cover-none'}">${row.result === 'soft' ? '' : esc(px(row.toSide))}</span>
+      <span class="value">${esc([row.source, row.folderCover && row.result !== 'soft' ? '+ folder' : '', coverResultWords[row.result] || ''].filter(Boolean).join(' '))}</span>
     </div>`).join('');
 
   results.innerHTML = `
     <div class="config-table">
-      <div class="config-row config-row-head genre-change-row">
-        <span>Album</span><span>Now</span><span>Found</span><span>From</span>
+      <div class="config-row config-row-head cover-row">
+        <span>${pickable ? '<input type="checkbox" id="cover-pick-all" aria-label="Pick every album">' : ''}</span>
+        <span></span><span>Album</span><span>Now</span><span>Found</span><span>From</span>
       </div>
-      ${rows}
+      ${body}
     </div>
-    ${run.preview.length > 200 ? `<p class="set-info-d">Showing the first 200 of ${run.preview.length} albums.</p>` : ''}
+    ${rows.length > shown.length ? `<p class="set-info-d">Showing ${shown.length} of ${rows.length} albums; picking every album includes the rest.</p>` : ''}
     ${lastError}`;
+  renderCoverPicked(run);
 }
 
 async function loadCoverUpgrade(retry = false) {
@@ -1437,21 +1472,24 @@ async function loadCoverUpgrade(retry = false) {
   const previous = lastCoverRun;
   lastCoverRun = run;
 
-  // Open on what a finished preview covered, so the upgrade it offers is the one it describes.
-  if (!coverScopeInitialised && run.status === 'Completed' && run.dryRun) {
-    const scopeSelect = document.getElementById('cover-upgrade-scope');
-    const folderBox = document.getElementById('cover-upgrade-folder');
-    if (scopeSelect && run.scope) scopeSelect.value = run.scope;
-    if (folderBox) folderBox.checked = run.folderCovers;
+  // Open on the settings of the list on screen, so what is picked is what it describes.
+  if (!coverControlsInitialised && run.status !== 'Idle' && !run.undo) {
+    const scope = document.getElementById('cover-upgrade-scope');
+    const folder = document.getElementById('cover-upgrade-folder');
+    const threshold = document.getElementById('cover-upgrade-threshold');
+    if (scope && run.scope) scope.value = run.scope;
+    if (folder) folder.checked = run.folderCovers;
+    if (threshold && run.smallerThan) threshold.value = String(run.smallerThan);
   }
-  coverScopeInitialised = true;
+  coverControlsInitialised = true;
   renderCoverUpgrade(run);
 
   if (previous?.status === 'Running' && run.status !== 'Running') {
-    coverNote(run.undo
-      ? `Undo ${run.status === 'Completed' ? 'finished' : run.status.toLowerCase()}: ${run.files} song(s) put back.`
-      : `${run.dryRun ? 'Preview' : 'Upgrade'} ${run.status === 'Completed' ? 'finished' : run.status.toLowerCase()}: ${run.upgraded} album(s).`,
-      run.status === 'Failed' ? 'error' : 'ok');
+    const what = run.undo ? `Undo: ${run.files} song(s) put back`
+      : run.mode === 'Scan' ? `Scan: ${run.soft} soft album(s)`
+      : run.mode === 'Preview' ? `Preview: ${run.upgraded} album(s) would get a larger cover`
+      : `Upgrade: ${run.upgraded} album(s), ${run.files} song(s)`;
+    coverNote(`${what}${run.status === 'Completed' ? '.' : ` (${run.status.toLowerCase()}).`}`, run.status === 'Failed' ? 'error' : 'ok');
   }
 
   if (run.status === 'Running') {
@@ -1463,43 +1501,53 @@ async function loadCoverUpgrade(retry = false) {
   return run;
 }
 
-async function startCoverUpgrade(dryRun, previewed = null) {
-  const scope = previewed?.scope ?? document.getElementById('cover-upgrade-scope')?.value ?? 'OctoDownloads';
-  const folderCovers = previewed?.folderCovers ?? document.getElementById('cover-upgrade-folder')?.checked ?? true;
-
-  let confirmPath = null;
-  if (scope === 'WholeLibrary' && !dryRun) {
-    const current = await loadCoverUpgrade();
-    const expected = current?.musicPath ?? '';
-    confirmPath = prompt(
-      `This rewrites the cover in songs under:\n\n${expected}\n\n` +
-      'including music Octo never downloaded. Type that path exactly to continue.');
-    if (confirmPath === null) return;
-  }
+async function startCoverUpgrade(mode, albums = null) {
+  const run = lastCoverRun;
+  // A pick belongs to the list it was made on, so it runs with that list's settings.
+  const scope = albums ? run.scope : (document.getElementById('cover-upgrade-scope')?.value ?? 'OctoDownloads');
+  const folderCovers = albums ? run.folderCovers : (document.getElementById('cover-upgrade-folder')?.checked ?? true);
+  const smallerThan = albums ? run.smallerThan : Number(document.getElementById('cover-upgrade-threshold')?.value || 1000);
 
   const response = await genreBackfillFetch('/api/admin/covers/upgrade', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scope, dryRun, folderCovers, confirm: confirmPath }),
+    body: JSON.stringify({ scope, mode, folderCovers, smallerThan, albums }),
   }, true);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     coverNote(body.error || `Could not start: HTTP ${response.status}`, 'error');
     return;
   }
-  coverNote(dryRun ? 'Previewing. Nothing is being written.' : 'Upgrading covers.', 'info');
+  coverNote({ Scan: 'Scanning. Nothing is looked up or written.', Preview: 'Looking the picked albums up. Nothing is written.', Apply: 'Upgrading the picked albums.' }[mode], 'info');
   await loadCoverUpgrade();
 }
 
-document.getElementById('cover-upgrade-preview')?.addEventListener('click', () => startCoverUpgrade(true));
-document.getElementById('cover-upgrade-scope')?.addEventListener('change', () => { if (lastCoverRun) renderCoverUpgrade(lastCoverRun); });
-document.getElementById('cover-upgrade-folder')?.addEventListener('change', () => { if (lastCoverRun) renderCoverUpgrade(lastCoverRun); });
+function pickedCoverIds() {
+  return coverListRows(lastCoverRun).filter(row => coverPicked.has(row.id)).map(row => row.id);
+}
+
+document.getElementById('cover-upgrade-scan')?.addEventListener('click', () => startCoverUpgrade('Scan'));
+document.getElementById('cover-upgrade-results')?.addEventListener('change', event => {
+  const box = event.target;
+  if (!(box instanceof HTMLInputElement) || !lastCoverRun) return;
+  if (box.id === 'cover-pick-all') {
+    coverPicked = box.checked ? new Set(coverListRows(lastCoverRun).map(row => row.id)) : new Set();
+    document.querySelectorAll('[data-cover-pick]').forEach(other => { other.checked = box.checked; });
+  } else if (box.dataset.coverPick) {
+    if (box.checked) coverPicked.add(box.dataset.coverPick); else coverPicked.delete(box.dataset.coverPick);
+  }
+  renderCoverPicked(lastCoverRun);
+});
+document.getElementById('cover-upgrade-preview')?.addEventListener('click', () => {
+  const ids = pickedCoverIds();
+  if (ids.length) startCoverUpgrade('Preview', ids);
+});
 document.getElementById('cover-upgrade-apply')?.addEventListener('click', async () => {
-  const run = await loadCoverUpgrade();
-  if (!run) return;
-  const scopeLabel = coverScopeLabels[run.scope] ?? run.scope;
-  if (!confirm(`Put a larger cover in ${run.files} song(s) across ${run.upgraded} album(s) in ${scopeLabel}? Every cover replaced is kept for Undo.`)) return;
-  await startCoverUpgrade(false, run);
+  const ids = pickedCoverIds();
+  if (!ids.length || !lastCoverRun) return;
+  const scopeLabel = coverScopeLabels[lastCoverRun.scope] ?? lastCoverRun.scope;
+  if (!confirm(`Look up and put a larger cover in ${ids.length} album(s) from ${scopeLabel}? An album only changes when a clearly larger cover turns up, and every cover replaced is kept for Undo.`)) return;
+  await startCoverUpgrade('Apply', ids);
 });
 document.getElementById('cover-upgrade-cancel')?.addEventListener('click', async () => {
   const response = await genreBackfillFetch('/api/admin/covers/upgrade/cancel', { method: 'POST' });
@@ -1513,7 +1561,7 @@ document.getElementById('cover-upgrade-cancel')?.addEventListener('click', async
 });
 document.getElementById('cover-upgrade-resume')?.addEventListener('click', async () => {
   const run = lastCoverRun;
-  if (run && !run.dryRun && !confirm(`Resume upgrading from folder ${run.processed + 1} of ${run.total}?`)) return;
+  if (run && run.mode === 'Apply' && !confirm(`Resume upgrading from folder ${run.processed + 1} of ${run.total}?`)) return;
   const response = await genreBackfillFetch('/api/admin/covers/upgrade/resume', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { coverNote(body.error || 'Could not resume.', 'error'); return; }

@@ -20,11 +20,31 @@ public enum CoverUpgradeScope
 
 public enum CoverUpgradeStatus { Idle, Running, Completed, Cancelled, Interrupted, Failed }
 
-public sealed record CoverUpgradeRequest(CoverUpgradeScope Scope, bool DryRun, bool FolderCovers, bool Undo = false);
+public enum CoverUpgradeMode
+{
+    /// <summary>Reads the songs only, and lists every album whose cover is smaller than asked.
+    /// No lookups and no writes, so it is quick even over a whole library.</summary>
+    Scan,
+    /// <summary>Looks the albums up and lists what a larger cover would replace. Writes nothing.</summary>
+    Preview,
+    /// <summary>Looks up and writes.</summary>
+    Apply,
+}
 
-/// <summary>One album the run upgraded, or would.</summary>
-public sealed record CoverUpgradeChange(string Folder, string Artist, string? Album, int FromSide, int ToSide,
-    string Source, int Files, bool FolderCover);
+/// <summary>
+/// One run. <paramref name="Albums"/> is the albums picked from the last run's list, by id;
+/// null means every album in scope whose cover is smaller than <paramref name="SmallerThan"/>.
+/// </summary>
+public sealed record CoverUpgradeRequest(CoverUpgradeScope Scope, CoverUpgradeMode Mode, bool FolderCovers,
+    int SmallerThan = CoverUpgradeWorker.DefaultSmallerThan, IReadOnlyList<string>? Albums = null, bool Undo = false);
+
+/// <summary>
+/// One album on the list. Result says what became of it: <c>soft</c> (a scan found its cover
+/// small), <c>found</c> (a preview found a larger one), <c>upgraded</c> (written), or
+/// <c>none</c> (looked up, nothing clearly larger).
+/// </summary>
+public sealed record CoverUpgradeChange(string Id, string Folder, string Artist, string? Album, int FromSide, int ToSide,
+    string? Source, int Files, bool FolderCover, string Result, string? FirstFile = null);
 
 /// <summary>One folder to go through. Files is null for "every song in it".</summary>
 public sealed record CoverUpgradeItem(string Folder, List<string>? Files);
@@ -34,8 +54,11 @@ public sealed class CoverUpgradeRun
     public string RunId { get; set; } = "";
     public CoverUpgradeStatus Status { get; set; } = CoverUpgradeStatus.Idle;
     public CoverUpgradeScope Scope { get; set; }
-    public bool DryRun { get; set; } = true;
+    public CoverUpgradeMode Mode { get; set; } = CoverUpgradeMode.Scan;
     public bool FolderCovers { get; set; } = true;
+    public int SmallerThan { get; set; } = CoverUpgradeWorker.DefaultSmallerThan;
+    /// <summary>The album ids this run was limited to, or null for every album in scope.</summary>
+    public List<string>? Selected { get; set; }
     public bool FullSize { get; set; }
     public bool Undo { get; set; }
     public DateTime? StartedUtc { get; set; }
@@ -43,6 +66,8 @@ public sealed class CoverUpgradeRun
     /// <summary>Folders in the queue.</summary>
     public int Total { get; set; }
     public int Processed { get; set; }
+    /// <summary>Albums a scan found with a cover smaller than asked.</summary>
+    public int Soft { get; set; }
     /// <summary>Albums whose cover got (or would get) larger.</summary>
     public int Upgraded { get; set; }
     /// <summary>Albums already as sharp as anything found, or with nothing found.</summary>
@@ -58,6 +83,9 @@ public sealed class CoverUpgradeRun
     public List<CoverUpgradeItem> Queue { get; set; } = [];
 
     [JsonIgnore]
+    public bool DryRun => Mode != CoverUpgradeMode.Apply;
+
+    [JsonIgnore]
     public bool CanResume => Status is CoverUpgradeStatus.Cancelled or CoverUpgradeStatus.Interrupted
         && !Undo && Cursor < Queue.Count;
 }
@@ -67,7 +95,9 @@ public sealed class CoverUpgradeRun
 public sealed class CoverUpgradeStore : IDisposable
 {
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(10);
-    public const int MaxPreviewRows = 500;
+    /// <summary>Enough for a scan of a large library to list every soft album, so any of them can
+    /// be picked; about 250 bytes a row.</summary>
+    public const int MaxPreviewRows = 5000;
     private const int MaxErrors = 20;
 
     private readonly string? _path;
@@ -263,9 +293,11 @@ public sealed class CoverUpgradeJournal
 /// it. Brandon's ask, 2026-10-01: "go through your artwork and grab the highest quality for
 /// each one to embed all of your songs".
 ///
-/// One folder at a time, its songs grouped by album. An album is changed only when the cover
-/// found is clearly larger than the one its songs carry, and only the front cover is replaced;
-/// other pictures stay. A preview run looks everything up and writes nothing. A real run keeps
+/// Three steps, Brandon's shape for it (2026-10-01): a scan reads the songs only and lists every
+/// album whose cover is smaller than asked; he picks all of them or some; a preview of the
+/// picked ones looks them up, and an upgrade writes. One folder at a time, its songs grouped by
+/// album. An album is changed only when the cover found is clearly larger than the one its
+/// songs carry, and only the front cover is replaced; other pictures stay. A real run keeps
 /// every replaced picture first, so Undo can put it all back. cover.jpg and folder.jpg beside
 /// an album are what Navidrome shows before the art inside the files, so they are upgraded too
 /// when asked (JPEG only; a PNG or WebP one is left and reported).
@@ -274,6 +306,10 @@ public sealed class CoverUpgradeWorker : BackgroundService
 {
     /// <summary>A found cover must be this much larger to be worth a rewrite.</summary>
     internal const double MinimumGain = 1.2;
+
+    /// <summary>What counts as a soft cover unless the dashboard says otherwise: under the
+    /// catalog's own 1000 px.</summary>
+    public const int DefaultSmallerThan = 1000;
 
     /// <summary>Apple asks for about 20 searches a minute; one album is one search.</summary>
     internal TimeSpan PauseBetweenAlbums { get; set; } = TimeSpan.FromSeconds(3);
@@ -354,20 +390,25 @@ public sealed class CoverUpgradeWorker : BackgroundService
     private async Task RunAsync(CoverUpgradeRequest request, CancellationToken stoppingToken)
     {
         var previous = _store.Current;
-        var resuming = previous.CanResume && previous.Scope == request.Scope && previous.DryRun == request.DryRun
-            && previous.FolderCovers == request.FolderCovers;
+        var selected = request.Albums?.Distinct(StringComparer.Ordinal).ToList();
+        var resuming = previous.CanResume && previous.Scope == request.Scope && previous.Mode == request.Mode
+            && previous.FolderCovers == request.FolderCovers && previous.SmallerThan == request.SmallerThan
+            && (previous.Selected ?? []).SequenceEqual(selected ?? [], StringComparer.Ordinal)
+            && (previous.Selected is null) == (selected is null);
         if (resuming)
             _store.Update(run => { run.Status = CoverUpgradeStatus.Running; run.Reason = null; });
         else
         {
-            var queue = await EnumerateAsync(request.Scope);
+            var queue = selected is null ? await EnumerateAsync(request.Scope) : QueueOf(previous, selected);
             _store.Replace(new CoverUpgradeRun
             {
                 RunId = Guid.NewGuid().ToString("N")[..12],
                 Status = CoverUpgradeStatus.Running,
                 Scope = request.Scope,
-                DryRun = request.DryRun,
+                Mode = request.Mode,
                 FolderCovers = request.FolderCovers,
+                SmallerThan = request.SmallerThan,
+                Selected = selected,
                 FullSize = _settings.CurrentValue.EmbedFullSizeCovers,
                 StartedUtc = DateTime.UtcNow,
                 Total = queue.Count,
@@ -375,8 +416,9 @@ public sealed class CoverUpgradeWorker : BackgroundService
             });
         }
         var current = _store.Current;
-        _logger.LogInformation("Cover upgrade {Mode}: {Count} folder(s) from {Cursor}, scope {Scope}",
-            current.DryRun ? "preview" : "run", current.Total, current.Cursor, current.Scope);
+        _logger.LogInformation("Cover upgrade {Mode}: {Count} folder(s) from {Cursor}, scope {Scope}, {Picked}",
+            current.Mode, current.Total, current.Cursor, current.Scope,
+            current.Selected is null ? "every album" : $"{current.Selected.Count} picked album(s)");
 
         for (var index = current.Cursor; index < current.Queue.Count; index++)
         {
@@ -425,13 +467,53 @@ public sealed class CoverUpgradeWorker : BackgroundService
             run.FinishedUtc = DateTime.UtcNow;
         });
         var done = _store.Current;
-        _logger.LogInformation("Cover upgrade {Mode} finished: {Upgraded} album(s), {Files} song(s), {Kept} kept, {Failed} failed",
-            done.DryRun ? "preview" : "run", done.Upgraded, done.Files, done.Kept, done.Failed);
+        _logger.LogInformation("Cover upgrade {Mode} finished: {Soft} soft, {Upgraded} larger, {Files} song(s), {Kept} kept, {Failed} failed",
+            done.Mode, done.Soft, done.Upgraded, done.Files, done.Kept, done.Failed);
         if (!done.DryRun && done.Files > 0) await RescanAsync();
     }
 
     private sealed record SongFile(string Path, string Artist, string? Album, string? Title,
         string? ReleaseId, string? ReleaseGroupId, int Side);
+
+    /// <summary>The folders behind the picked albums, from the list they were picked from, keeping
+    /// each folder's own file list (Octo's downloads only touch Octo's files).</summary>
+    private static List<CoverUpgradeItem> QueueOf(CoverUpgradeRun previous, IReadOnlyCollection<string> ids)
+    {
+        var picked = ids.ToHashSet(StringComparer.Ordinal);
+        var files = new Dictionary<string, List<string>?>(StringComparer.Ordinal);
+        foreach (var item in previous.Queue) files.TryAdd(item.Folder, item.Files);
+        return previous.Preview
+            .Where(row => picked.Contains(row.Id))
+            .Select(row => row.Folder)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(folder => folder, StringComparer.Ordinal)
+            .Select(folder => new CoverUpgradeItem(folder, files.GetValueOrDefault(folder)))
+            .ToList();
+    }
+
+    /// <summary>A stable id for one album in one folder, so a pick survives from one run to the next.</summary>
+    internal static string AlbumId(string folder, string albumKey) =>
+        Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(folder + "\u0000" + albumKey)))[..16]
+            .ToLowerInvariant();
+
+    /// <summary>A small copy of the cover an album on the list has now, for the dashboard.</summary>
+    public byte[]? Thumbnail(string id)
+    {
+        var row = _store.Current.Preview.FirstOrDefault(r => r.Id == id);
+        if (row?.FirstFile is not { } path || !File.Exists(path)) return null;
+        try
+        {
+            using var file = TagLib.File.Create(path);
+            var bytes = FrontOf(file.Tag.Pictures)?.Data?.Data;
+            if (bytes is not { Length: > 0 } && FolderCover(row.Folder, quiet: true) is { } folderFile)
+                bytes = File.ReadAllBytes(folderFile.Path);
+            return bytes is { Length: > 0 } ? CoverImage.FitWithin(bytes, 160) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     /// <summary>True when it asked the sources anything, so the run should pause after it.</summary>
     private async Task<bool> ProcessFolderAsync(CoverUpgradeItem item, CoverUpgradeRun run, CancellationToken ct)
@@ -448,21 +530,45 @@ public sealed class CoverUpgradeWorker : BackgroundService
         }
 
         var looked = false;
+        var picked = run.Selected?.ToHashSet(StringComparer.Ordinal);
         // An album without a name is matched song by song, as a single.
         foreach (var album in songs.GroupBy(song => string.IsNullOrWhiteSpace(song.Album)
                      ? "\u0001" + song.Path
                      : $"{SongIdentity.Key(song.Artist)}|{SongIdentity.Key(song.Album)}"))
         {
             if (ct.IsCancellationRequested || _cancel) break;
+            var id = AlbumId(item.Folder, album.Key);
+            if (picked is not null && !picked.Contains(id)) continue;
             var first = album.First();
             var have = album.Min(song => song.Side);
             var folderCover = run.FolderCovers && album.Count() == songs.Count ? FolderCover(item.Folder) : null;
+            var shown = Math.Min(have, folderCover?.Side ?? have);
+
+            // A picked album is looked up whatever its size: it was picked.
+            if (picked is null && shown >= run.SmallerThan)
+            {
+                _store.Update(r => r.Kept++);
+                continue;
+            }
+
+            if (run.Mode == CoverUpgradeMode.Scan)
+            {
+                var soft = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, 0, null,
+                    album.Count(), folderCover is not null, "soft", first.Path);
+                _store.Update(r =>
+                {
+                    r.Soft++;
+                    if (r.Preview.Count < CoverUpgradeStore.MaxPreviewRows) r.Preview.Add(soft);
+                });
+                continue;
+            }
+
             if (looked && PauseBetweenAlbums > TimeSpan.Zero) await Task.Delay(PauseBetweenAlbums, ct);
             looked = true;
 
             var found = await _finder.FindAsync(new AlbumCoverQuery(first.Artist, first.Album, first.Title,
-                album.Select(s => s.ReleaseId).FirstOrDefault(id => !string.IsNullOrEmpty(id)),
-                album.Select(s => s.ReleaseGroupId).FirstOrDefault(id => !string.IsNullOrEmpty(id))), ct);
+                album.Select(s => s.ReleaseId).FirstOrDefault(rid => !string.IsNullOrEmpty(rid)),
+                album.Select(s => s.ReleaseGroupId).FirstOrDefault(rid => !string.IsNullOrEmpty(rid))), ct);
 
             var upgradeFiles = found is not null
                 ? album.Where(song => found.Side >= song.Side * MinimumGain && found.Side > song.Side).ToList()
@@ -471,7 +577,14 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 && found.Side >= fc.Side * MinimumGain && found.Side > fc.Side;
             if (found is null || (upgradeFiles.Count == 0 && !upgradeFolder))
             {
-                _store.Update(r => r.Kept++);
+                // On a picked list, an album that stays as it is still says so.
+                var none = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, found?.Side ?? 0,
+                    found?.Source, 0, false, "none", first.Path);
+                _store.Update(r =>
+                {
+                    r.Kept++;
+                    if (picked is not null && r.Preview.Count < CoverUpgradeStore.MaxPreviewRows) r.Preview.Add(none);
+                });
                 continue;
             }
 
@@ -489,8 +602,8 @@ public sealed class CoverUpgradeWorker : BackgroundService
             }
             else written = upgradeFiles.Count;
 
-            var change = new CoverUpgradeChange(item.Folder, first.Artist, first.Album, Math.Min(have, folderCover?.Side ?? have),
-                found.Side, found.Source, written, upgradeFolder);
+            var change = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown,
+                found.Side, found.Source, written, upgradeFolder, run.DryRun ? "found" : "upgraded", first.Path);
             _store.Update(r =>
             {
                 r.Upgraded++;
@@ -586,7 +699,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
     /// <summary>The cover file Navidrome would show for this folder, when it is a JPEG this run
     /// may replace. A PNG or WebP one is reported and left, since a JPEG under its name would
     /// lie about what it is.</summary>
-    private (string Path, int Side)? FolderCover(string folder)
+    private (string Path, int Side)? FolderCover(string folder, bool quiet = false)
     {
         foreach (var pattern in new[] { "cover.*", "folder.*", "front.*" })
         {
@@ -596,7 +709,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
             if (!extension.Equals(".jpg", StringComparison.OrdinalIgnoreCase)
                 && !extension.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
             {
-                _store.Update(r => r.Errors.Add($"{file}: not a JPEG, left as it is"));
+                if (!quiet) _store.Update(r => r.Errors.Add($"{file}: not a JPEG, left as it is"));
                 return null;
             }
             var size = CoverImage.Measure(File.ReadAllBytes(file));
@@ -612,7 +725,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
         {
             RunId = Guid.NewGuid().ToString("N")[..12],
             Status = CoverUpgradeStatus.Running,
-            DryRun = false,
+            Mode = CoverUpgradeMode.Apply,
             Undo = true,
             StartedUtc = DateTime.UtcNow,
             Total = entries.Count,

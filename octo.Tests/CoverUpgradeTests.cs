@@ -120,7 +120,7 @@ public class CoverUpgradeTests : IDisposable
         var finder = new FixedFinder(new FoundCover(Jpeg(3000, 200), "iTunes", 3000));
         var (worker, store) = Worker(finder);
 
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: true, FolderCovers: true));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Preview, FolderCovers: true));
 
         var run = store.Current;
         Assert.Equal(CoverUpgradeStatus.Completed, run.Status);
@@ -143,14 +143,14 @@ public class CoverUpgradeTests : IDisposable
         var path = Song("Discovery", "One More Time", small, back);
         var (worker, store) = Worker(new FixedFinder(new FoundCover(Jpeg(3000, 200), "iTunes", 3000)));
 
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: false, FolderCovers: true));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: true));
 
         Assert.Equal(1500, FrontSide(path));
         var backAfter = Assert.Single(Pictures(path), p => p.Type == TagLib.PictureType.BackCover);
         Assert.Equal(back, backAfter.Data.Data);
         Assert.True(worker.CanUndo);
 
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: false, FolderCovers: true, Undo: true));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: true, Undo: true));
 
         Assert.Equal(CoverUpgradeStatus.Completed, store.Current.Status);
         var front = Assert.Single(Pictures(path), p => p.Type == TagLib.PictureType.FrontCover);
@@ -166,7 +166,7 @@ public class CoverUpgradeTests : IDisposable
         var path = Song("Discovery", "One More Time", Jpeg(200, 10));
         var (worker, store) = Worker(new FixedFinder(new FoundCover(Jpeg(2400, 200), "iTunes", 2400)), fullSize: true);
 
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: false, FolderCovers: true));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: true));
 
         Assert.Equal(2400, FrontSide(path));
     }
@@ -179,7 +179,7 @@ public class CoverUpgradeTests : IDisposable
         var sharpBefore = File.ReadAllBytes(sharp);
         var (worker, store) = Worker(new FixedFinder(new FoundCover(Jpeg(1100, 200), "Deezer", 1100)));
 
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: false, FolderCovers: true));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: true));
 
         Assert.Equal(sharpBefore, File.ReadAllBytes(sharp));
         Assert.Equal(1100, FrontSide(bare));
@@ -196,15 +196,74 @@ public class CoverUpgradeTests : IDisposable
         var found = new FoundCover(Jpeg(3000, 200), "iTunes", 3000);
 
         var (worker, store) = Worker(new FixedFinder(found));
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: false, FolderCovers: false));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: false));
         Assert.Equal(soft, File.ReadAllBytes(folderFile));
 
         (worker, store) = Worker(new FixedFinder(found));
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: false, FolderCovers: true));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: true));
         Assert.Equal((3000, 3000), CoverImage.Measure(File.ReadAllBytes(folderFile)));
         Assert.True(Assert.Single(store.Current.Preview).FolderCover);
 
-        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, DryRun: false, FolderCovers: true, Undo: true));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: true, Undo: true));
         Assert.Equal(soft, File.ReadAllBytes(folderFile));
+    }
+
+    [Fact]
+    public async Task AScanListsOnlySoftAlbumsAndLooksNothingUp()
+    {
+        Song("Discovery", "One More Time", Jpeg(300, 10));
+        Song("Homework", "Da Funk", Jpeg(1200, 10));
+        Song("Alive 1997", "Rollin and Scratchin", null);
+        var finder = new FixedFinder(new FoundCover(Jpeg(3000, 200), "iTunes", 3000));
+        var (worker, store) = Worker(finder);
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
+
+        var run = store.Current;
+        Assert.Equal(CoverUpgradeStatus.Completed, run.Status);
+        Assert.Empty(finder.Asked);
+        Assert.Equal((2, 1), (run.Soft, run.Kept));
+        Assert.Equal(["Alive 1997", "Discovery"], run.Preview.Select(r => r.Album!).Order().ToArray());
+        Assert.All(run.Preview, row => Assert.Equal("soft", row.Result));
+        Assert.Equal(0, run.Preview.Single(r => r.Album == "Alive 1997").FromSide);
+        Assert.NotNull(worker.Thumbnail(run.Preview.Single(r => r.Album == "Discovery").Id));
+        Assert.Null(worker.Thumbnail(run.Preview.Single(r => r.Album == "Alive 1997").Id));
+    }
+
+    [Fact]
+    public async Task OnlyThePickedAlbumsAreLookedUpAndUpgraded()
+    {
+        var discovery = Song("Discovery", "One More Time", Jpeg(300, 10));
+        var homework = Song("Homework", "Da Funk", Jpeg(300, 10));
+        var homeworkBefore = File.ReadAllBytes(homework);
+        var finder = new FixedFinder(new FoundCover(Jpeg(3000, 200), "iTunes", 3000));
+        var (worker, store) = Worker(finder);
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
+        var pick = store.Current.Preview.Single(r => r.Album == "Discovery").Id;
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply,
+            FolderCovers: true, Albums: [pick]));
+
+        Assert.Equal(1500, FrontSide(discovery));
+        Assert.Equal(homeworkBefore, File.ReadAllBytes(homework));
+        Assert.Equal(["Discovery"], finder.Asked.Select(q => q.Album!).ToArray());
+        var row = Assert.Single(store.Current.Preview);
+        Assert.Equal((pick, "upgraded", 300, 3000), (row.Id, row.Result, row.FromSide, row.ToSide));
+    }
+
+    [Fact]
+    public async Task APickedAlbumWithNothingLargerStaysOnTheListAsNone()
+    {
+        Song("Discovery", "One More Time", Jpeg(300, 10));
+        var (worker, store) = Worker(new FixedFinder(null));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
+        var pick = Assert.Single(store.Current.Preview).Id;
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Preview,
+            FolderCovers: true, Albums: [pick]));
+
+        var row = Assert.Single(store.Current.Preview);
+        Assert.Equal(("none", 0), (row.Result, row.Files));
+        Assert.Equal(1, store.Current.Kept);
     }
 }

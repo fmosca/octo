@@ -1115,6 +1115,20 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
   .genre-change-row > span:first-child { grid-column: 1 / -1; }
 }
 
+/* Upgrade cover art: a pickable list with each album's cover as it is now. */
+.cover-row { grid-template-columns: 24px 48px minmax(0, 2fr) 72px 72px minmax(0, 1fr); gap: var(--s-l); align-items: center; }
+.cover-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; cursor: pointer; }
+.cover-thumb-box { width: 48px; height: 48px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.cover-thumb { width: 48px; height: 48px; object-fit: cover; display: block; }
+.cover-row .cover-album { font-family: inherit; color: var(--ink-1); overflow-wrap: anywhere; }
+.cover-row .cover-folder { display: block; font-family: var(--mono); font-size: var(--t-meta); color: var(--text-faint); overflow-wrap: anywhere; }
+.cover-row .cover-none { color: var(--text-faint); }
+#cover-upgrade-results .config-table { max-height: 520px; overflow-y: auto; margin: 0 var(--s-xl) var(--s-xl); }
+@container (max-width: 640px) {
+  .cover-row { grid-template-columns: 24px 48px minmax(0, 1fr); }
+  .cover-row > span:nth-child(n + 4) { grid-column: 3; }
+}
+
 /* ── Ordered lists of rows: heart sources, lyrics sources, genre rules, library actions ── */
 .source-priority-list,
 .genre-mapping-list {

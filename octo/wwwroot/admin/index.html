@@ -944,18 +944,29 @@
         <div class="set-section">
           <div class="set-head">
             <h3 class="set-title">Upgrade cover art</h3>
-            <p class="set-desc">Finds the largest cover for each album and puts it in every song. Nothing is written until you have seen a preview.</p>
+            <p class="set-desc">Scan your songs for small or missing covers, pick all of them or just some, and Octo puts the largest cover it can find in every song of each album.</p>
           </div>
           <div class="set-card">
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Which songs</div>
                 <div class="set-info-d">Only downloads Octo made, or the whole library, your own rips and purchases included.</div>
-                <div class="set-info-more">A cover is taken only from a release with the same artist and album name: Apple's full-size master, the Cover Art Archive for the release your files name, or Deezer. It replaces a song's cover only when it is clearly larger. The whole library asks you to type the music path to confirm.</div>
               </div>
               <select class="set-input" id="cover-upgrade-scope">
                 <option value="OctoDownloads">Downloads Octo made</option>
                 <option value="WholeLibrary">The whole library</option>
+              </select>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Soft means smaller than</div>
+                <div class="set-info-d">An album counts as soft when its cover is under this size, or it has none.</div>
+              </div>
+              <select class="set-input" id="cover-upgrade-threshold">
+                <option value="600">600 px</option>
+                <option value="1000" selected>1000 px</option>
+                <option value="1500">1500 px</option>
+                <option value="3000">3000 px</option>
               </select>
             </div>
             <div class="set-row">
@@ -967,18 +978,22 @@
               <label class="switch"><input type="checkbox" id="cover-upgrade-folder" checked /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
             <div class="notice">
-              Every cover a run replaces is kept, so <strong>Undo</strong> puts them all back. Saving a song rewrites its whole tag block, so a field the tag library does not understand can still be lost; your own backup of the music folder is the full safety net. Lookups pause between albums, so a large library takes a while.
+              A cover is taken only from a release with the same artist and album name: Apple's full-size master, the Cover Art Archive for the release your files name, or Deezer. It replaces a song's cover only when the new one is clearly larger. Every cover replaced is kept, so <strong>Undo</strong> puts them all back. Saving a song rewrites its whole tag block, so your own backup of the music folder is the full safety net.
             </div>
             <div class="set-row">
-              <div class="set-info"><div class="set-info-t">Preview</div><div class="set-info-d">Looks up every album and shows which covers would get larger. Writes nothing.</div></div>
-              <button class="btn btn-ghost" type="button" id="cover-upgrade-preview">Preview upgrades</button>
+              <div class="set-info"><div class="set-info-t">Scan</div><div class="set-info-d">Reads your songs only. Looks nothing up and writes nothing, so it is quick.</div></div>
+              <button class="btn btn-ghost" type="button" id="cover-upgrade-scan">Scan for soft covers</button>
             </div>
             <div id="cover-upgrade-status" class="set-row stack"></div>
             <div id="cover-upgrade-results"></div>
             <div class="set-row" id="cover-upgrade-actions">
-              <div class="set-info"><div class="set-info-t">Upgrade</div><div class="set-info-d">Once a preview has finished, for the same songs it previewed. Embeds at 1500 px unless Embed full-size covers is on.</div></div>
+              <div class="set-info">
+                <div class="set-info-t" id="cover-upgrade-picked">Nothing picked</div>
+                <div class="set-info-d">Preview looks the picked albums up and writes nothing. Upgrade writes; it embeds at 1500 px unless Embed full-size covers is on. Lookups pause about 3 s per album.</div>
+              </div>
               <div class="genre-preset-actions">
-                <button class="btn" type="button" id="cover-upgrade-apply" hidden>Upgrade these covers</button>
+                <button class="btn btn-ghost" type="button" id="cover-upgrade-preview" hidden>Preview picked</button>
+                <button class="btn" type="button" id="cover-upgrade-apply" hidden>Upgrade picked</button>
                 <button class="btn btn-ghost" type="button" id="cover-upgrade-resume" hidden>Resume</button>
                 <button class="btn btn-ghost" type="button" id="cover-upgrade-cancel" hidden>Stop</button>
                 <button class="btn btn-ghost" type="button" id="cover-upgrade-undo" hidden>Undo upgrades</button>
