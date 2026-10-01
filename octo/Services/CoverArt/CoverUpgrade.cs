@@ -365,11 +365,12 @@ public sealed class CoverUpgradeWorker : BackgroundService
     /// catalog's own 1000 px.</summary>
     public const int DefaultSmallerThan = 1000;
 
-    /// <summary>Apple asks for about 20 searches a minute; one album is one search.</summary>
-    internal TimeSpan PauseBetweenAlbums { get; set; } = TimeSpan.FromSeconds(3);
-
     /// <summary>Albums a scan reads at once.</summary>
     internal const int ScanParallelism = 6;
+
+    /// <summary>Albums looked up at once. Apple's searches wait their turn inside the iTunes
+    /// lookup (about 20 a minute), so this only overlaps the downloads and the other sources.</summary>
+    internal const int LookupParallelism = 4;
 
     internal static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -488,26 +489,31 @@ public sealed class CoverUpgradeWorker : BackgroundService
             current.Mode, current.Total, current.Cursor, current.Scope,
             current.Selected is null ? "every album" : $"{current.Selected.Count} picked album(s)");
 
-        // A scan only reads files, and over a network mount waiting is most of each read, so
-        // a scan reads several albums at once. Lookups stay one at a time for Apple's limit.
-        var parallel = current.Mode == CoverUpgradeMode.Scan ? ScanParallelism : 1;
+        // Picked albums are matched in bulk first (barcodes, then Apple 40 at a time), so the
+        // lookups after it mostly skip Apple's one-search-at-a-time limit.
+        if (current.Mode != CoverUpgradeMode.Scan && current.Selected is { Count: > 0 } picks)
+        {
+            var queries = previous.Preview
+                .Where(row => picks.Contains(row.Id) && !string.IsNullOrWhiteSpace(row.Album))
+                .Select(row => new AlbumCoverQuery(row.Artist, row.Album, null))
+                .ToList();
+            try
+            {
+                await _finder.PrimeAsync(queries, new Progress<string>(text => _store.Update(run => run.Reason = text)), stoppingToken);
+            }
+            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Cover upgrade could not match albums in bulk, so each is searched: {M}", ex.Message);
+            }
+            _store.Update(run => run.Reason = null);
+        }
+
+        // Over a network mount waiting is most of each read, and most of each lookup is
+        // waiting on a server, so several albums are worked on at once.
+        var parallel = current.Mode == CoverUpgradeMode.Scan ? ScanParallelism : LookupParallelism;
         for (var index = current.Cursor; index < current.Queue.Count; index += parallel)
         {
-            if (stoppingToken.IsCancellationRequested)
-            {
-                _store.Update(run => run.Status = CoverUpgradeStatus.Interrupted);
-                return;
-            }
-            if (_cancel)
-            {
-                _store.Update(run =>
-                {
-                    run.Status = CoverUpgradeStatus.Cancelled;
-                    run.Reason = "Stopped from the dashboard.";
-                    run.FinishedUtc = DateTime.UtcNow;
-                });
-                return;
-            }
+            if (Stopped(stoppingToken)) return;
 
             var batch = current.Queue.Skip(index).Take(parallel).ToList();
             var looked = await Task.WhenAll(batch.Select(async item =>
@@ -537,9 +543,10 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 run.Processed += batch.Count;
                 run.LastFolder = batch[^1].Folder;
             });
-            if (looked.Any(l => l) && PauseBetweenAlbums > TimeSpan.Zero) await Task.Delay(PauseBetweenAlbums, stoppingToken);
         }
 
+        // A stop during the last batch ends the loop too; that batch did not finish.
+        if (Stopped(stoppingToken)) return;
         _store.Update(run =>
         {
             run.Status = CoverUpgradeStatus.Completed;
@@ -549,6 +556,24 @@ public sealed class CoverUpgradeWorker : BackgroundService
         _logger.LogInformation("Cover upgrade {Mode} finished: {Soft} soft, {Upgraded} larger, {Files} song(s), {Kept} kept, {Failed} failed",
             done.Mode, done.Soft, done.Upgraded, done.Files, done.Kept, done.Failed);
         if (!done.DryRun && done.Files > 0) await RescanAsync();
+    }
+
+    /// <summary>Records a shutdown or a stop from the dashboard. True when the run must end.</summary>
+    private bool Stopped(CancellationToken stoppingToken)
+    {
+        if (stoppingToken.IsCancellationRequested)
+        {
+            _store.Update(run => run.Status = CoverUpgradeStatus.Interrupted);
+            return true;
+        }
+        if (!_cancel) return false;
+        _store.Update(run =>
+        {
+            run.Status = CoverUpgradeStatus.Cancelled;
+            run.Reason = "Stopped from the dashboard.";
+            run.FinishedUtc = DateTime.UtcNow;
+        });
+        return true;
     }
 
     private sealed record SongFile(string Path, string Artist, string? Album, string? Title,
@@ -669,7 +694,6 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 continue;
             }
 
-            if (looked && PauseBetweenAlbums > TimeSpan.Zero) await Task.Delay(PauseBetweenAlbums, ct);
             looked = true;
 
             var found = await _finder.FindAsync(new AlbumCoverQuery(first.Artist, first.Album, first.Title,

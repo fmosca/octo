@@ -19,6 +19,9 @@ namespace Octo.Tests;
 /// </summary>
 public class CoverChainTests
 {
+    // Apple's pacing is for the real service; these talk to a fake.
+    public CoverChainTests() => ITunesCoverArtLookup.AppleInterval = TimeSpan.Zero;
+
     private static byte[] Jpeg(int width, int height, Rgba32? centre = null)
     {
         using var image = new Image<Rgba32>(width, height, new Rgba32(0, 0, 0));
@@ -468,5 +471,38 @@ public class CoverChainTests
             Assert.False(CoverFiles.ShouldWrite(dir, Sharp, folderIsNew: true));
         }
         finally { Directory.Delete(dir, true); }
+    }
+
+    /// <summary>Apple answers about 20 searches a minute: a thousand albums were an hour. One
+    /// lookup by barcode answers 40, and an album matched there is never searched.</summary>
+    [Fact]
+    public async Task ABarcodeLookupMatchesManyAlbumsAtOnceAndTheyAreNotSearchedAfter()
+    {
+        var calls = new List<string>();
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("itunes.apple.com/lookup") => Json(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                results = new object[]
+                {
+                    new { wrapperType = "collection", collectionName = "Discovery", artistName = "Daft Punk", collectionExplicitness = "notExplicit", artworkUrl100 = "https://is1.example/Music/disc/100x100bb.jpg" },
+                    new { wrapperType = "collection", collectionName = "Currents", artistName = "Tame Impala", collectionExplicitness = "notExplicit", artworkUrl100 = "https://is1.example/Music/curr/100x100bb.jpg" },
+                    new { wrapperType = "collection", collectionName = "Some Stray Single - Single", artistName = "Someone Else", collectionExplicitness = "notExplicit", artworkUrl100 = "https://is1.example/Music/stray/100x100bb.jpg" },
+                },
+            })),
+            var url when url.Contains("/disc/3000x3000bb") => Picture(Jpeg(3000, 3000)),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        }, calls);
+        var itunes = new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance);
+
+        var matched = await itunes.PrimeByBarcodeAsync(
+            [("Daft Punk", "Discovery", "724384960650"), ("Tame Impala", "Currents", "602547306807"), ("Lorde", "Melodrama", "602557000000")],
+            null, CancellationToken.None);
+        var cover = await itunes.TryFetchAlbumMasterAsync("Daft Punk", "Discovery", "One More Time", CancellationToken.None);
+
+        Assert.Equal(2, matched);
+        Assert.Single(calls, url => url.Contains("itunes.apple.com/lookup") && url.Contains("724384960650,602547306807,602557000000"));
+        Assert.DoesNotContain(calls, url => url.Contains("itunes.apple.com/search"));
+        Assert.Equal((3000, 3000), CoverImage.Measure(cover!));
     }
 }

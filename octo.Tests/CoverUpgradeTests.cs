@@ -89,7 +89,7 @@ public class CoverUpgradeTests : IDisposable
         var worker = new CoverUpgradeWorker(store, journal, finder,
             TestOptions.Monitor(new MetadataSettings { EmbedFullSizeCovers = fullSize }), config,
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
-            NullLogger<CoverUpgradeWorker>.Instance) { PauseBetweenAlbums = TimeSpan.Zero };
+            NullLogger<CoverUpgradeWorker>.Instance);
         return (worker, store);
     }
 
@@ -367,7 +367,9 @@ public class CoverUpgradeTests : IDisposable
         await Run(worker, store, preview);
 
         Assert.Equal(CoverUpgradeStatus.Completed, store.Current.Status);
-        Assert.Equal(3, finder.Calls);
+        // Albums are looked up four at a time, so the stopped batch may hold both; either way
+        // it is done again on resume, and each album is still listed and counted once.
+        Assert.InRange(finder.Calls, 3, 4);
         Assert.Equal(2, store.Current.Upgraded);
         Assert.Equal(2, store.Current.Preview.Count);
     }

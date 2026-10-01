@@ -1353,6 +1353,7 @@ let coverControlsSet = false;
 let coverPicked = new Set();
 let coverListRunId = null;
 let coverShowAll = false;
+let coverPace = null;
 const COVER_TILE_CAP = 600;
 
 const coverEl = id => document.getElementById(id);
@@ -1484,10 +1485,16 @@ function renderCovers(run) {
     sub = byAlbum ? of(run.albumsDone, run.albumsTotal, 'album')
       : run.songsTotal ? of(run.songsRead, run.songsTotal, 'song')
       : of(run.processed, run.total, 'folder');
-    // Lookups are about 3.5 seconds an album, so a lookup or a replace can say how long is left.
-    if (run.mode !== 'Scan' && byAlbum) {
-      const left = Math.max(0, run.albumsTotal - run.albumsDone) * 3.5;
-      if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
+    // Before the first album, a lookup matches the picked albums in bulk and says how far.
+    if (run.reason && !run.albumsDone) sub = run.reason;
+    // Time left from the pace so far, once there is enough of it to go on.
+    else if (byAlbum) {
+      if (coverPace?.runId !== run.runId) coverPace = { runId: run.runId, at: Date.now(), done: run.albumsDone };
+      const moved = run.albumsDone - coverPace.done;
+      if (moved >= 3) {
+        const left = (Date.now() - coverPace.at) / moved * Math.max(0, run.albumsTotal - run.albumsDone) / 1000;
+        if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
+      }
     }
   } else if (run.mode === 'Scan') {
     head = run.soft ? `${plural(run.soft, 'album has a soft cover', 'albums have soft covers')}` : 'Every cover is sharp';

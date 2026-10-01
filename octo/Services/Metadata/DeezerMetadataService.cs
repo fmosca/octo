@@ -836,6 +836,30 @@ public class DeezerMetadataService : IDisposable
         return (year, false);
     }
 
+    /// <summary>
+    /// An album's barcode (UPC), which names one exact release in every store, so the cover
+    /// upgrade can find the same release at Apple in a batch instead of one search an album.
+    /// </summary>
+    public async Task<string?> GetAlbumUpcAsync(string deezerId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deezerId)) return null;
+        var key = $"upc|{deezerId}";
+        if (TryGetCached<string>(key, out var cached)) return string.IsNullOrEmpty(cached) ? null : cached;
+        try
+        {
+            using var r = await GetJsonAsync($"{Base}/album/{Uri.EscapeDataString(deezerId)}", ct);
+            if (r.Transient) return null;
+            var upc = r.Doc is not null ? Str(r.Doc.RootElement, "upc") : null;
+            Put(key, upc ?? "", string.IsNullOrEmpty(upc) ? NegativeTtl : PositiveTtl);
+            return string.IsNullOrEmpty(upc) ? null : upc;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("deezer album {Id} barcode failed: {M}", deezerId, ex.Message);
+            return null;
+        }
+    }
+
     private async Task<DeezerResponse> GetJsonAsync(string url, CancellationToken ct, bool background = false)
     {
         JsonDocument? doc = null;
