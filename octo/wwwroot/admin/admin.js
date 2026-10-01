@@ -1459,7 +1459,9 @@ function renderCovers(run) {
 
   const progress = coverEl('cover-progress');
   progress.hidden = !running;
-  if (running) coverEl('cover-progress-fill').style.width = `${run.total ? Math.round(100 * run.processed / run.total) : 0}%`;
+  const done = run.songsTotal ? run.songsRead : run.processed;
+  const all = run.songsTotal || run.total;
+  if (running) coverEl('cover-progress-fill').style.width = `${all ? Math.min(100, Math.round(100 * done / all)) : 0}%`;
 
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   let head = '';
@@ -1470,7 +1472,9 @@ function renderCovers(run) {
     sub = `${plural(run.files, 'song')}`;
   } else if (running) {
     head = { Scan: 'Scanning', Preview: 'Finding better covers', Apply: 'Replacing covers' }[run.mode] ?? 'Working';
-    sub = `${run.processed} of ${plural(run.total, 'folder')}`;
+    sub = run.songsTotal
+      ? `${run.songsRead.toLocaleString()} of ${plural(run.songsTotal, 'song').replace(/^\d+/, n => Number(n).toLocaleString())}`
+      : `${run.processed} of ${plural(run.total, 'folder')}`;
   } else if (run.mode === 'Scan') {
     head = run.soft ? `${plural(run.soft, 'album has a soft cover', 'albums have soft covers')}` : 'Every cover is sharp';
     sub = `under ${run.smallerThan} px${run.kept ? ` · ${run.kept} already sharp` : ''}`;

@@ -48,9 +48,9 @@ public class CoverUpgradeTests : IDisposable
         }
     }
 
-    private string Song(string album, string title, byte[]? front, byte[]? back = null)
+    private string Song(string album, string title, byte[]? front, byte[]? back = null, bool flat = false)
     {
-        var folder = Path.Combine(_root, "music", "Daft Punk", album);
+        var folder = flat ? Path.Combine(_root, "music") : Path.Combine(_root, "music", "Daft Punk", album);
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, title + ".mp3");
         File.WriteAllBytes(path, AudioFixtures.Mp3());
@@ -284,5 +284,29 @@ public class CoverUpgradeTests : IDisposable
 
         await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
         Assert.Null(worker.FoundThumbnail(id));
+    }
+
+    /// <summary>Brandon's library is one folder of 2,400 songs: a pick must not read them all again.</summary>
+    [Fact]
+    public async Task InAFlatLibraryAPickReadsOnlyThePickedAlbumsSongs()
+    {
+        Song("Discovery", "One More Time", Jpeg(300, 10), flat: true);
+        Song("Discovery", "Aerodynamic", Jpeg(300, 10), flat: true);
+        Song("Homework", "Da Funk", Jpeg(300, 10), flat: true);
+        Song("Homework", "Around the World", Jpeg(300, 10), flat: true);
+        Song("Homework", "Revolution 909", Jpeg(300, 10), flat: true);
+        var (worker, store) = Worker(new FixedFinder(new FoundCover(Jpeg(3000, 200), "iTunes", 3000)));
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
+        Assert.Equal((5, 5), (store.Current.SongsTotal, store.Current.SongsRead));
+        Assert.Equal(1, store.Current.Total);
+        var pick = store.Current.Preview.Single(r => r.Album == "Discovery");
+        Assert.Equal(2, pick.Paths!.Count);
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Preview,
+            FolderCovers: true, Albums: [pick.Id]));
+
+        Assert.Equal((2, 2), (store.Current.SongsTotal, store.Current.SongsRead));
+        Assert.Equal("found", Assert.Single(store.Current.Preview).Result);
     }
 }

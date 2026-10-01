@@ -44,7 +44,8 @@ public sealed record CoverUpgradeRequest(CoverUpgradeScope Scope, CoverUpgradeMo
 /// <c>none</c> (looked up, nothing clearly larger).
 /// </summary>
 public sealed record CoverUpgradeChange(string Id, string Folder, string Artist, string? Album, int FromSide, int ToSide,
-    string? Source, int Files, bool FolderCover, string Result, string? FirstFile = null);
+    string? Source, int Files, bool FolderCover, string Result, string? FirstFile = null,
+    IReadOnlyList<string>? Paths = null);
 
 /// <summary>One folder to go through. Files is null for "every song in it".</summary>
 public sealed record CoverUpgradeItem(string Folder, List<string>? Files);
@@ -66,6 +67,10 @@ public sealed class CoverUpgradeRun
     /// <summary>Folders in the queue.</summary>
     public int Total { get; set; }
     public int Processed { get; set; }
+    /// <summary>Songs in the queue and songs read so far: the progress a person sees, because a
+    /// flat library is one folder of thousands of songs.</summary>
+    public int SongsTotal { get; set; }
+    public int SongsRead { get; set; }
     /// <summary>Albums a scan found with a cover smaller than asked.</summary>
     public int Soft { get; set; }
     /// <summary>Albums whose cover got (or would get) larger.</summary>
@@ -454,6 +459,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 FullSize = _settings.CurrentValue.EmbedFullSizeCovers,
                 StartedUtc = DateTime.UtcNow,
                 Total = queue.Count,
+                SongsTotal = queue.Sum(item => item.Files?.Count ?? 0),
                 Queue = queue,
             });
         }
@@ -517,8 +523,11 @@ public sealed class CoverUpgradeWorker : BackgroundService
     private sealed record SongFile(string Path, string Artist, string? Album, string? Title,
         string? ReleaseId, string? ReleaseGroupId, int Side);
 
-    /// <summary>The folders behind the picked albums, from the list they were picked from, keeping
-    /// each folder's own file list (Octo's downloads only touch Octo's files).</summary>
+    /// <summary>
+    /// The songs behind the picked albums, from the list they were picked from. Only those
+    /// songs are read again: in a flat library every album shares one folder of thousands of
+    /// songs, and reading the folder to find three albums took as long as the scan.
+    /// </summary>
     private static List<CoverUpgradeItem> QueueOf(CoverUpgradeRun previous, IReadOnlyCollection<string> ids)
     {
         var picked = ids.ToHashSet(StringComparer.Ordinal);
@@ -526,10 +535,12 @@ public sealed class CoverUpgradeWorker : BackgroundService
         foreach (var item in previous.Queue) files.TryAdd(item.Folder, item.Files);
         return previous.Preview
             .Where(row => picked.Contains(row.Id))
-            .Select(row => row.Folder)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(folder => folder, StringComparer.Ordinal)
-            .Select(folder => new CoverUpgradeItem(folder, files.GetValueOrDefault(folder)))
+            .GroupBy(row => row.Folder, StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => new CoverUpgradeItem(group.Key,
+                group.All(row => row.Paths is { Count: > 0 })
+                    ? group.SelectMany(row => row.Paths!).Distinct(StringComparer.Ordinal).ToList()
+                    : files.GetValueOrDefault(group.Key)))
             .ToList();
     }
 
@@ -551,7 +562,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
         if (row?.FirstFile is not { } path || !File.Exists(path)) return null;
         try
         {
-            using var file = TagLib.File.Create(path);
+            using var file = TagLib.File.Create(path, TagLib.ReadStyle.None);
             var bytes = FrontOf(file.Tag.Pictures)?.Data?.Data;
             if (bytes is not { Length: > 0 } && FolderCover(row.Folder, quiet: true) is { } folderFile)
                 bytes = File.ReadAllBytes(folderFile.Path);
@@ -570,11 +581,12 @@ public sealed class CoverUpgradeWorker : BackgroundService
         var paths = item.Files ?? Directory.EnumerateFiles(item.Folder)
             .Where(path => AudioExtensions.Contains(Path.GetExtension(path))).ToList();
         var songs = new List<SongFile>();
-        foreach (var path in paths.Where(File.Exists))
+        foreach (var path in paths)
         {
-            var song = ReadSong(path);
-            if (song is null) _store.Update(r => r.Kept++);
-            else songs.Add(song);
+            if (ct.IsCancellationRequested || _cancel) return false;
+            var song = File.Exists(path) ? ReadSong(path) : null;
+            if (song is not null) songs.Add(song);
+            _store.Update(r => r.SongsRead++);
         }
 
         var looked = false;
@@ -602,7 +614,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
             if (run.Mode == CoverUpgradeMode.Scan)
             {
                 var soft = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, 0, null,
-                    album.Count(), folderCover is not null, "soft", first.Path);
+                    album.Count(), folderCover is not null, "soft", first.Path, album.Select(song => song.Path).ToList());
                 _store.Update(r =>
                 {
                     r.Soft++;
@@ -627,7 +639,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
             {
                 // On a picked list, an album that stays as it is still says so.
                 var none = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, found?.Side ?? 0,
-                    found?.Source, 0, false, "none", first.Path);
+                    found?.Source, 0, false, "none", first.Path, album.Select(song => song.Path).ToList());
                 _store.Update(r =>
                 {
                     r.Kept++;
@@ -653,7 +665,8 @@ public sealed class CoverUpgradeWorker : BackgroundService
             else written = upgradeFiles.Count;
 
             var change = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown,
-                found.Side, found.Source, written, upgradeFolder, run.DryRun ? "found" : "upgraded", first.Path);
+                found.Side, found.Source, written, upgradeFolder, run.DryRun ? "found" : "upgraded", first.Path,
+                album.Select(song => song.Path).ToList());
             _store.Update(r =>
             {
                 r.Upgraded++;
@@ -668,7 +681,9 @@ public sealed class CoverUpgradeWorker : BackgroundService
     {
         try
         {
-            using var file = TagLib.File.Create(path);
+            // Tags and pictures only: the audio properties cost extra reads, which over a network
+            // mount is most of the time a scan takes.
+            using var file = TagLib.File.Create(path, TagLib.ReadStyle.None);
             var tag = file.Tag;
             var artist = TagWriterExtras.IsCompilation(file) ? "Various Artists"
                 : !string.IsNullOrWhiteSpace(tag.FirstAlbumArtist) ? tag.FirstAlbumArtist : tag.FirstPerformer;
@@ -870,10 +885,9 @@ public sealed class CoverUpgradeWorker : BackgroundService
         }
         return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Where(path => AudioExtensions.Contains(Path.GetExtension(path)))
-            .Select(path => Path.GetDirectoryName(path) ?? "")
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(dir => dir, StringComparer.Ordinal)
-            .Select(dir => new CoverUpgradeItem(dir, null))
+            .GroupBy(path => Path.GetDirectoryName(path) ?? "", StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => new CoverUpgradeItem(group.Key, group.OrderBy(path => path, StringComparer.Ordinal).ToList()))
             .ToList();
     }
 

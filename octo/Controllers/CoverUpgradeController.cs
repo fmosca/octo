@@ -72,8 +72,15 @@ public sealed class CoverUpgradeController : ControllerBase
             run.Failed,
             run.LastFolder,
             run.Reason,
+            run.SongsTotal,
+            run.SongsRead,
             run.Errors,
-            run.Preview,
+            // Without each album's file list, which only the next run needs.
+            preview = run.Preview.Select(row => new
+            {
+                row.Id, row.Folder, row.Artist, row.Album, row.FromSide, row.ToSide, row.Source, row.Files,
+                row.FolderCover, row.Result,
+            }),
             canResume = run.CanResume,
             canUndo = _worker.CanUndo,
             musicPath = MusicPath(),
