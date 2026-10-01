@@ -184,6 +184,19 @@ builder.Services.AddSingleton<Octo.Services.Metadata.GenreBackfillWorker>();
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<Octo.Services.Metadata.GenreBackfillWorker>());
 
+// The cover upgrade: same shape as the genre backfill. Its journal keeps every replaced
+// picture (once per distinct picture, in cover-backups/) so a run can be undone.
+builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.CoverUpgradeStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "cover-upgrade.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.CoverArt.CoverUpgradeStore>>()));
+builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.CoverUpgradeJournal(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "cover-upgrade-journal.jsonl"),
+    sp.GetRequiredService<ILogger<Octo.Services.CoverArt.CoverUpgradeJournal>>()));
+builder.Services.AddSingleton<Octo.Services.CoverArt.IAlbumCoverFinder, Octo.Services.CoverArt.AlbumCoverFinder>();
+builder.Services.AddSingleton<Octo.Services.CoverArt.CoverUpgradeWorker>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<Octo.Services.CoverArt.CoverUpgradeWorker>());
+
 // Resolves a Navidrome song id to a verified file on disk. Read-only and non-destructive on
 // its own; it exists first because nothing that acts on a library file can be trusted until
 // this is proven against a real library.

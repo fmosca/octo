@@ -943,6 +943,52 @@
 
         <div class="set-section">
           <div class="set-head">
+            <h3 class="set-title">Upgrade cover art</h3>
+            <p class="set-desc">Finds the largest cover for each album and puts it in every song. Nothing is written until you have seen a preview.</p>
+          </div>
+          <div class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Which songs</div>
+                <div class="set-info-d">Only downloads Octo made, or the whole library, your own rips and purchases included.</div>
+                <div class="set-info-more">A cover is taken only from a release with the same artist and album name: Apple's full-size master, the Cover Art Archive for the release your files name, or Deezer. It replaces a song's cover only when it is clearly larger. The whole library asks you to type the music path to confirm.</div>
+              </div>
+              <select class="set-input" id="cover-upgrade-scope">
+                <option value="OctoDownloads">Downloads Octo made</option>
+                <option value="WholeLibrary">The whole library</option>
+              </select>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Also cover.jpg and folder.jpg</div>
+                <div class="set-info-d">Navidrome shows the picture beside an album before the one inside its songs, so a soft one there hides the upgrade.</div>
+                <div class="set-info-more">Only JPEG files, and only in a folder that holds just that album.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="cover-upgrade-folder" checked /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="notice">
+              Every cover a run replaces is kept, so <strong>Undo</strong> puts them all back. Saving a song rewrites its whole tag block, so a field the tag library does not understand can still be lost; your own backup of the music folder is the full safety net. Lookups pause between albums, so a large library takes a while.
+            </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Preview</div><div class="set-info-d">Looks up every album and shows which covers would get larger. Writes nothing.</div></div>
+              <button class="btn btn-ghost" type="button" id="cover-upgrade-preview">Preview upgrades</button>
+            </div>
+            <div id="cover-upgrade-status" class="set-row stack"></div>
+            <div id="cover-upgrade-results"></div>
+            <div class="set-row" id="cover-upgrade-actions">
+              <div class="set-info"><div class="set-info-t">Upgrade</div><div class="set-info-d">Once a preview has finished, for the same songs it previewed. Embeds at 1500 px unless Embed full-size covers is on.</div></div>
+              <div class="genre-preset-actions">
+                <button class="btn" type="button" id="cover-upgrade-apply" hidden>Upgrade these covers</button>
+                <button class="btn btn-ghost" type="button" id="cover-upgrade-resume" hidden>Resume</button>
+                <button class="btn btn-ghost" type="button" id="cover-upgrade-cancel" hidden>Stop</button>
+                <button class="btn btn-ghost" type="button" id="cover-upgrade-undo" hidden>Undo upgrades</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
             <h3 class="set-title">Lyrics</h3>
             <p class="set-desc">A lyrics file beside each download, and lyrics for any song as it plays, in every app.</p>
           </div>

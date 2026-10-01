@@ -267,6 +267,7 @@ async function loadSettings() {
   // retry: false, so a page load never pops a sign-in prompt. Without a session the section
   // simply stays empty until the user asks for a preview.
   loadGenreBackfill();
+  loadCoverUpgrade();
   loadLyricsLibrary();
   loadLyricsChoices();
   loadRadioStatus();
@@ -1339,6 +1340,192 @@ document.getElementById('genre-backfill-undo')?.addEventListener('click', async 
   if (!response.ok) { backfillNote(body.error || 'Could not undo.', 'error'); return; }
   backfillNote('Restoring genres.', 'info');
   await loadGenreBackfill();
+});
+
+// ---- Upgrade cover art -----------------------------------------------------
+// The genre backfill's flow: preview, then apply what was previewed, with resume and undo.
+
+let coverUpgradePoll = null;
+let lastCoverRun = null;
+let coverScopeInitialised = false;
+
+const coverScopeLabels = { OctoDownloads: 'downloads Octo made', WholeLibrary: 'the whole library' };
+
+function coverNote(message, kind = 'ok') {
+  note(document.querySelector('#cover-upgrade-actions .genre-preset-actions'), message, kind);
+}
+
+function renderCoverUpgrade(run) {
+  const status = document.getElementById('cover-upgrade-status');
+  const results = document.getElementById('cover-upgrade-results');
+  if (!status || !results) return;
+
+  const running = run.status === 'Running';
+  const previewed = run.status === 'Completed' && run.dryRun && !run.undo;
+  const scopeSelect = document.getElementById('cover-upgrade-scope');
+  const folderBox = document.getElementById('cover-upgrade-folder');
+  const changedSince = previewed && ((scopeSelect && scopeSelect.value !== run.scope)
+    || (folderBox && folderBox.checked !== run.folderCovers));
+
+  document.getElementById('cover-upgrade-cancel').hidden = !running;
+  document.getElementById('cover-upgrade-apply').hidden = !previewed || run.upgraded === 0 || changedSince;
+  document.getElementById('cover-upgrade-resume').hidden = !run.canResume;
+  document.getElementById('cover-upgrade-undo').hidden = !run.canUndo || running;
+  document.getElementById('cover-upgrade-preview').disabled = running;
+
+  if (run.status === 'Idle') {
+    status.innerHTML = '';
+    results.innerHTML = '';
+    return;
+  }
+
+  const label = run.undo
+    ? ({ Running: 'Putting covers back', Completed: 'Covers put back' }[run.status] ?? run.status)
+    : ({
+      Running: run.dryRun ? 'Previewing' : 'Upgrading',
+      Completed: run.dryRun ? 'Preview finished' : 'Finished',
+      Cancelled: 'Stopped',
+      Interrupted: 'Interrupted',
+      Failed: 'Stopped',
+    }[run.status] ?? run.status);
+
+  const counts = run.undo
+    ? [`${run.processed} of ${run.total}`, `${run.files} put back`, run.failed ? `${run.failed} failed` : null]
+    : [
+      `${run.processed} of ${run.total} folders`,
+      `${run.upgraded} album${run.upgraded === 1 ? '' : 's'} ${run.dryRun ? 'would get' : 'got'} a larger cover`,
+      `${run.files} song${run.files === 1 ? '' : 's'}`,
+      run.kept ? `${run.kept} already sharpest` : null,
+      run.failed ? `${run.failed} failed` : null,
+    ];
+  status.innerHTML = `
+    <div class="set-info">
+      <div class="set-info-t">${esc(label)}</div>
+      <div class="set-info-d">${esc(counts.filter(Boolean).join(' · '))}${run.reason ? `. ${esc(run.reason)}` : ''}</div>
+    </div>`;
+
+  const lastError = run.errors?.length ? `<div class="field-error" role="alert">${esc(run.errors[run.errors.length - 1])}</div>` : '';
+  if (!run.preview?.length) {
+    results.innerHTML = lastError;
+    return;
+  }
+
+  const px = side => (side > 0 ? `${side} px` : 'none');
+  const rows = run.preview.slice(0, 200).map(change => `
+    <div class="config-row genre-change-row">
+      <span class="key">${esc(change.artist)} · ${esc(change.album || '(no album)')}</span>
+      <span class="value">${esc(px(change.fromSide))}</span>
+      <span class="value">${esc(px(change.toSide))}</span>
+      <span class="value">${esc(change.source)}${change.folderCover ? ' + folder' : ''}</span>
+    </div>`).join('');
+
+  results.innerHTML = `
+    <div class="config-table">
+      <div class="config-row config-row-head genre-change-row">
+        <span>Album</span><span>Now</span><span>Found</span><span>From</span>
+      </div>
+      ${rows}
+    </div>
+    ${run.preview.length > 200 ? `<p class="set-info-d">Showing the first 200 of ${run.preview.length} albums.</p>` : ''}
+    ${lastError}`;
+}
+
+async function loadCoverUpgrade(retry = false) {
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade', {}, retry);
+  if (!response.ok) return null;
+  const run = await response.json();
+  const previous = lastCoverRun;
+  lastCoverRun = run;
+
+  // Open on what a finished preview covered, so the upgrade it offers is the one it describes.
+  if (!coverScopeInitialised && run.status === 'Completed' && run.dryRun) {
+    const scopeSelect = document.getElementById('cover-upgrade-scope');
+    const folderBox = document.getElementById('cover-upgrade-folder');
+    if (scopeSelect && run.scope) scopeSelect.value = run.scope;
+    if (folderBox) folderBox.checked = run.folderCovers;
+  }
+  coverScopeInitialised = true;
+  renderCoverUpgrade(run);
+
+  if (previous?.status === 'Running' && run.status !== 'Running') {
+    coverNote(run.undo
+      ? `Undo ${run.status === 'Completed' ? 'finished' : run.status.toLowerCase()}: ${run.files} song(s) put back.`
+      : `${run.dryRun ? 'Preview' : 'Upgrade'} ${run.status === 'Completed' ? 'finished' : run.status.toLowerCase()}: ${run.upgraded} album(s).`,
+      run.status === 'Failed' ? 'error' : 'ok');
+  }
+
+  if (run.status === 'Running') {
+    if (!coverUpgradePoll) coverUpgradePoll = setInterval(() => loadCoverUpgrade(), 2000);
+  } else if (coverUpgradePoll) {
+    clearInterval(coverUpgradePoll);
+    coverUpgradePoll = null;
+  }
+  return run;
+}
+
+async function startCoverUpgrade(dryRun, previewed = null) {
+  const scope = previewed?.scope ?? document.getElementById('cover-upgrade-scope')?.value ?? 'OctoDownloads';
+  const folderCovers = previewed?.folderCovers ?? document.getElementById('cover-upgrade-folder')?.checked ?? true;
+
+  let confirmPath = null;
+  if (scope === 'WholeLibrary' && !dryRun) {
+    const current = await loadCoverUpgrade();
+    const expected = current?.musicPath ?? '';
+    confirmPath = prompt(
+      `This rewrites the cover in songs under:\n\n${expected}\n\n` +
+      'including music Octo never downloaded. Type that path exactly to continue.');
+    if (confirmPath === null) return;
+  }
+
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, dryRun, folderCovers, confirm: confirmPath }),
+  }, true);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    coverNote(body.error || `Could not start: HTTP ${response.status}`, 'error');
+    return;
+  }
+  coverNote(dryRun ? 'Previewing. Nothing is being written.' : 'Upgrading covers.', 'info');
+  await loadCoverUpgrade();
+}
+
+document.getElementById('cover-upgrade-preview')?.addEventListener('click', () => startCoverUpgrade(true));
+document.getElementById('cover-upgrade-scope')?.addEventListener('change', () => { if (lastCoverRun) renderCoverUpgrade(lastCoverRun); });
+document.getElementById('cover-upgrade-folder')?.addEventListener('change', () => { if (lastCoverRun) renderCoverUpgrade(lastCoverRun); });
+document.getElementById('cover-upgrade-apply')?.addEventListener('click', async () => {
+  const run = await loadCoverUpgrade();
+  if (!run) return;
+  const scopeLabel = coverScopeLabels[run.scope] ?? run.scope;
+  if (!confirm(`Put a larger cover in ${run.files} song(s) across ${run.upgraded} album(s) in ${scopeLabel}? Every cover replaced is kept for Undo.`)) return;
+  await startCoverUpgrade(false, run);
+});
+document.getElementById('cover-upgrade-cancel')?.addEventListener('click', async () => {
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade/cancel', { method: 'POST' });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    coverNote(body.error || `Could not stop: HTTP ${response.status}`, 'error');
+    return;
+  }
+  coverNote('Stopping after the current album.', 'info');
+  await loadCoverUpgrade();
+});
+document.getElementById('cover-upgrade-resume')?.addEventListener('click', async () => {
+  const run = lastCoverRun;
+  if (run && !run.dryRun && !confirm(`Resume upgrading from folder ${run.processed + 1} of ${run.total}?`)) return;
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade/resume', { method: 'POST' });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { coverNote(body.error || 'Could not resume.', 'error'); return; }
+  await loadCoverUpgrade();
+});
+document.getElementById('cover-upgrade-undo')?.addEventListener('click', async () => {
+  if (!confirm('Put back the cover every upgrade replaced? Songs moved since then stay as they are.')) return;
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade/undo', { method: 'POST' });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { coverNote(body.error || 'Could not undo.', 'error'); return; }
+  coverNote('Putting covers back.', 'info');
+  await loadCoverUpgrade();
 });
 
 // ---- Library actions -----------------------------------------------------
