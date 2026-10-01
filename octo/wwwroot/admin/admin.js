@@ -1482,15 +1482,13 @@ function renderCovers(run) {
   } else if (running) {
     head = { Scan: 'Scanning', Preview: 'Finding better covers', Apply: 'Replacing covers' }[run.mode] ?? 'Working';
     const of = (n, total, word) => `${n.toLocaleString()} of ${total.toLocaleString()} ${word}${total === 1 ? '' : 's'}`;
-    // A lookup over picked albums matches them in bulk first (steps 1 and 2, in the reason).
-    const step = run.mode !== 'Scan' && run.selected !== null && run.picked ? 'Step 3 of 3 · ' : '';
-    sub = byAlbum ? step + of(run.albumsDone, run.albumsTotal, 'album')
+    sub = byAlbum ? of(run.albumsDone, run.albumsTotal, 'album')
       : run.songsTotal ? of(run.songsRead, run.songsTotal, 'song')
       : of(run.processed, run.total, 'folder');
-    // Before the first album, a lookup matches the picked albums in bulk and says how far.
-    if (run.reason && !run.albumsDone) sub = run.reason;
+    // Picked albums are matched in bulk alongside (barcodes, then Apple), said in the reason.
+    if (run.reason) sub += ` · ${run.reason}`;
     // Time left from the pace so far, once there is enough of it to go on.
-    else if (byAlbum) {
+    if (byAlbum) {
       if (coverPace?.runId !== run.runId) coverPace = { runId: run.runId, at: Date.now(), done: run.albumsDone };
       const moved = run.albumsDone - coverPace.done;
       if (moved >= 3) {

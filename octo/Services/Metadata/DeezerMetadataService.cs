@@ -448,10 +448,11 @@ public class DeezerMetadataService : IDisposable
 
     /// <summary>Search the album catalog. Single-track "albums" are dropped: a plain
     /// artist query returns a lot of them and they crowd out real records.</summary>
-    public async Task<List<AlbumHit>> SearchAlbumsAsync(string query, int limit, CancellationToken ct = default)
+    public async Task<List<AlbumHit>> SearchAlbumsAsync(string query, int limit, CancellationToken ct = default,
+        bool keepSingles = false)
     {
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<AlbumHit>();
-        var key = $"as|{query}|{limit}".ToLowerInvariant();
+        var key = $"as|{query}|{limit}|{keepSingles}".ToLowerInvariant();
         if (TryGetCached<List<AlbumHit>>(key, out var cached)) return cached!;
 
         var hits = new List<AlbumHit>();
@@ -476,7 +477,9 @@ public class DeezerMetadataService : IDisposable
 
                     var recordType = Str(a, "record_type");
                     var trackCount = Int(a, "nb_tracks") ?? 0;
-                    if (string.Equals(recordType, "single", StringComparison.OrdinalIgnoreCase) && trackCount <= 2)
+                    // Search lists albums; a one- or two-track single is a song there. The cover
+                    // upgrade keeps them: a library of singles has their covers to replace.
+                    if (!keepSingles && string.Equals(recordType, "single", StringComparison.OrdinalIgnoreCase) && trackCount <= 2)
                         continue;
 
                     var artist = a.TryGetProperty("artist", out var art) ? Str(art, "name") : null;

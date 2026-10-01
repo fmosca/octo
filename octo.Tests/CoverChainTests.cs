@@ -309,6 +309,8 @@ public class CoverChainTests
             resultCount = rows.Length,
             results = rows.Select(r => new Dictionary<string, string?>
             {
+                // Apple's lookup answers carry it, and the barcode path keeps only collections.
+                ["wrapperType"] = "collection",
                 ["artistName"] = r.Artist, ["collectionName"] = r.Collection, ["trackName"] = r.Track,
                 ["collectionExplicitness"] = r.Explicitness, ["artworkUrl100"] = r.Art,
             }),
@@ -504,5 +506,45 @@ public class CoverChainTests
         Assert.Single(calls, url => url.Contains("itunes.apple.com/lookup") && url.Contains("724384960650,602547306807,602557000000"));
         Assert.DoesNotContain(calls, url => url.Contains("itunes.apple.com/search"));
         Assert.Equal((3000, 3000), CoverImage.Measure(cover!));
+    }
+
+    /// <summary>
+    /// Barcodes, Apple's answers and each album's covers move together (Brandon, 2026-10-01):
+    /// an album waits for its own batch, a barcode in the file's own tag needs no catalog
+    /// lookup, and Apple is asked by barcode, never searched, for albums it matched.
+    /// </summary>
+    [Fact]
+    public async Task APrimedAlbumWaitsForItsBatchAndATaggedBarcodeSkipsTheCatalog()
+    {
+        AlbumCoverFinder.AppleBatchIdle = TimeSpan.FromMilliseconds(50);
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("api.deezer.com/search/album") && url.Contains("Currents") =>
+                Json("""{"data":[{"id":10709540,"title":"Currents","artist":{"name":"Tame Impala"},"cover_xl":"https://deezer.example/currents.jpg","nb_tracks":13,"record_type":"album"}]}"""),
+            var url when url.Contains("api.deezer.com/search/album") => Json("""{"data":[]}"""),
+            var url when url.Contains("api.deezer.com/album/10709540") => Json("""{"id":10709540,"upc":"602547306807"}"""),
+            var url when url.Contains("itunes.apple.com/lookup") => Json(ITunesAnswer(
+                ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/disc/100x100bb.jpg"),
+                ("Tame Impala", "Currents", null, "notExplicit", "https://is1.example/Music/curr/100x100bb.jpg"))),
+            var url when url.Contains("/3000x3000bb") => Picture(Jpeg(3000, 3000)),
+            var url when url.Contains("deezer.example") => Picture(Catalog),
+            // A search at Apple answers nothing here, so a cover from iTunes proves the barcode path.
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        });
+        var deezer = new Octo.Services.Metadata.DeezerMetadataService(http, TestOptions.Monitor(new MetadataSettings()),
+            NullLogger<Octo.Services.Metadata.DeezerMetadataService>.Instance);
+        var itunes = new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance);
+        var finder = new AlbumCoverFinder(itunes, new CoverArtArchiveLookup(http, NullLogger<CoverArtArchiveLookup>.Instance),
+            deezer, http, NullLogger<AlbumCoverFinder>.Instance);
+        var discovery = new AlbumCoverQuery("Daft Punk", "Discovery", null, Barcode: "0724384960650");
+        var currents = new AlbumCoverQuery("Tame Impala", "Currents", null);
+
+        var priming = finder.PrimeAsync([discovery, currents], null, CancellationToken.None);
+        var found = await Task.WhenAll(finder.FindAsync(discovery, CancellationToken.None), finder.FindAsync(currents, CancellationToken.None));
+        await priming;
+
+        Assert.All(found, cover => Assert.Equal(("iTunes", 3000), (cover!.Source, cover.Side)));
+        Assert.Equal(["0724384960650", "724384960650", "602547306807"],
+            ITunesCoverArtLookup.BarcodeForms("0724384960650").Concat(ITunesCoverArtLookup.BarcodeForms("602547306807")).ToArray());
     }
 }

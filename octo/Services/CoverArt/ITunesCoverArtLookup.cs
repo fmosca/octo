@@ -139,8 +139,11 @@ public class ITunesCoverArtLookup : ICoverArtSource
         {
             try
             {
+                // A file's tag often has the 13-digit EAN ("0602475682233") where the store
+                // keeps the 12-digit UPC; both are sent, and the answers matched back by name.
+                var codes = batch.SelectMany(a => BarcodeForms(a.Upc)).Distinct(StringComparer.Ordinal);
                 var url = "https://itunes.apple.com/lookup?entity=album&limit=200&upc="
-                    + string.Join(',', batch.Select(a => Uri.EscapeDataString(a.Upc.Trim())));
+                    + string.Join(',', codes.Select(Uri.EscapeDataString));
                 using var resp = await AppleGetAsync(url, ct);
                 if (resp is { IsSuccessStatusCode: true })
                 {
@@ -162,7 +165,10 @@ public class ITunesCoverArtLookup : ICoverArtSource
                             .Select(c => c.Art)
                             .FirstOrDefault();
                         if (hit is null) continue;
+                        // Kept for both ways a song can ask: as its album, and as a single
+                        // named after itself. A barcode names one release either way.
                         _masterUrls[MasterKey(album.Artist, album.Album, single: false)] = (hit, DateTime.UtcNow);
+                        _masterUrls[MasterKey(album.Artist, album.Album, single: true)] = (hit, DateTime.UtcNow);
                         matched++;
                     }
                 }
@@ -256,6 +262,17 @@ public class ITunesCoverArtLookup : ICoverArtSource
             _logger.LogDebug("iTunes master search failed for {Artist} - {Release}: {M}", artist, release, ex.Message);
             return null;
         }
+    }
+
+    /// <summary>A barcode as given, and as the 12-digit UPC when it is a longer form with
+    /// leading zeros. Only digits count; anything else is not a barcode.</summary>
+    internal static IEnumerable<string> BarcodeForms(string? code)
+    {
+        var digits = new string((code ?? "").Where(char.IsDigit).ToArray());
+        if (digits.Length is < 8 or > 14) yield break;
+        yield return digits;
+        var upc = digits.TrimStart('0').PadLeft(12, '0');
+        if (digits.Length > 12 && upc.Length == 12 && upc != digits) yield return upc;
     }
 
     private static string? Text(JsonElement item, string name) =>

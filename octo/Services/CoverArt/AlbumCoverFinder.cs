@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using Octo.Services.Common;
 using Octo.Services.Metadata;
 
@@ -6,7 +7,7 @@ namespace Octo.Services.CoverArt;
 
 /// <summary>What is known about an album from its files' tags.</summary>
 public sealed record AlbumCoverQuery(string Artist, string? Album, string? Title,
-    string? MusicBrainzReleaseId = null, string? MusicBrainzReleaseGroupId = null);
+    string? MusicBrainzReleaseId = null, string? MusicBrainzReleaseGroupId = null, string? Barcode = null);
 
 /// <summary>A cover found for an album, with its size.</summary>
 public sealed record FoundCover(byte[] Bytes, string Source, int Side);
@@ -34,14 +35,27 @@ public interface IAlbumCoverFinder
 /// and the largest wins.
 ///
 /// Apple answers about 20 searches a minute, which made a thousand albums an hour. So a run
-/// over many albums is primed first: each album's barcode from Deezer (which answers far more),
-/// then one Apple lookup per 40 barcodes. Albums matched there skip Apple's search.
+/// over many albums is primed: each album's barcode (from its own tags when they carry one,
+/// else from Deezer, which answers far more), and every 20 barcodes found go to Apple as one
+/// lookup. It is a pipeline (Brandon, 2026-10-01): barcodes, Apple's answers and each album's
+/// covers all move at once, and an album waits only for its own batch, never for the whole run.
 /// </summary>
 public sealed class AlbumCoverFinder : IAlbumCoverFinder
 {
     private static readonly SongMatchOptions AlbumTitles = new() { LengthToleranceSeconds = null };
     private static readonly TimeSpan DownloadTimeout = TimeSpan.FromSeconds(15);
     private const int PrimeParallelism = 4;
+
+    /// <summary>Barcodes sent to Apple as soon as this many are waiting (more go along when
+    /// they piled up during Apple's pacing, up to <see cref="ITunesCoverArtLookup.UpcBatch"/>).</summary>
+    internal const int AppleBatchMin = 20;
+
+    /// <summary>A batch smaller than <see cref="AppleBatchMin"/> goes anyway after this long
+    /// without a new barcode, so the last albums are not kept waiting.</summary>
+    internal static TimeSpan AppleBatchIdle { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>The longest an album waits for its batch before it is searched on its own.</summary>
+    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromMinutes(15);
 
     private readonly ITunesCoverArtLookup _itunes;
     private readonly CoverArtArchiveLookup _archive;
@@ -51,6 +65,10 @@ public sealed class AlbumCoverFinder : IAlbumCoverFinder
 
     /// <summary>The catalog's album found while priming, so its cover needs no second search.</summary>
     private readonly ConcurrentDictionary<string, DeezerMetadataService.AlbumHit?> _catalog = new();
+
+    /// <summary>Albums being primed, done once Apple has answered for their batch (or they had
+    /// no barcode): <see cref="FindAsync"/> waits for this and no longer.</summary>
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _ready = new();
 
     public AlbumCoverFinder(ITunesCoverArtLookup itunes, CoverArtArchiveLookup archive,
         DeezerMetadataService deezer, IHttpClientFactory http, ILogger<AlbumCoverFinder> logger)
@@ -64,34 +82,115 @@ public sealed class AlbumCoverFinder : IAlbumCoverFinder
 
     private static string KeyOf(string artist, string album) => SongIdentity.MatchKey(artist, album);
 
+    private void Ready(string artist, string album)
+    {
+        if (_ready.TryGetValue(KeyOf(artist, album), out var done)) done.TrySetResult();
+    }
+
     public async Task PrimeAsync(IReadOnlyList<AlbumCoverQuery> albums, IProgress<string>? status, CancellationToken ct)
     {
         var named = albums.Where(a => !string.IsNullOrWhiteSpace(a.Album) && !string.IsNullOrWhiteSpace(a.Artist))
             .DistinctBy(a => KeyOf(a.Artist, a.Album!))
             .ToList();
+        _ready.Clear();
+        foreach (var album in named)
+            _ready[KeyOf(album.Artist, album.Album!)] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         if (named.Count == 0) return;
 
-        var barcodes = new ConcurrentBag<(string Artist, string Album, string Upc)>();
-        var found = 0;
-        await Parallel.ForEachAsync(named, new ParallelOptions { MaxDegreeOfParallelism = PrimeParallelism, CancellationToken = ct },
-            async (album, token) =>
+        var barcodes = Channel.CreateUnbounded<(string Artist, string Album, string Upc)>();
+        int looked = 0, coded = 0, fromTags = 0, matched = 0;
+        void Report() => status?.Report(
+            $"barcodes {Volatile.Read(ref looked):N0} of {named.Count:N0} · Apple matched {Volatile.Read(ref matched):N0}");
+
+        try
+        {
+            // Barcodes: the album's own tag when it has one, else the catalog's.
+            var producer = Task.Run(async () =>
             {
-                var hit = await CatalogHitAsync(album.Artist, album.Album!, token);
-                if (hit is not null && await _deezer.GetAlbumUpcAsync(hit.DeezerId, token) is { } upc)
-                    barcodes.Add((album.Artist, album.Album!, upc));
-                var n = Interlocked.Increment(ref found);
-                if (n % 10 == 0 || n == named.Count) status?.Report($"Step 1 of 3 · Finding barcodes: {n:N0} of {named.Count:N0} albums");
-            });
-        var list = barcodes.ToList();
-        var matched = await _itunes.PrimeByBarcodeAsync(list,
-            new Progress<int>(done => status?.Report($"Step 2 of 3 · Matching with Apple: {done:N0} of {list.Count:N0} albums")), ct);
-        _logger.LogInformation("Cover upgrade: {Barcodes} of {Albums} album(s) had a barcode, Apple matched {Matched} in bulk",
-            barcodes.Count, named.Count, matched);
+                try
+                {
+                    await Parallel.ForEachAsync(named, new ParallelOptions { MaxDegreeOfParallelism = PrimeParallelism, CancellationToken = ct },
+                        async (album, token) =>
+                        {
+                            var upc = album.Barcode;
+                            if (!string.IsNullOrWhiteSpace(upc)) Interlocked.Increment(ref fromTags);
+                            else if (await CatalogHitAsync(album.Artist, album.Album!, token) is { } hit)
+                                upc = await _deezer.GetAlbumUpcAsync(hit.DeezerId, token);
+                            if (!string.IsNullOrWhiteSpace(upc))
+                            {
+                                Interlocked.Increment(ref coded);
+                                await barcodes.Writer.WriteAsync((album.Artist, album.Album!, upc.Trim()), token);
+                            }
+                            else Ready(album.Artist, album.Album!);
+                            if (Interlocked.Increment(ref looked) % 10 == 0) Report();
+                        });
+                }
+                finally
+                {
+                    barcodes.Writer.TryComplete();
+                }
+            }, ct);
+
+            // Apple: a batch as soon as enough are waiting, or the producer has gone quiet.
+            var reader = barcodes.Reader;
+            var pending = new List<(string Artist, string Album, string Upc)>();
+            while (true)
+            {
+                while (pending.Count < ITunesCoverArtLookup.UpcBatch && reader.TryRead(out var item)) pending.Add(item);
+                var finished = reader.Completion.IsCompleted;
+                var idle = false;
+                if (pending.Count < AppleBatchMin && !finished)
+                {
+                    using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    wait.CancelAfter(AppleBatchIdle);
+                    try
+                    {
+                        await reader.WaitToReadAsync(wait.Token);
+                        continue;
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        idle = true;
+                    }
+                }
+                if (pending.Count == 0)
+                {
+                    if (finished || reader.Completion.IsCompleted) break;
+                    continue;
+                }
+                if (pending.Count >= AppleBatchMin || finished || idle)
+                {
+                    var send = pending;
+                    pending = [];
+                    Interlocked.Add(ref matched, await _itunes.PrimeByBarcodeAsync(send, null, ct));
+                    foreach (var album in send) Ready(album.Artist, album.Album);
+                    Report();
+                }
+            }
+            await producer;
+            _logger.LogInformation(
+                "Cover upgrade: {Coded} of {Albums} album(s) had a barcode ({Tags} from their own tags), Apple matched {Matched} in bulk",
+                coded, named.Count, fromTags, matched);
+        }
+        finally
+        {
+            // However it ended, nobody waits on an album this will never answer for.
+            foreach (var done in _ready.Values) done.TrySetResult();
+        }
     }
 
     public async Task<FoundCover?> FindAsync(AlbumCoverQuery query, CancellationToken ct)
     {
-        var itunes = Try("iTunes", () => _itunes.TryFetchAlbumMasterAsync(query.Artist, query.Album, query.Title, ct));
+        // An album being primed waits for its own batch at Apple, so its master is matched
+        // in bulk rather than searched; the other sources start at once.
+        var ready = !string.IsNullOrWhiteSpace(query.Album) && _ready.TryGetValue(KeyOf(query.Artist, query.Album!), out var tcs)
+            ? tcs.Task.WaitAsync(ReadyTimeout, ct).ContinueWith(_ => { }, TaskScheduler.Default)
+            : Task.CompletedTask;
+        var itunes = Try("iTunes", async () =>
+        {
+            await ready;
+            return await _itunes.TryFetchAlbumMasterAsync(query.Artist, query.Album, query.Title, ct);
+        });
         var archive = string.IsNullOrEmpty(query.MusicBrainzReleaseId) && string.IsNullOrEmpty(query.MusicBrainzReleaseGroupId)
             ? Task.FromResult<byte[]?>(null)
             : Try("Cover Art Archive", () => _archive.TryFetchAsync(query.MusicBrainzReleaseId, query.MusicBrainzReleaseGroupId, ct));
@@ -129,7 +228,7 @@ public sealed class AlbumCoverFinder : IAlbumCoverFinder
         if (_catalog.TryGetValue(key, out var known)) return known;
         try
         {
-            var hits = await _deezer.SearchAlbumsAsync($"{artist} {album}", 10, ct);
+            var hits = await _deezer.SearchAlbumsAsync($"{artist} {album}", 10, ct, keepSingles: true);
             var hit = hits.FirstOrDefault(h => SongIdentity.Same(album, artist, h.Title, h.Artist, AlbumTitles).IsSame);
             if (_catalog.Count > 5000) _catalog.Clear();
             _catalog[key] = hit;

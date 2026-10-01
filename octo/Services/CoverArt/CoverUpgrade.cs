@@ -45,7 +45,7 @@ public sealed record CoverUpgradeRequest(CoverUpgradeScope Scope, CoverUpgradeMo
 /// </summary>
 public sealed record CoverUpgradeChange(string Id, string Folder, string Artist, string? Album, int FromSide, int ToSide,
     string? Source, int Files, bool FolderCover, string Result, string? FirstFile = null,
-    IReadOnlyList<string>? Paths = null, string? NavidromeAlbumId = null);
+    IReadOnlyList<string>? Paths = null, string? NavidromeAlbumId = null, string? Barcode = null);
 
 /// <summary>
 /// One piece of work: a folder, or one Navidrome album when Navidrome could say which songs
@@ -489,24 +489,48 @@ public sealed class CoverUpgradeWorker : BackgroundService
             current.Mode, current.Total, current.Cursor, current.Scope,
             current.Selected is null ? "every album" : $"{current.Selected.Count} picked album(s)");
 
-        // Picked albums are matched in bulk first (barcodes, then Apple 40 at a time), so the
-        // lookups after it mostly skip Apple's one-search-at-a-time limit.
+        // Picked albums are matched in bulk (barcodes, then Apple 20 to 40 at a time) WHILE
+        // the lookups run: each album waits only for its own batch, so the run takes about as
+        // long as finding the barcodes, not that plus everything after it.
+        using var primeStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var priming = Task.CompletedTask;
         if (current.Mode != CoverUpgradeMode.Scan && current.Selected is { Count: > 0 } picks)
         {
+            var picked = picks.ToHashSet(StringComparer.Ordinal);
             var queries = previous.Preview
-                .Where(row => picks.Contains(row.Id) && !string.IsNullOrWhiteSpace(row.Album))
-                .Select(row => new AlbumCoverQuery(row.Artist, row.Album, null))
+                .Where(row => picked.Contains(row.Id) && !string.IsNullOrWhiteSpace(row.Album))
+                .Select(row => new AlbumCoverQuery(row.Artist, row.Album, null, Barcode: row.Barcode))
                 .ToList();
-            try
+            priming = Task.Run(async () =>
             {
-                await _finder.PrimeAsync(queries, new Progress<string>(text => _store.Update(run => run.Reason = text)), stoppingToken);
-            }
-            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
-            {
-                _logger.LogInformation("Cover upgrade could not match albums in bulk, so each is searched: {M}", ex.Message);
-            }
-            _store.Update(run => run.Reason = null);
+                try
+                {
+                    await _finder.PrimeAsync(queries, new Progress<string>(text => _store.Update(run => run.Reason = text)), primeStop.Token);
+                }
+                catch (Exception ex) when (!primeStop.IsCancellationRequested)
+                {
+                    _logger.LogInformation("Cover upgrade could not match albums in bulk, so each is searched: {M}", ex.Message);
+                }
+                catch (OperationCanceledException) { }
+                finally
+                {
+                    _store.Update(run => run.Reason = null);
+                }
+            });
         }
+        try
+        {
+            await LookUpAlbumsAsync(current, stoppingToken);
+        }
+        finally
+        {
+            primeStop.Cancel();
+            await priming;
+        }
+    }
+
+    private async Task LookUpAlbumsAsync(CoverUpgradeRun current, CancellationToken stoppingToken)
+    {
 
         // Over a network mount waiting is most of each read, and most of each lookup is
         // waiting on a server, so several albums are worked on at once.
@@ -577,7 +601,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
     }
 
     private sealed record SongFile(string Path, string Artist, string? Album, string? Title,
-        string? ReleaseId, string? ReleaseGroupId, int Side);
+        string? ReleaseId, string? ReleaseGroupId, int Side, string? Barcode = null);
 
     /// <summary>
     /// The songs behind the picked albums, from the list they were picked from. Only those
@@ -689,7 +713,8 @@ public sealed class CoverUpgradeWorker : BackgroundService
             if (run.Mode == CoverUpgradeMode.Scan)
             {
                 var soft = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, 0, null,
-                    albumPaths.Count, folderCover is not null, "soft", first.Path, albumPaths, item.NavidromeAlbumId);
+                    albumPaths.Count, folderCover is not null, "soft", first.Path, albumPaths, item.NavidromeAlbumId,
+                    album.Select(song => song.Barcode).FirstOrDefault(code => !string.IsNullOrEmpty(code)));
                 _store.Update(r => { if (AddRow(r, soft)) r.Soft++; });
                 continue;
             }
@@ -698,7 +723,8 @@ public sealed class CoverUpgradeWorker : BackgroundService
 
             var found = await _finder.FindAsync(new AlbumCoverQuery(first.Artist, first.Album, first.Title,
                 album.Select(s => s.ReleaseId).FirstOrDefault(rid => !string.IsNullOrEmpty(rid)),
-                album.Select(s => s.ReleaseGroupId).FirstOrDefault(rid => !string.IsNullOrEmpty(rid))), ct);
+                album.Select(s => s.ReleaseGroupId).FirstOrDefault(rid => !string.IsNullOrEmpty(rid)),
+                album.Select(s => s.Barcode).FirstOrDefault(code => !string.IsNullOrEmpty(code))), ct);
 
             var upgradeFiles = found is not null
                 ? album.Where(song => found.Side >= song.Side * MinimumGain && found.Side > song.Side).ToList()
@@ -778,13 +804,39 @@ public sealed class CoverUpgradeWorker : BackgroundService
             var side = front?.Data?.Data is { Length: > 0 } bytes && CoverImage.Measure(bytes) is { } size
                 ? Math.Min(size.Width, size.Height) : 0;
             return new SongFile(path, artist, tag.Album, tag.Title, tag.MusicBrainzReleaseId,
-                tag.MusicBrainzReleaseGroupId, side);
+                tag.MusicBrainzReleaseGroupId, side, BarcodeOf(file));
         }
         catch (Exception ex)
         {
             _logger.LogDebug("Cover upgrade could not read {Path}: {M}", path, ex.Message);
             return null;
         }
+    }
+
+    private static readonly string[] BarcodeNames = ["BARCODE", "UPC", "EAN"];
+
+    /// <summary>The album's barcode when the song carries one (about one song in ten of
+    /// Brandon's): with it, the album needs no lookup to be matched at Apple.</summary>
+    internal static string? BarcodeOf(TagLib.File file)
+    {
+        try
+        {
+            if (file.GetTag(TagLib.TagTypes.Xiph) is TagLib.Ogg.XiphComment xiph)
+                foreach (var name in BarcodeNames)
+                    if (xiph.GetFirstField(name) is { Length: > 0 } value) return value.Trim();
+            if (file.GetTag(TagLib.TagTypes.Id3v2) is TagLib.Id3v2.Tag id3)
+                foreach (var frame in id3.GetFrames<TagLib.Id3v2.UserTextInformationFrame>())
+                    if (BarcodeNames.Contains(frame.Description, StringComparer.OrdinalIgnoreCase)
+                        && frame.Text.FirstOrDefault() is { Length: > 0 } value) return value.Trim();
+            if (file.GetTag(TagLib.TagTypes.Apple) is TagLib.Mpeg4.AppleTag apple)
+                foreach (var name in BarcodeNames)
+                    if (apple.GetDashBox("com.apple.iTunes", name) is { Length: > 0 } value) return value.Trim();
+        }
+        catch
+        {
+            // A tag TagLib half understands has no barcode worth trusting.
+        }
+        return null;
     }
 
     private static TagLib.IPicture? FrontOf(TagLib.IPicture[]? pictures) =>

@@ -373,4 +373,21 @@ public class CoverUpgradeTests : IDisposable
         Assert.Equal(2, store.Current.Upgraded);
         Assert.Equal(2, store.Current.Preview.Count);
     }
+
+    [Fact]
+    public void ASongsOwnBarcodeTagIsRead()
+    {
+        var path = Song("Discovery", "One More Time", Jpeg(300, 10));
+        using (var file = TagLib.File.Create(path))
+        {
+            var id3 = (TagLib.Id3v2.Tag)file.GetTag(TagLib.TagTypes.Id3v2, true);
+            TagLib.Id3v2.UserTextInformationFrame.Get(id3, "BARCODE", true).Text = ["0724384960650"];
+            file.Save();
+        }
+
+        using var read = TagLib.File.Create(path);
+        Assert.Equal("0724384960650", CoverUpgradeWorker.BarcodeOf(read));
+        Assert.Equal(["0724384960650", "724384960650"], ITunesCoverArtLookup.BarcodeForms("0724384960650"));
+        Assert.Empty(ITunesCoverArtLookup.BarcodeForms("not a barcode"));
+    }
 }
