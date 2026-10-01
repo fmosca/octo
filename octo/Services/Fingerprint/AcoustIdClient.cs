@@ -12,7 +12,20 @@ public sealed record AcoustIdCredit(string Name, string? ArtistId, string JoinPh
 public sealed record AcoustIdRelease(
     string? ReleaseId, string? ReleaseGroupId, string? Title, int? Year,
     int? TrackNumber, int? TrackCount, int? DiscNumber,
-    string? AlbumArtist, bool IsCompilation);
+    string? AlbumArtist, bool IsCompilation)
+{
+    /// <summary>The rest of what the service says about a release, kept for every release of
+    /// every group so the chooser can weigh them: the group's title and kind, the release's own
+    /// title, date and country, the track's own id, and the album artists' ids.</summary>
+    public string? GroupTitle { get; init; }
+    public string? PrimaryType { get; init; }
+    public IReadOnlyList<string> SecondaryTypes { get; init; } = [];
+    public string? Country { get; init; }
+    public string? Date { get; init; }
+    public string? ReleaseTrackId { get; init; }
+    public int? DiscCount { get; init; }
+    public IReadOnlyList<string> AlbumArtistIds { get; init; } = [];
+}
 
 /// <summary>
 /// One recording AcoustID matched, with the MusicBrainz fields that come back in the same
@@ -26,6 +39,16 @@ public sealed record AcoustIdRecording(
     public IReadOnlyList<AcoustIdCredit> Credits { get; init; } = [];
     public AcoustIdRelease? Release { get; init; }
     public int? DurationSeconds { get; init; }
+
+    /// <summary>Every release of every group the recording is on, bounded, for the chooser.
+    /// <see cref="Release"/> stays the one pick the old fields are read from.</summary>
+    public IReadOnlyList<AcoustIdRelease> Releases { get; init; } = [];
+
+    /// <summary>The codes the music database lists for the recording, normalised.</summary>
+    public IReadOnlyList<string> Isrcs { get; init; } = [];
+
+    /// <summary>How many submissions tie the fingerprint to this recording.</summary>
+    public int Sources { get; init; }
 
     /// <summary>
     /// The credit as MusicBrainz prints it, join phrases and all. Never a bare comma join:
@@ -60,7 +83,11 @@ public sealed record AcoustIdRecording(
     };
 }
 
-public sealed record AcoustIdResult(double Score, IReadOnlyList<AcoustIdRecording> Recordings);
+public sealed record AcoustIdResult(double Score, IReadOnlyList<AcoustIdRecording> Recordings)
+{
+    /// <summary>The service's own id for the fingerprint, written to a confirmed file.</summary>
+    public string? Id { get; init; }
+}
 
 public sealed record AcoustIdLookup(bool IsOk, string? Error, IReadOnlyList<AcoustIdResult> Results);
 
@@ -88,12 +115,16 @@ public sealed class AcoustIdClient
     ///
     /// tracks adds each release's mediums and the track's position on them, which is what numbers
     /// a file named from its match (#48). It only takes effect beside releases.
+    ///
+    /// isrcs and sources cost nothing on the same call: the recording's codes settle agreement
+    /// with a request's code without a second service, and the submission count breaks ties.
     /// </summary>
-    internal const string MetaFields = "recordings releasegroups releases tracks compress";
+    internal const string MetaFields = "recordings releasegroups releases tracks compress isrcs sources";
 
     private const int MaxResults = 10;
     private const int MaxRecordings = 25;
     private const int MaxReleaseGroups = 50;
+    private const int MaxReleasesPerGroup = 10;
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<AcoustIdClient> _logger;
@@ -223,7 +254,7 @@ public sealed class AcoustIdClient
             {
                 var score = result.TryGetProperty("score", out var sc) && sc.ValueKind == JsonValueKind.Number
                     ? sc.GetDouble() : 0d;
-                results.Add(new AcoustIdResult(score, ParseRecordings(result)));
+                results.Add(new AcoustIdResult(score, ParseRecordings(result)) { Id = Str(result, "id") });
             }
         }
 
@@ -260,6 +291,9 @@ public sealed class AcoustIdClient
                 Credits = credits,
                 Release = release.Detail,
                 DurationSeconds = duration,
+                Releases = AllReleases(rec),
+                Isrcs = MusicBrainzClient.ParseIsrcs(rec),
+                Sources = Int(rec, "sources") ?? 0,
             });
         }
         return recordings;
@@ -346,6 +380,93 @@ public sealed class AcoustIdClient
         var clean = string.IsNullOrWhiteSpace(album) ? null : album;
         return (clean, year, new AcoustIdRelease(releaseId, Str(pick, "id"), releaseTitle ?? clean, year,
             trackNumber, trackCount, disc, albumArtist, isCompilation));
+    }
+
+    /// <summary>
+    /// Every release of every group, bounded, each with what the chooser weighs: the group's
+    /// kind, the release's date and country, the track's position and id. The same reading as
+    /// PickRelease, over all of them instead of the one it picks.
+    /// </summary>
+    private static IReadOnlyList<AcoustIdRelease> AllReleases(JsonElement recording)
+    {
+        if (!recording.TryGetProperty("releasegroups", out var groups) || groups.ValueKind != JsonValueKind.Array) return [];
+
+        var releases = new List<AcoustIdRelease>();
+        foreach (var group in groups.EnumerateArray().Take(MaxReleaseGroups))
+        {
+            var groupId = Str(group, "id");
+            var groupTitle = Str(group, "title");
+            var primaryType = Str(group, "type");
+            var secondaryTypes = group.TryGetProperty("secondarytypes", out var sec) && sec.ValueKind == JsonValueKind.Array
+                ? sec.EnumerateArray().Select(t => t.GetString()).OfType<string>().ToList() : [];
+            var (albumArtist, albumArtistIds) = GroupCredit(group);
+            var isCompilation = secondaryTypes.Any(t => string.Equals(t, "Compilation", StringComparison.OrdinalIgnoreCase))
+                || string.Equals(albumArtist, "Various Artists", StringComparison.OrdinalIgnoreCase);
+
+            if (!group.TryGetProperty("releases", out var list) || list.ValueKind != JsonValueKind.Array)
+            {
+                releases.Add(new AcoustIdRelease(null, groupId, groupTitle, null, null, null, null, albumArtist, isCompilation)
+                {
+                    GroupTitle = groupTitle, PrimaryType = primaryType, SecondaryTypes = secondaryTypes, AlbumArtistIds = albumArtistIds,
+                });
+                continue;
+            }
+
+            foreach (var release in list.EnumerateArray().Take(MaxReleasesPerGroup))
+            {
+                int? year = null;
+                string? date = null;
+                if (release.TryGetProperty("date", out var when) && when.ValueKind == JsonValueKind.Object
+                    && Int(when, "year") is { } y && y > 0)
+                {
+                    year = y;
+                    var month = Int(when, "month");
+                    var day = Int(when, "day");
+                    date = month is > 0 ? (day is > 0 ? $"{y:0000}-{month:00}-{day:00}" : $"{y:0000}-{month:00}") : $"{y:0000}";
+                }
+
+                int? trackNumber = null, trackCount = null, disc = null;
+                string? trackId = null;
+                if (release.TryGetProperty("mediums", out var mediums) && mediums.ValueKind == JsonValueKind.Array)
+                    foreach (var medium in mediums.EnumerateArray())
+                    {
+                        if (!medium.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Array
+                            || tracks.GetArrayLength() == 0) continue;
+                        trackNumber = Int(tracks[0], "position");
+                        trackId = Str(tracks[0], "id");
+                        trackCount = Int(medium, "track_count");
+                        disc = Int(medium, "position");
+                        break;
+                    }
+
+                // compress drops a release title equal to its group's.
+                var title = Str(release, "title") ?? groupTitle;
+                releases.Add(new AcoustIdRelease(Str(release, "id"), groupId, title, year, trackNumber, trackCount, disc,
+                    albumArtist, isCompilation)
+                {
+                    GroupTitle = groupTitle,
+                    PrimaryType = primaryType,
+                    SecondaryTypes = secondaryTypes,
+                    Country = Str(release, "country"),
+                    Date = date,
+                    ReleaseTrackId = trackId,
+                    DiscCount = Int(release, "medium_count"),
+                    AlbumArtistIds = albumArtistIds,
+                });
+            }
+        }
+        return releases;
+    }
+
+    private static (string? Credit, IReadOnlyList<string> Ids) GroupCredit(JsonElement group)
+    {
+        if (!group.TryGetProperty("artists", out var artists) || artists.ValueKind != JsonValueKind.Array) return (null, []);
+        var credits = artists.EnumerateArray()
+            .Where(artist => Str(artist, "name") is { Length: > 0 })
+            .Select(artist => new AcoustIdCredit(Str(artist, "name")!, Str(artist, "id"), Str(artist, "joinphrase") ?? ""))
+            .ToList();
+        if (credits.Count == 0) return (null, []);
+        return (AcoustIdRecording.JoinCredits(credits), credits.Select(c => c.ArtistId).OfType<string>().ToList());
     }
 
     private static string? Str(JsonElement element, string name) =>

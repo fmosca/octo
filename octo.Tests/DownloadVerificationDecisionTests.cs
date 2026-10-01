@@ -33,6 +33,25 @@ public class DownloadVerificationDecisionTests
         Assert.Equal(1998, verdict.MatchedYear);
     }
 
+    /// <summary>The whole answer rides along on every verdict, so the chooser can weigh every
+    /// release the service named, and a confirmation carries the service's own id.</summary>
+    [Fact]
+    public void Decide_CarriesTheLookupOnEveryBranch_AndTheResultIdWhenConfirmed()
+    {
+        var confirmed = Ok(Result(0.97, Recording("Teardrop", "Massive Attack")) with { Id = "acoustid-1" });
+        var confirmedVerdict = DownloadVerificationService.Decide(confirmed, "Massive Attack", "Teardrop", Threshold, false);
+        Assert.Same(confirmed, confirmedVerdict.Lookup);
+        Assert.Equal("acoustid-1", confirmedVerdict.AcoustId);
+
+        var weak = Ok(Result(0.60, Recording("Teardrop", "Massive Attack")));
+        var weakVerdict = DownloadVerificationService.Decide(weak, "Massive Attack", "Teardrop", Threshold, false);
+        Assert.Same(weak, weakVerdict.Lookup);
+        Assert.Null(weakVerdict.AcoustId);
+
+        var mismatch = Ok(Result(0.97, Recording("Angel", "Massive Attack")));
+        Assert.Same(mismatch, DownloadVerificationService.Decide(mismatch, "Massive Attack", "Teardrop", Threshold, false).Lookup);
+    }
+
     /// <summary>
     /// The most important test in the feature. A weak match must never delete a file, which is
     /// also why raising MinMatchScore makes Octo more permissive rather than stricter.

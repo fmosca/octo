@@ -27,8 +27,90 @@ public class AcoustIdLookupTests
     public void MetaFields_AreSpaceSeparated()
     {
         Assert.DoesNotContain('+', AcoustIdClient.MetaFields);
-        Assert.Equal(["recordings", "releasegroups", "releases", "tracks", "compress"],
+        Assert.Equal(["recordings", "releasegroups", "releases", "tracks", "compress", "isrcs", "sources"],
             AcoustIdClient.MetaFields.Split(' '));
+    }
+
+    /// <summary>
+    /// Every release of every group is kept for the chooser, each with its own id, date,
+    /// country, medium and track position, while the one pick the old fields read from is
+    /// unchanged. The shape is the live answer of 2026-10-01: a date object, a country string,
+    /// medium_count, and the track's own id.
+    /// </summary>
+    [Fact]
+    public void ParseLookup_KeepsEveryRelease_AndTheOldPickIsUnchanged()
+    {
+        var lookup = Parse("""
+        {"status": "ok", "results": [{"id": "5745be34-ef80-4c5d-a99b-022b1c3ce567", "score": 0.99, "recordings": [{
+          "id": "rec-1", "title": "Human", "duration": 172.253, "sources": 5, "isrcs": ["QMCE32000213", "qm-ce3-20-00213", "bad"],
+          "artists": [{"id": "a1", "name": "$NOT", "joinphrase": " feat. "}, {"id": "a2", "name": "Night Lovell"}],
+          "releasegroups": [
+            {"id": "g-comp", "title": "Trap Hits", "type": "Album", "secondarytypes": ["Compilation"],
+             "artists": [{"id": "va", "name": "Various Artists"}],
+             "releases": [{"id": "r-comp", "country": "US", "date": {"year": 2021, "month": 1}, "medium_count": 2,
+               "mediums": [{"position": 2, "track_count": 16, "tracks": [{"id": "t-comp", "position": 9, "title": "Human"}]}]}]},
+            {"id": "g-single", "title": "Human", "type": "Single",
+             "artists": [{"id": "a1", "name": "$NOT", "joinphrase": " feat. "}, {"id": "a2", "name": "Night Lovell"}],
+             "releases": [
+               {"id": "r-single", "country": "XW", "date": {"day": 22, "month": 5, "year": 2020}, "medium_count": 1,
+                "mediums": [{"position": 1, "track_count": 1, "tracks": [{"id": "t-single", "position": 1, "title": "Human"}]}]},
+               {"id": "r-single-2", "title": "Human (Explicit)", "country": "GB", "date": {"year": 2020}, "medium_count": 1,
+                "mediums": [{"position": 1, "track_count": 1, "tracks": [{"id": "t-single-2", "position": 1}]}]}]}
+          ]}]}]}
+        """);
+
+        var result = Assert.Single(lookup.Results);
+        Assert.Equal("5745be34-ef80-4c5d-a99b-022b1c3ce567", result.Id);
+        var recording = Assert.Single(result.Recordings);
+        Assert.Equal(5, recording.Sources);
+        Assert.Equal(["QMCE32000213"], recording.Isrcs);
+
+        Assert.Equal(3, recording.Releases.Count);
+        var comp = recording.Releases[0];
+        Assert.Equal("r-comp", comp.ReleaseId);
+        Assert.Equal("g-comp", comp.ReleaseGroupId);
+        Assert.Equal("Trap Hits", comp.GroupTitle);
+        Assert.Equal("Album", comp.PrimaryType);
+        Assert.Equal(["Compilation"], comp.SecondaryTypes);
+        Assert.True(comp.IsCompilation);
+        Assert.Equal("US", comp.Country);
+        Assert.Equal("2021-01", comp.Date);
+        Assert.Equal(2021, comp.Year);
+        Assert.Equal(2, comp.DiscNumber);
+        Assert.Equal(2, comp.DiscCount);
+        Assert.Equal(9, comp.TrackNumber);
+        Assert.Equal(16, comp.TrackCount);
+        Assert.Equal("t-comp", comp.ReleaseTrackId);
+        Assert.Equal(["va"], comp.AlbumArtistIds);
+
+        var single = recording.Releases[1];
+        Assert.Equal("r-single", single.ReleaseId);
+        Assert.Equal("Single", single.PrimaryType);
+        Assert.Equal("2020-05-22", single.Date);
+        Assert.Equal("XW", single.Country);
+        Assert.Equal("Human", single.Title);
+        Assert.Equal("$NOT feat. Night Lovell", single.AlbumArtist);
+        Assert.Equal(["a1", "a2"], single.AlbumArtistIds);
+        Assert.Equal("Human (Explicit)", recording.Releases[2].Title);
+        Assert.Equal("2020", recording.Releases[2].Date);
+
+        // The old pick: the first plain album group, else the first group; here the compilation.
+        Assert.Equal("r-comp", recording.Release!.ReleaseId);
+        Assert.Equal("Trap Hits", recording.AlbumTitle);
+        Assert.Equal(2021, recording.Year);
+    }
+
+    [Fact]
+    public void ParseLookup_NoIsrcsOrSources_ReadsAsNone()
+    {
+        var lookup = Parse("""
+        {"status": "ok", "results": [{"score": 0.99, "recordings": [{"id": "r1", "title": "Song", "artists": [{"name": "A"}]}]}]}
+        """);
+        var recording = lookup.Results[0].Recordings[0];
+        Assert.Null(lookup.Results[0].Id);
+        Assert.Empty(recording.Isrcs);
+        Assert.Equal(0, recording.Sources);
+        Assert.Empty(recording.Releases);
     }
 
     [Fact]

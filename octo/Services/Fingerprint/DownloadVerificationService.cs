@@ -65,6 +65,13 @@ public sealed record VerificationResult
     public string? Fingerprint { get; init; }
     public int DurationSeconds { get; init; }
 
+    /// <summary>The whole answer, every result and release, so the chooser can weigh them all.
+    /// Set whenever the service answered, even below the threshold.</summary>
+    public AcoustIdLookup? Lookup { get; init; }
+
+    /// <summary>The service's id for the fingerprint that confirmed the recording.</summary>
+    public string? AcoustId { get; init; }
+
     /// <summary>
     /// The one recording AcoustID proposed below the threshold that agrees with the request on
     /// title, artist and length. The first MusicBrainz id a person's Keep may submit, and null
@@ -317,6 +324,7 @@ public sealed class DownloadVerificationService
                 Reason = InconclusiveReason.NoEntry,
                 Fingerprint = fingerprint.Fingerprint,
                 DurationSeconds = seconds,
+                Lookup = lookup,
             };
         }
 
@@ -413,10 +421,11 @@ public sealed class DownloadVerificationService
         var agreed = best.Recordings.FirstOrDefault(recording =>
             recordingIsrcs.TryGetValue(recording.RecordingId, out var isrcs) && isrcs.Contains(isrc));
         if (agreed is not null)
-            return Confirm(best.Score, agreed, tagsAuthoritative) with
+            return Confirm(best, agreed, tagsAuthoritative) with
             {
                 Fingerprint = verdict.Fingerprint,
                 DurationSeconds = verdict.DurationSeconds,
+                Lookup = lookup,
                 Evidence = $"MusicBrainz lists the requested ISRC {isrc} on '{agreed.ArtistCredit} - {agreed.Title}'",
             };
 
@@ -438,7 +447,12 @@ public sealed class DownloadVerificationService
     /// above make the orchestration awkward to mock for no benefit.
     /// </summary>
     internal static VerificationResult Decide(AcoustIdLookup lookup, string? requestedArtist,
-        string? requestedTitle, double threshold, bool tagsAuthoritative, int durationSeconds = 0)
+        string? requestedTitle, double threshold, bool tagsAuthoritative, int durationSeconds = 0) =>
+        DecideCore(lookup, requestedArtist, requestedTitle, threshold, tagsAuthoritative, durationSeconds)
+            with { Lookup = lookup };
+
+    private static VerificationResult DecideCore(AcoustIdLookup lookup, string? requestedArtist,
+        string? requestedTitle, double threshold, bool tagsAuthoritative, int durationSeconds)
     {
         var qualifying = lookup.Results
             .Where(result => result.Score >= threshold && result.Recordings.Count > 0)
@@ -468,7 +482,7 @@ public sealed class DownloadVerificationService
             TrackMatchComparer.TitleMatches(requestedTitle, recording.Title)
             && TrackMatchComparer.ArtistMatches(requestedArtist, recording.ArtistCredit, recording.Artists));
 
-        if (agreed is not null) return Confirm(best.Score, agreed, tagsAuthoritative);
+        if (agreed is not null) return Confirm(best, agreed, tagsAuthoritative);
 
         var actual = best.Recordings[0];
         return new VerificationResult
@@ -484,10 +498,11 @@ public sealed class DownloadVerificationService
         };
     }
 
-    private static VerificationResult Confirm(double score, AcoustIdRecording recording, bool tagsAuthoritative) => new()
+    private static VerificationResult Confirm(AcoustIdResult result, AcoustIdRecording recording, bool tagsAuthoritative) => new()
     {
         Verdict = VerificationVerdict.Confirmed,
-        Score = score,
+        Score = result.Score,
+        AcoustId = result.Id,
         MatchedTitle = recording.Title,
         MatchedArtist = recording.ArtistCredit,
         MatchedAlbum = recording.AlbumTitle,
