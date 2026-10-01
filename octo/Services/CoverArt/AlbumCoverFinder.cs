@@ -80,11 +80,11 @@ public sealed class AlbumCoverFinder : IAlbumCoverFinder
                 if (hit is not null && await _deezer.GetAlbumUpcAsync(hit.DeezerId, token) is { } upc)
                     barcodes.Add((album.Artist, album.Album!, upc));
                 var n = Interlocked.Increment(ref found);
-                if (n % 10 == 0 || n == named.Count) status?.Report($"Finding barcodes: {n:N0} of {named.Count:N0} albums");
+                if (n % 10 == 0 || n == named.Count) status?.Report($"Step 1 of 3 · Finding barcodes: {n:N0} of {named.Count:N0} albums");
             });
         var list = barcodes.ToList();
         var matched = await _itunes.PrimeByBarcodeAsync(list,
-            new Progress<int>(done => status?.Report($"Matching with Apple: {done:N0} of {list.Count:N0} albums")), ct);
+            new Progress<int>(done => status?.Report($"Step 2 of 3 · Matching with Apple: {done:N0} of {list.Count:N0} albums")), ct);
         _logger.LogInformation("Cover upgrade: {Barcodes} of {Albums} album(s) had a barcode, Apple matched {Matched} in bulk",
             barcodes.Count, named.Count, matched);
     }

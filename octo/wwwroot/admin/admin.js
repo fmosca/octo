@@ -1482,7 +1482,9 @@ function renderCovers(run) {
   } else if (running) {
     head = { Scan: 'Scanning', Preview: 'Finding better covers', Apply: 'Replacing covers' }[run.mode] ?? 'Working';
     const of = (n, total, word) => `${n.toLocaleString()} of ${total.toLocaleString()} ${word}${total === 1 ? '' : 's'}`;
-    sub = byAlbum ? of(run.albumsDone, run.albumsTotal, 'album')
+    // A lookup over picked albums matches them in bulk first (steps 1 and 2, in the reason).
+    const step = run.mode !== 'Scan' && run.selected !== null && run.picked ? 'Step 3 of 3 · ' : '';
+    sub = byAlbum ? step + of(run.albumsDone, run.albumsTotal, 'album')
       : run.songsTotal ? of(run.songsRead, run.songsTotal, 'song')
       : of(run.processed, run.total, 'folder');
     // Before the first album, a lookup matches the picked albums in bulk and says how far.
