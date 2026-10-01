@@ -34,6 +34,9 @@ public class CoverChainTests
     }
 
     private static readonly byte[] Square = Jpeg(600, 600, new Rgba32(200, 40, 40));
+    private static readonly byte[] Sharp = Jpeg(1200, 1200, new Rgba32(40, 40, 200));
+    private static readonly byte[] Catalog = Jpeg(1000, 1000, new Rgba32(200, 200, 40));
+    private static readonly byte[] Thumbnail = Jpeg(200, 200, new Rgba32(90, 90, 90));
     private static readonly byte[] VideoFrame = Jpeg(1280, 720, new Rgba32(40, 200, 40));
 
     // ---- CoverImage -----------------------------------------------------------------------
@@ -113,7 +116,7 @@ public class CoverChainTests
     {
         var calls = new List<string>();
         var http = Http(request => request.RequestUri!.ToString().Contains("coverartarchive")
-            ? Picture(Square) : new HttpResponseMessage(HttpStatusCode.NotFound), calls);
+            ? Picture(Sharp) : new HttpResponseMessage(HttpStatusCode.NotFound), calls);
         var song = new Song
         {
             Artist = "M83", Title = "Lower Your Eyelids", Album = "Before the Dawn Heals Us",
@@ -124,8 +127,97 @@ public class CoverChainTests
         var choice = await Resolver(http, new FixedSource(null)).ResolveAsync(song, null, CancellationToken.None);
 
         Assert.Equal("Cover Art Archive", choice!.Source);
-        Assert.Contains(calls, url => url.Contains("release/rel-1/front-500"));
+        Assert.Contains(calls, url => url.Contains("release/rel-1/front-1200"));
         Assert.DoesNotContain(calls, url => url.Contains("deezer.example"));
+    }
+
+    private static Song MatchedRelease() => new()
+    {
+        Artist = "M83", Title = "Lower Your Eyelids", Album = "Before the Dawn Heals Us",
+        MusicBrainzReleaseId = "rel-1", MusicBrainzAlbumTitle = "Before the Dawn Heals Us",
+        CoverArtUrlLarge = "https://deezer.example/cover.jpg",
+    };
+
+    /// <summary>The soft cover Brandon got: the archive's 500 px scan beat the catalog's 1000.</summary>
+    [Fact]
+    public async Task Resolve_ASmallArchiveScanLosesToTheCatalogsLargerCover()
+    {
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("front-1200") => new HttpResponseMessage(HttpStatusCode.NotFound),
+            var url when url.Contains("front-500") => Picture(Jpeg(500, 500)),
+            var url when url.Contains("deezer.example") => Picture(Catalog),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        });
+
+        var choice = await Resolver(http, new FixedSource(null)).ResolveAsync(MatchedRelease(), null, CancellationToken.None);
+
+        Assert.Equal("the catalog", choice!.Source);
+        Assert.Equal((1000, 1000), CoverImage.Measure(choice.Bytes));
+    }
+
+    [Fact]
+    public async Task Resolve_TheArchivesSmallerThumbnailIsUsedWhenItHasNoLargeOne()
+    {
+        var calls = new List<string>();
+        var http = Http(request => request.RequestUri!.ToString().Contains("front-500")
+            ? Picture(Square) : new HttpResponseMessage(HttpStatusCode.NotFound), calls);
+
+        var choice = await Resolver(http, new FixedSource(null)).ResolveAsync(MatchedRelease(), null, CancellationToken.None);
+
+        Assert.Equal("Cover Art Archive", choice!.Source);
+        Assert.Equal(["release/rel-1/front-1200", "release/rel-1/front-500"],
+            calls.Where(url => url.Contains("coverartarchive")).Select(url => new Uri(url).AbsolutePath.TrimStart('/')).ToList());
+    }
+
+    [Fact]
+    public async Task Resolve_ASmallCatalogCoverKeepsLookingAndTheSearchsLargerOneWins()
+    {
+        var http = Http(_ => Picture(Square));
+        var search = new FixedSource(Catalog);
+        var song = new Song { Artist = "A", Title = "T", CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        var choice = await Resolver(http, search).ResolveAsync(song, Thumbnail, CancellationToken.None);
+
+        Assert.Equal("a cover search", choice!.Source);
+        Assert.False(choice.KeepsExisting);
+    }
+
+    [Fact]
+    public async Task Resolve_APeersTinyThumbnailNeverBeatsARealCover()
+    {
+        var http = Http(_ => Picture(Square));
+        var song = new Song { Artist = "A", Title = "T", CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        var choice = await Resolver(http, new FixedSource(null)).ResolveAsync(song, Thumbnail, CancellationToken.None);
+
+        Assert.Equal("the catalog", choice!.Source);
+        Assert.False(choice.KeepsExisting);
+    }
+
+    [Fact]
+    public async Task Resolve_TheFilesOwnArtStaysWhenItIsTheLargest()
+    {
+        var http = Http(_ => Picture(Square));
+        var song = new Song { Artist = "A", Title = "T", CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        var choice = await Resolver(http, new FixedSource(null)).ResolveAsync(song, Sharp, CancellationToken.None);
+
+        Assert.True(choice!.KeepsExisting);
+        Assert.Equal("the file itself", choice.Source);
+    }
+
+    [Fact]
+    public async Task Resolve_ASharpCatalogCoverStopsTheSearch()
+    {
+        var http = Http(_ => Picture(Catalog));
+        var search = new FixedSource(Sharp);
+        var song = new Song { Artist = "A", Title = "T", CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        var choice = await Resolver(http, search).ResolveAsync(song, null, CancellationToken.None);
+
+        Assert.Equal("the catalog", choice!.Source);
+        Assert.Equal(0, search.Calls);
     }
 
     /// <summary>A download tagged with a compilation's name must not get the original album's cover.</summary>

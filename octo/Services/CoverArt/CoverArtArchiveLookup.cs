@@ -3,7 +3,8 @@ namespace Octo.Services.CoverArt;
 /// <summary>
 /// The Cover Art Archive, asked directly when a fingerprint named the MusicBrainz release: the
 /// right pressing, no guessing by name (#51). The front of the release first, then of the release
-/// group. No key; it redirects across hosts to archive.org, which HttpClient follows.
+/// group. No key; it redirects across hosts to archive.org, which HttpClient follows. Asked at
+/// 1200, its largest thumbnail: the 500 one lost to the catalog's 1000 px covers.
 /// </summary>
 public sealed class CoverArtArchiveLookup
 {
@@ -20,9 +21,12 @@ public sealed class CoverArtArchiveLookup
 
     public async Task<byte[]?> TryFetchAsync(string? releaseId, string? releaseGroupId, CancellationToken ct)
     {
+        // The 500 one only when the 1200 one is missing, which an old upload can be.
         foreach (var path in new[]
                  {
+                     string.IsNullOrEmpty(releaseId) ? null : $"release/{releaseId}/front-1200",
                      string.IsNullOrEmpty(releaseId) ? null : $"release/{releaseId}/front-500",
+                     string.IsNullOrEmpty(releaseGroupId) ? null : $"release-group/{releaseGroupId}/front-1200",
                      string.IsNullOrEmpty(releaseGroupId) ? null : $"release-group/{releaseGroupId}/front-500",
                  })
         {
