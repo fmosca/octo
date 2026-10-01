@@ -74,6 +74,8 @@ public sealed class CoverUpgradeController : ControllerBase
             run.Reason,
             run.SongsTotal,
             run.SongsRead,
+            run.AlbumsTotal,
+            run.AlbumsDone,
             run.Errors,
             // Without each album's file list, which only the next run needs.
             preview = run.Preview.Select(row => new
@@ -136,12 +138,17 @@ public sealed class CoverUpgradeController : ControllerBase
     /// <summary>The cover an album on the list has now, small, so the soft ones can be seen; with
     /// <c>found=true</c>, the larger one a preview found for it.</summary>
     [HttpGet("thumb/{id}")]
-    public IActionResult Thumb(string id, [FromQuery] bool found, [FromHeader(Name = "X-Octo-Browse-Token")] string? token)
+    public async Task<IActionResult> Thumb(string id, [FromQuery] bool found,
+        [FromHeader(Name = "X-Octo-Browse-Token")] string? token, CancellationToken ct)
     {
         if (!Signed(token)) return SignIn();
+        Response.Headers.CacheControl = "private, max-age=300";
+        // The cover Navidrome shows, already made at the apps' size; reading the song is the
+        // fallback, and over a network mount it is the slow one.
+        if (!found && await _worker.NavidromeThumbnailAsync(id, ct) is { } served)
+            return File(served.Bytes, served.Type);
         var bytes = found ? _worker.FoundThumbnail(id) : _worker.Thumbnail(id);
         if (bytes is null) return NotFound();
-        Response.Headers.CacheControl = "private, max-age=300";
         return File(bytes, CoverImage.MimeType(bytes));
     }
 

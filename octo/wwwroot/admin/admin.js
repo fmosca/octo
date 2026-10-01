@@ -1459,8 +1459,9 @@ function renderCovers(run) {
 
   const progress = coverEl('cover-progress');
   progress.hidden = !running;
-  const done = run.songsTotal ? run.songsRead : run.processed;
-  const all = run.songsTotal || run.total;
+  const byAlbum = run.albumsTotal > 0;
+  const done = byAlbum ? run.albumsDone : run.songsTotal ? run.songsRead : run.processed;
+  const all = byAlbum ? run.albumsTotal : run.songsTotal || run.total;
   if (running) coverEl('cover-progress-fill').style.width = `${all ? Math.min(100, Math.round(100 * done / all)) : 0}%`;
 
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -1472,9 +1473,15 @@ function renderCovers(run) {
     sub = `${plural(run.files, 'song')}`;
   } else if (running) {
     head = { Scan: 'Scanning', Preview: 'Finding better covers', Apply: 'Replacing covers' }[run.mode] ?? 'Working';
-    sub = run.songsTotal
-      ? `${run.songsRead.toLocaleString()} of ${plural(run.songsTotal, 'song').replace(/^\d+/, n => Number(n).toLocaleString())}`
-      : `${run.processed} of ${plural(run.total, 'folder')}`;
+    const of = (n, total, word) => `${n.toLocaleString()} of ${total.toLocaleString()} ${word}${total === 1 ? '' : 's'}`;
+    sub = byAlbum ? of(run.albumsDone, run.albumsTotal, 'album')
+      : run.songsTotal ? of(run.songsRead, run.songsTotal, 'song')
+      : of(run.processed, run.total, 'folder');
+    // Lookups are about 3.5 seconds an album, so a lookup or a replace can say how long is left.
+    if (run.mode !== 'Scan' && byAlbum) {
+      const left = Math.max(0, run.albumsTotal - run.albumsDone) * 3.5;
+      if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
+    }
   } else if (run.mode === 'Scan') {
     head = run.soft ? `${plural(run.soft, 'album has a soft cover', 'albums have soft covers')}` : 'Every cover is sharp';
     sub = `under ${run.smallerThan} px${run.kept ? ` · ${run.kept} already sharp` : ''}`;

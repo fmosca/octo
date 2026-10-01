@@ -309,4 +309,28 @@ public class CoverUpgradeTests : IDisposable
         Assert.Equal((2, 2), (store.Current.SongsTotal, store.Current.SongsRead));
         Assert.Equal("found", Assert.Single(store.Current.Preview).Result);
     }
+
+    [Fact]
+    public void FilesNavidromeNamedAnAlbumForAreOneItemPerAlbumAndTheRestGoByFolder()
+    {
+        var root = Path.Combine(_root, "music");
+        string At(string name) => Path.Combine(root, name);
+        var files = new[] { At("A - 1.flac"), At("B - 1.flac"), At("A - 2.flac"), Path.Combine(root, "x", "C - 1.mp3"), At("D - 1.mp3") };
+        var albums = new Dictionary<string, string>
+        {
+            [Path.GetFullPath(At("A - 1.flac"))] = "alb-a",
+            [Path.GetFullPath(At("A - 2.flac"))] = "alb-a",
+            [Path.GetFullPath(At("B - 1.flac"))] = "alb-b",
+        };
+
+        var items = CoverUpgradeWorker.ByAlbum(files, albums);
+
+        var a = Assert.Single(items, item => item.NavidromeAlbumId == "alb-a");
+        Assert.Equal([At("A - 1.flac"), At("A - 2.flac")], a.Files);
+        Assert.Single(items, item => item.NavidromeAlbumId == "alb-b");
+        var loose = items.Where(item => item.NavidromeAlbumId is null).ToList();
+        Assert.Equal(2, loose.Count);
+        Assert.Contains(loose, item => item.Folder == Path.Combine(root, "x"));
+        Assert.Contains(loose, item => item.Files!.SequenceEqual([At("D - 1.mp3")]));
+    }
 }

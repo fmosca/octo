@@ -45,10 +45,13 @@ public sealed record CoverUpgradeRequest(CoverUpgradeScope Scope, CoverUpgradeMo
 /// </summary>
 public sealed record CoverUpgradeChange(string Id, string Folder, string Artist, string? Album, int FromSide, int ToSide,
     string? Source, int Files, bool FolderCover, string Result, string? FirstFile = null,
-    IReadOnlyList<string>? Paths = null);
+    IReadOnlyList<string>? Paths = null, string? NavidromeAlbumId = null);
 
-/// <summary>One folder to go through. Files is null for "every song in it".</summary>
-public sealed record CoverUpgradeItem(string Folder, List<string>? Files);
+/// <summary>
+/// One piece of work: a folder, or one Navidrome album when Navidrome could say which songs
+/// make each album. Files is null for "every song in the folder".
+/// </summary>
+public sealed record CoverUpgradeItem(string Folder, List<string>? Files, string? NavidromeAlbumId = null);
 
 public sealed class CoverUpgradeRun
 {
@@ -71,6 +74,11 @@ public sealed class CoverUpgradeRun
     /// flat library is one folder of thousands of songs.</summary>
     public int SongsTotal { get; set; }
     public int SongsRead { get; set; }
+    /// <summary>Albums to go through and gone through, when they are known up front: every
+    /// album of a scan Navidrome grouped, or the picked ones. Lookups take seconds each, so
+    /// this is the progress that moves during them.</summary>
+    public int AlbumsTotal { get; set; }
+    public int AlbumsDone { get; set; }
     /// <summary>Albums a scan found with a cover smaller than asked.</summary>
     public int Soft { get; set; }
     /// <summary>Albums whose cover got (or would get) larger.</summary>
@@ -360,6 +368,9 @@ public sealed class CoverUpgradeWorker : BackgroundService
     /// <summary>Apple asks for about 20 searches a minute; one album is one search.</summary>
     internal TimeSpan PauseBetweenAlbums { get; set; } = TimeSpan.FromSeconds(3);
 
+    /// <summary>Albums a scan reads at once.</summary>
+    internal const int ScanParallelism = 6;
+
     internal static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".mp3", ".flac", ".m4a", ".mp4", ".aac", ".ogg", ".oga", ".opus", ".wma", ".aif", ".aiff", ".dsf", ".wv", ".ape",
@@ -460,6 +471,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 StartedUtc = DateTime.UtcNow,
                 Total = queue.Count,
                 SongsTotal = queue.Sum(item => item.Files?.Count ?? 0),
+                AlbumsTotal = selected?.Count ?? queue.Count(item => item.NavidromeAlbumId is not null),
                 Queue = queue,
             });
         }
@@ -468,7 +480,10 @@ public sealed class CoverUpgradeWorker : BackgroundService
             current.Mode, current.Total, current.Cursor, current.Scope,
             current.Selected is null ? "every album" : $"{current.Selected.Count} picked album(s)");
 
-        for (var index = current.Cursor; index < current.Queue.Count; index++)
+        // A scan only reads files, and over a network mount waiting is most of each read, so
+        // a scan reads several albums at once. Lookups stay one at a time for Apple's limit.
+        var parallel = current.Mode == CoverUpgradeMode.Scan ? ScanParallelism : 1;
+        for (var index = current.Cursor; index < current.Queue.Count; index += parallel)
         {
             if (stoppingToken.IsCancellationRequested)
             {
@@ -486,27 +501,31 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 return;
             }
 
-            var item = current.Queue[index];
-            var looked = false;
-            try
+            var batch = current.Queue.Skip(index).Take(parallel).ToList();
+            var looked = await Task.WhenAll(batch.Select(async item =>
             {
-                looked = await ProcessFolderAsync(item, current, stoppingToken);
-            }
-            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
-            {
-                _store.Update(run =>
+                try
                 {
-                    run.Failed++;
-                    run.Errors.Add($"{item.Folder}: {ex.Message}");
-                });
-            }
+                    return await ProcessFolderAsync(item, current, stoppingToken);
+                }
+                catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+                {
+                    _store.Update(run =>
+                    {
+                        run.Failed++;
+                        run.Errors.Add($"{item.Folder}: {ex.Message}");
+                    });
+                    return false;
+                }
+            }));
+            var reached = index + batch.Count;
             _store.Update(run =>
             {
-                run.Cursor = index + 1;
-                run.Processed++;
-                run.LastFolder = item.Folder;
+                run.Cursor = reached;
+                run.Processed += batch.Count;
+                run.LastFolder = batch[^1].Folder;
             });
-            if (looked && PauseBetweenAlbums > TimeSpan.Zero) await Task.Delay(PauseBetweenAlbums, stoppingToken);
+            if (looked.Any(l => l) && PauseBetweenAlbums > TimeSpan.Zero) await Task.Delay(PauseBetweenAlbums, stoppingToken);
         }
 
         _store.Update(run =>
@@ -537,10 +556,13 @@ public sealed class CoverUpgradeWorker : BackgroundService
             .Where(row => picked.Contains(row.Id))
             .GroupBy(row => row.Folder, StringComparer.Ordinal)
             .OrderBy(group => group.Key, StringComparer.Ordinal)
-            .Select(group => new CoverUpgradeItem(group.Key,
-                group.All(row => row.Paths is { Count: > 0 })
-                    ? group.SelectMany(row => row.Paths!).Distinct(StringComparer.Ordinal).ToList()
-                    : files.GetValueOrDefault(group.Key)))
+            .SelectMany(group => group.All(row => row.NavidromeAlbumId is not null && row.Paths is { Count: > 0 })
+                // Navidrome albums stay one item each, so they keep their ids.
+                ? group.Select(row => new CoverUpgradeItem(group.Key, row.Paths!.ToList(), row.NavidromeAlbumId))
+                : [new CoverUpgradeItem(group.Key,
+                    group.All(row => row.Paths is { Count: > 0 })
+                        ? group.SelectMany(row => row.Paths!).Distinct(StringComparer.Ordinal).ToList()
+                        : files.GetValueOrDefault(group.Key))])
             .ToList();
     }
 
@@ -581,27 +603,43 @@ public sealed class CoverUpgradeWorker : BackgroundService
         var paths = item.Files ?? Directory.EnumerateFiles(item.Folder)
             .Where(path => AudioExtensions.Contains(Path.GetExtension(path))).ToList();
         var songs = new List<SongFile>();
+        // A Navidrome album is known to be one album, so a scan or a lookup needs only one of
+        // its songs read; a replace reads every song, since each one gets its own cover.
+        var oneWillDo = item.NavidromeAlbumId is not null && run.Mode != CoverUpgradeMode.Apply;
         foreach (var path in paths)
         {
             if (ct.IsCancellationRequested || _cancel) return false;
             var song = File.Exists(path) ? ReadSong(path) : null;
             if (song is not null) songs.Add(song);
             _store.Update(r => r.SongsRead++);
+            if (oneWillDo && song is not null)
+            {
+                var left = paths.Count - paths.IndexOf(path) - 1;
+                if (left > 0) _store.Update(r => r.SongsRead += left);
+                break;
+            }
         }
 
         var looked = false;
         var picked = run.Selected?.ToHashSet(StringComparer.Ordinal);
         // An album without a name is matched song by song, as a single.
-        foreach (var album in songs.GroupBy(song => string.IsNullOrWhiteSpace(song.Album)
-                     ? "\u0001" + song.Path
-                     : $"{SongIdentity.Key(song.Artist)}|{SongIdentity.Key(song.Album)}"))
+        foreach (var album in songs.GroupBy(song => item.NavidromeAlbumId is { } ndAlbum
+                     ? "nd:" + ndAlbum
+                     : string.IsNullOrWhiteSpace(song.Album)
+                         ? "\u0001" + song.Path
+                         : $"{SongIdentity.Key(song.Artist)}|{SongIdentity.Key(song.Album)}"))
         {
             if (ct.IsCancellationRequested || _cancel) break;
             var id = AlbumId(item.Folder, album.Key);
+            _store.Update(r => { if (r.AlbumsTotal > 0) r.AlbumsDone++; });
+            // Every path of the album, read or not, so a later run and a replace see them all.
+            var albumPaths = item.NavidromeAlbumId is not null ? paths : album.Select(song => song.Path).ToList();
             if (picked is not null && !picked.Contains(id)) continue;
             var first = album.First();
             var have = album.Min(song => song.Side);
-            var folderCover = run.FolderCovers && album.Count() == songs.Count ? FolderCover(item.Folder) : null;
+            var folderCover = run.FolderCovers && (item.NavidromeAlbumId is not null
+                ? FolderHoldsOnly(item.Folder, albumPaths)
+                : album.Count() == songs.Count) ? FolderCover(item.Folder) : null;
             var shown = Math.Min(have, folderCover?.Side ?? have);
 
             // A picked album is looked up whatever its size: it was picked.
@@ -614,7 +652,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
             if (run.Mode == CoverUpgradeMode.Scan)
             {
                 var soft = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, 0, null,
-                    album.Count(), folderCover is not null, "soft", first.Path, album.Select(song => song.Path).ToList());
+                    albumPaths.Count, folderCover is not null, "soft", first.Path, albumPaths, item.NavidromeAlbumId);
                 _store.Update(r =>
                 {
                     r.Soft++;
@@ -639,7 +677,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
             {
                 // On a picked list, an album that stays as it is still says so.
                 var none = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, found?.Side ?? 0,
-                    found?.Source, 0, false, "none", first.Path, album.Select(song => song.Path).ToList());
+                    found?.Source, 0, false, "none", first.Path, albumPaths, item.NavidromeAlbumId);
                 _store.Update(r =>
                 {
                     r.Kept++;
@@ -662,11 +700,11 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 if (upgradeFolder && !WriteFolderCover(folderCover!.Value.Path, found.Bytes, run.RunId))
                     upgradeFolder = false;
             }
-            else written = upgradeFiles.Count;
+            else written = item.NavidromeAlbumId is not null ? albumPaths.Count : upgradeFiles.Count;
 
             var change = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown,
-                found.Side, found.Source, written, upgradeFolder, run.DryRun ? "found" : "upgraded", first.Path,
-                album.Select(song => song.Path).ToList());
+                found.Side, found.Source, run.DryRun ? albumPaths.Count : written, upgradeFolder,
+                run.DryRun ? "found" : "upgraded", first.Path, albumPaths, item.NavidromeAlbumId);
             _store.Update(r =>
             {
                 r.Upgraded++;
@@ -759,6 +797,130 @@ public sealed class CoverUpgradeWorker : BackgroundService
             });
             return false;
         }
+    }
+
+    /// <summary>True when every song in the folder is one of these: a cover.jpg there is this
+    /// album's alone.</summary>
+    private static bool FolderHoldsOnly(string folder, IReadOnlyCollection<string> albumPaths)
+    {
+        try
+        {
+            var mine = albumPaths.ToHashSet(StringComparer.Ordinal);
+            return Directory.EnumerateFiles(folder)
+                .Where(path => AudioExtensions.Contains(Path.GetExtension(path)))
+                .All(mine.Contains);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The cover Navidrome shows for an album, at the size the apps ask for, so the wall fills
+    /// as fast as the apps do: Navidrome keeps these already made. Null when Navidrome cannot
+    /// be asked, and the dashboard then gets a copy read from the song itself.
+    /// </summary>
+    public async Task<(byte[] Bytes, string Type)?> NavidromeThumbnailAsync(string id, CancellationToken ct)
+    {
+        var row = _store.Current.Preview.FirstOrDefault(r => r.Id == id);
+        if (row?.NavidromeAlbumId is not { } album) return null;
+        using var handle = _scopes.CreateScope();
+        var identity = handle.ServiceProvider.GetService<NavidromeIdentityService>();
+        var baseUrl = handle.ServiceProvider.GetService<IOptionsMonitor<SubsonicSettings>>()?.CurrentValue.Url;
+        var http = handle.ServiceProvider.GetService<IHttpClientFactory>();
+        if (identity?.GetScanAuth() is not { } auth || string.IsNullOrWhiteSpace(baseUrl) || http is null) return null;
+        try
+        {
+            var url = $"{baseUrl.TrimEnd('/')}/rest/getCoverArt?c=octo&v=1.16.1&size=300"
+                + $"&id={Uri.EscapeDataString("al-" + album)}&u={Uri.EscapeDataString(auth.user)}&t={auth.token}&s={auth.salt}";
+            using var response = await http.CreateClient().GetAsync(url, ct);
+            var type = response.Content.Headers.ContentType?.MediaType ?? "";
+            if (!response.IsSuccessStatusCode || !type.StartsWith("image/", StringComparison.Ordinal)) return null;
+            return (await response.Content.ReadAsByteArrayAsync(ct), type);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("Navidrome cover for album {Album} failed: {M}", album, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Which album each file belongs to, from Navidrome's own song list (a few requests for
+    /// the whole library), so a scan can go album by album without reading a single file to
+    /// find out. Keyed by full path. Empty when Navidrome cannot be asked; the scan then goes
+    /// folder by folder as before.
+    /// </summary>
+    private async Task<Dictionary<string, string>> NavidromeAlbumsAsync(IServiceProvider services, string root,
+        CancellationToken ct)
+    {
+        var albums = new Dictionary<string, string>(StringComparer.Ordinal);
+        var identity = services.GetService<NavidromeIdentityService>();
+        var baseUrl = services.GetService<IOptionsMonitor<SubsonicSettings>>()?.CurrentValue.Url;
+        var http = services.GetService<IHttpClientFactory>();
+        if (identity is null || http is null || string.IsNullOrWhiteSpace(baseUrl)) return albums;
+        try
+        {
+            var jwt = await identity.EnsureAdminJwtAsync(ct);
+            if (string.IsNullOrEmpty(jwt)) return albums;
+            const int page = 1000;
+            for (var start = 0; start < 200_000; start += page)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get,
+                    $"{baseUrl.TrimEnd('/')}/api/song?_start={start}&_end={start + page}&_sort=id&_order=ASC");
+                request.Headers.TryAddWithoutValidation("X-Nd-Authorization", $"Bearer {jwt}");
+                using var response = await http.CreateClient().SendAsync(request, ct);
+                if (!response.IsSuccessStatusCode) break;
+                using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(ct));
+                if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) break;
+                var count = 0;
+                foreach (var song in doc.RootElement.EnumerateArray())
+                {
+                    count++;
+                    var album = Str(song, "albumId");
+                    var path = Str(song, "path");
+                    if (string.IsNullOrEmpty(album) || string.IsNullOrEmpty(path)) continue;
+                    var relative = Path.Combine(path.Replace('\\', '/').TrimStart('/')
+                        .Split('/', StringSplitOptions.RemoveEmptyEntries));
+                    foreach (var baseDir in new[] { Str(song, "libraryPath"), root })
+                    {
+                        if (string.IsNullOrEmpty(baseDir)) continue;
+                        albums.TryAdd(Path.GetFullPath(Path.Combine(baseDir, relative)), album);
+                    }
+                    // An older Navidrome reports the full path instead.
+                    if (Path.IsPathRooted(path)) albums.TryAdd(Path.GetFullPath(path), album);
+                }
+                if (count < page) break;
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("Cover upgrade could not list Navidrome's songs, so it goes folder by folder: {M}", ex.Message);
+        }
+        return albums;
+    }
+
+    private static string? Str(System.Text.Json.JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String
+            ? value.GetString() : null;
+
+    /// <summary>Files grouped into one item per Navidrome album where Navidrome named one, and
+    /// per folder for the rest.</summary>
+    internal static List<CoverUpgradeItem> ByAlbum(IEnumerable<string> files, IReadOnlyDictionary<string, string> albums)
+    {
+        var items = new List<CoverUpgradeItem>();
+        var rest = new List<string>();
+        foreach (var group in files.GroupBy(path => albums.GetValueOrDefault(Path.GetFullPath(path))))
+        {
+            if (group.Key is null) { rest.AddRange(group); continue; }
+            var list = group.OrderBy(path => path, StringComparer.Ordinal).ToList();
+            items.Add(new CoverUpgradeItem(Path.GetDirectoryName(list[0]) ?? "", list, group.Key));
+        }
+        items.AddRange(rest
+            .GroupBy(path => Path.GetDirectoryName(path) ?? "", StringComparer.Ordinal)
+            .Select(group => new CoverUpgradeItem(group.Key, group.OrderBy(path => path, StringComparer.Ordinal).ToList())));
+        return items.OrderBy(item => item.Files?.FirstOrDefault() ?? item.Folder, StringComparer.Ordinal).ToList();
     }
 
     /// <summary>The cover file Navidrome would show for this folder, when it is a JPEG this run
@@ -863,32 +1025,33 @@ public sealed class CoverUpgradeWorker : BackgroundService
     private async Task<List<CoverUpgradeItem>> EnumerateAsync(CoverUpgradeScope scope)
     {
         using var handle = _scopes.CreateScope();
+        var fallback = _configuration["Library:DownloadPath"] ?? "/music";
+        var root = handle.ServiceProvider.GetService<NavidromeIdentityService>()?.EffectiveDownloadPath(fallback) ?? fallback;
+        List<string> files;
         if (scope == CoverUpgradeScope.OctoDownloads)
         {
             var library = handle.ServiceProvider.GetRequiredService<ILocalLibraryService>();
-            return (await library.GetMappingsAsync())
+            files = (await library.GetMappingsAsync())
                 .Select(mapping => mapping.LocalPath)
                 .Where(path => !string.IsNullOrEmpty(path) && File.Exists(path))
                 .Distinct(StringComparer.Ordinal)
-                .GroupBy(path => Path.GetDirectoryName(path) ?? "")
-                .OrderBy(group => group.Key, StringComparer.Ordinal)
-                .Select(group => new CoverUpgradeItem(group.Key, group.OrderBy(p => p, StringComparer.Ordinal).ToList()))
                 .ToList();
         }
-
-        var fallback = _configuration["Library:DownloadPath"] ?? "/music";
-        var root = handle.ServiceProvider.GetService<NavidromeIdentityService>()?.EffectiveDownloadPath(fallback) ?? fallback;
-        if (!Directory.Exists(root))
+        else if (!Directory.Exists(root))
         {
             _logger.LogWarning("Cover upgrade found no music folder at {Root}", root);
             return [];
         }
-        return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-            .Where(path => AudioExtensions.Contains(Path.GetExtension(path)))
-            .GroupBy(path => Path.GetDirectoryName(path) ?? "", StringComparer.Ordinal)
-            .OrderBy(group => group.Key, StringComparer.Ordinal)
-            .Select(group => new CoverUpgradeItem(group.Key, group.OrderBy(path => path, StringComparer.Ordinal).ToList()))
-            .ToList();
+        else
+        {
+            files = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                .Where(path => AudioExtensions.Contains(Path.GetExtension(path)))
+                .ToList();
+        }
+        var albums = await NavidromeAlbumsAsync(handle.ServiceProvider, root, CancellationToken.None);
+        _logger.LogInformation("Cover upgrade: Navidrome named the album of {Known} of {Count} song(s)",
+            files.Count(path => albums.ContainsKey(Path.GetFullPath(path))), files.Count);
+        return ByAlbum(files, albums);
     }
 
     private async Task RescanAsync()
