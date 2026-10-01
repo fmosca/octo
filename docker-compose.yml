@@ -171,6 +171,16 @@ services:
       Metadata__WriteCoverFile: ${COVER_FILE:-true}
       # Embed covers at full size (often 3000 px) instead of 1500 px. cover.jpg is full size either way.
       Metadata__EmbedFullSizeCovers: ${FULL_SIZE_COVERS:-false}
+      # Release matching: the original album and year for a song that arrived without an
+      # album, release details from MusicBrainz, ReplayGain from a loudness measurement,
+      # and a rehearsal mode that reports without writing the matched tags.
+      Metadata__PreferOriginalAlbum: ${PREFER_ORIGINAL_ALBUM:-true}
+      Metadata__YearFromOriginalRelease: ${YEAR_FROM_ORIGINAL_RELEASE:-true}
+      Metadata__PreferredCountries: ${PREFERRED_COUNTRIES:-}
+      Metadata__ReleaseDetailsLookup: ${RELEASE_DETAILS_LOOKUP:-true}
+      Metadata__ReplayGain: ${REPLAYGAIN:-true}
+      Metadata__ReplayGainTimeoutSeconds: ${REPLAYGAIN_TIMEOUT_SECONDS:-45}
+      Metadata__TagRehearsal: ${TAG_REHEARSAL:-false}
       # Lyrics: a .lrc (synced) or .txt (plain) beside each download, and live lyrics
       # for songs as they play. kugou and netease are unofficial APIs; netease only
       # runs if listed, and leaving kugou out switches it off.
