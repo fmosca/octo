@@ -333,4 +333,42 @@ public class CoverUpgradeTests : IDisposable
         Assert.Contains(loose, item => item.Folder == Path.Combine(root, "x"));
         Assert.Contains(loose, item => item.Files!.SequenceEqual([At("D - 1.mp3")]));
     }
+
+    private sealed class StopOnFirstFinder(Action stop) : IAlbumCoverFinder
+    {
+        public int Calls { get; private set; }
+
+        public Task<FoundCover?> FindAsync(AlbumCoverQuery query, CancellationToken ct)
+        {
+            if (++Calls == 1) stop();
+            return Task.FromResult<FoundCover?>(new FoundCover(Jpeg(3000, 200), "iTunes", 3000));
+        }
+    }
+
+    /// <summary>A stop in the middle of a folder used to mark the folder done, so a resume
+    /// skipped the rest of it: in a flat library, the whole library.</summary>
+    [Fact]
+    public async Task AStoppedRunDoesTheUnfinishedPartAgainOnResumeAndListsEachAlbumOnce()
+    {
+        Song("Discovery", "One More Time", Jpeg(300, 10));
+        Song("Homework", "Da Funk", Jpeg(300, 10));
+        CoverUpgradeWorker? worker = null;
+        var finder = new StopOnFirstFinder(() => worker!.RequestCancel());
+        var (built, store) = Worker(finder);
+        worker = built;
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
+        var ids = store.Current.Preview.Select(r => r.Id).ToList();
+        var preview = new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Preview, FolderCovers: true, Albums: ids);
+
+        await Run(worker, store, preview);
+        Assert.Equal(CoverUpgradeStatus.Cancelled, store.Current.Status);
+        Assert.Equal(0, store.Current.Cursor);
+
+        await Run(worker, store, preview);
+
+        Assert.Equal(CoverUpgradeStatus.Completed, store.Current.Status);
+        Assert.Equal(3, finder.Calls);
+        Assert.Equal(2, store.Current.Upgraded);
+        Assert.Equal(2, store.Current.Preview.Count);
+    }
 }

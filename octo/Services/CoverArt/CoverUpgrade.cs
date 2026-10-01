@@ -518,6 +518,10 @@ public sealed class CoverUpgradeWorker : BackgroundService
                     return false;
                 }
             }));
+            // Stopped part way through: this batch is not done, so it runs again on a resume. It
+            // used to count as done, and a resume skipped the rest of a half-read folder (which
+            // in a flat library was the whole library).
+            if (stoppingToken.IsCancellationRequested || _cancel) continue;
             var reached = index + batch.Count;
             _store.Update(run =>
             {
@@ -653,11 +657,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
             {
                 var soft = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown, 0, null,
                     albumPaths.Count, folderCover is not null, "soft", first.Path, albumPaths, item.NavidromeAlbumId);
-                _store.Update(r =>
-                {
-                    r.Soft++;
-                    if (r.Preview.Count < CoverUpgradeStore.MaxPreviewRows) r.Preview.Add(soft);
-                });
+                _store.Update(r => { if (AddRow(r, soft)) r.Soft++; });
                 continue;
             }
 
@@ -681,7 +681,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 _store.Update(r =>
                 {
                     r.Kept++;
-                    if (picked is not null && r.Preview.Count < CoverUpgradeStore.MaxPreviewRows) r.Preview.Add(none);
+                    if (picked is not null) AddRow(r, none);
                 });
                 continue;
             }
@@ -707,12 +707,27 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 run.DryRun ? "found" : "upgraded", first.Path, albumPaths, item.NavidromeAlbumId);
             _store.Update(r =>
             {
-                r.Upgraded++;
+                if (AddRow(r, change)) r.Upgraded++;
                 r.Files += written;
-                if (r.Preview.Count < CoverUpgradeStore.MaxPreviewRows) r.Preview.Add(change);
             });
         }
         return looked;
+    }
+
+    /// <summary>
+    /// Lists an album once. An album already listed (a resumed batch runs again) takes its new
+    /// row's place and is not counted twice. True when it is new.
+    /// </summary>
+    private static bool AddRow(CoverUpgradeRun run, CoverUpgradeChange row)
+    {
+        var at = run.Preview.FindIndex(existing => existing.Id == row.Id);
+        if (at >= 0)
+        {
+            run.Preview[at] = row;
+            return false;
+        }
+        if (run.Preview.Count < CoverUpgradeStore.MaxPreviewRows) run.Preview.Add(row);
+        return true;
     }
 
     private SongFile? ReadSong(string path)

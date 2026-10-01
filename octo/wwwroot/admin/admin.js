@@ -1412,7 +1412,9 @@ function renderCoverBar(run) {
   const countEl = coverEl('cover-count');
 
   coverEl('cover-stop').hidden = !running;
-  coverEl('cover-resume').hidden = running || !run.canResume;
+  // A scan is quick to start over, and starting over always uses the newest way of reading;
+  // only lookups and replaces, which take minutes, are worth resuming.
+  coverEl('cover-resume').hidden = running || !run.canResume || run.mode === 'Scan';
   coverEl('cover-undo').hidden = running || !run.canUndo;
   coverEl('cover-select').hidden = pickableRows.length === 0;
   go.hidden = true;
@@ -1439,7 +1441,7 @@ function renderCoverBar(run) {
   } else if (run.mode === 'Apply' && run.status === 'Completed') {
     hint.textContent = run.files ? 'Navidrome is picking them up.' : 'Nothing needed replacing.';
   } else if (run.status === 'Cancelled' || run.status === 'Interrupted') {
-    hint.textContent = run.reason || 'Stopped.';
+    hint.textContent = run.mode === 'Scan' ? 'Stopped part way. Scan again to see every album.' : (run.reason || 'Stopped.');
   }
   coverEl('cover-bar').hidden = run.status === 'Idle'
     || (go.hidden && coverEl('cover-stop').hidden && coverEl('cover-resume').hidden && coverEl('cover-undo').hidden && !hint.textContent);
