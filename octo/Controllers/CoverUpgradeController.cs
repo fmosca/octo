@@ -81,7 +81,7 @@ public sealed class CoverUpgradeController : ControllerBase
             preview = run.Preview.Select(row => new
             {
                 row.Id, row.Folder, row.Artist, row.Album, row.FromSide, row.ToSide, row.Source, row.Files,
-                row.FolderCover, row.Result,
+                row.FolderCover, row.Result, row.LooksSame,
             }),
             canResume = run.CanResume,
             // Accepted and not yet started, or started: the dashboard watches while this is true.

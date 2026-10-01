@@ -45,7 +45,8 @@ public sealed record CoverUpgradeRequest(CoverUpgradeScope Scope, CoverUpgradeMo
 /// </summary>
 public sealed record CoverUpgradeChange(string Id, string Folder, string Artist, string? Album, int FromSide, int ToSide,
     string? Source, int Files, bool FolderCover, string Result, string? FirstFile = null,
-    IReadOnlyList<string>? Paths = null, string? NavidromeAlbumId = null, string? Barcode = null);
+    IReadOnlyList<string>? Paths = null, string? NavidromeAlbumId = null, string? Barcode = null,
+    bool? LooksSame = null);
 
 /// <summary>
 /// One piece of work: a folder, or one Navidrome album when Navidrome could say which songs
@@ -601,7 +602,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
     }
 
     private sealed record SongFile(string Path, string Artist, string? Album, string? Title,
-        string? ReleaseId, string? ReleaseGroupId, int Side, string? Barcode = null);
+        string? ReleaseId, string? ReleaseGroupId, int Side, string? Barcode = null, ulong? Looks = null);
 
     /// <summary>
     /// The songs behind the picked albums, from the list they were picked from. Only those
@@ -721,10 +722,12 @@ public sealed class CoverUpgradeWorker : BackgroundService
 
             looked = true;
 
-            var found = await _finder.FindAsync(new AlbumCoverQuery(first.Artist, first.Album, first.Title,
+            var query = new AlbumCoverQuery(first.Artist, first.Album, first.Title,
                 album.Select(s => s.ReleaseId).FirstOrDefault(rid => !string.IsNullOrEmpty(rid)),
                 album.Select(s => s.ReleaseGroupId).FirstOrDefault(rid => !string.IsNullOrEmpty(rid)),
-                album.Select(s => s.Barcode).FirstOrDefault(code => !string.IsNullOrEmpty(code))), ct);
+                album.Select(s => s.Barcode).FirstOrDefault(code => !string.IsNullOrEmpty(code)));
+            // A preview only needs to know what was found; a replace needs the picture itself.
+            var found = run.DryRun ? await _finder.PreviewAsync(query, ct) : await _finder.FindAsync(query, ct);
 
             var upgradeFiles = found is not null
                 ? album.Where(song => found.Side >= song.Side * MinimumGain && found.Side > song.Side).ToList()
@@ -746,6 +749,20 @@ public sealed class CoverUpgradeWorker : BackgroundService
 
             _store.SaveFoundThumb(id, CoverImage.ToJpeg(CoverImage.FitWithin(found.Bytes, ThumbSide)));
 
+            // The same artwork, only sharper? Checked against the cover the album has now, so a
+            // name match that found another edition, a clean version or another album entirely
+            // is flagged rather than written. Unknown when the album has no cover to compare.
+            var looksNow = album.Select(s => s.Looks).FirstOrDefault(h => h is not null)
+                ?? (folderCover is { } own ? CoverImage.LooksHash(ReadQuietly(own.Path)) : null);
+            bool? looksSame = looksNow is { } now && CoverImage.LooksHash(found.Bytes) is { } then
+                ? CoverImage.LookAlike(now, then) : null;
+            if (looksSame == false && picked is null && !run.DryRun)
+            {
+                // Nobody picked this album, so a different picture is not written on a guess.
+                _store.Update(r => r.Kept++);
+                continue;
+            }
+
             var written = 0;
             if (!run.DryRun)
             {
@@ -762,7 +779,8 @@ public sealed class CoverUpgradeWorker : BackgroundService
 
             var change = new CoverUpgradeChange(id, item.Folder, first.Artist, first.Album, shown,
                 found.Side, found.Source, run.DryRun ? albumPaths.Count : written, upgradeFolder,
-                run.DryRun ? "found" : "upgraded", first.Path, albumPaths, item.NavidromeAlbumId);
+                run.DryRun ? "found" : "upgraded", first.Path, albumPaths, item.NavidromeAlbumId,
+                album.Select(s => s.Barcode).FirstOrDefault(code => !string.IsNullOrEmpty(code)), looksSame);
             _store.Update(r =>
             {
                 if (AddRow(r, change)) r.Upgraded++;
@@ -801,10 +819,11 @@ public sealed class CoverUpgradeWorker : BackgroundService
             if (string.IsNullOrWhiteSpace(artist) || (string.IsNullOrWhiteSpace(tag.Album) && string.IsNullOrWhiteSpace(tag.Title)))
                 return null;
             var front = FrontOf(tag.Pictures);
-            var side = front?.Data?.Data is { Length: > 0 } bytes && CoverImage.Measure(bytes) is { } size
+            var bytes = front?.Data?.Data;
+            var side = bytes is { Length: > 0 } && CoverImage.Measure(bytes) is { } size
                 ? Math.Min(size.Width, size.Height) : 0;
             return new SongFile(path, artist, tag.Album, tag.Title, tag.MusicBrainzReleaseId,
-                tag.MusicBrainzReleaseGroupId, side, BarcodeOf(file));
+                tag.MusicBrainzReleaseGroupId, side, BarcodeOf(file), side > 0 ? CoverImage.LooksHash(bytes) : null);
         }
         catch (Exception ex)
         {
@@ -837,6 +856,12 @@ public sealed class CoverUpgradeWorker : BackgroundService
             // A tag TagLib half understands has no barcode worth trusting.
         }
         return null;
+    }
+
+    private static byte[]? ReadQuietly(string path)
+    {
+        try { return File.ReadAllBytes(path); }
+        catch { return null; }
     }
 
     private static TagLib.IPicture? FrontOf(TagLib.IPicture[]? pictures) =>

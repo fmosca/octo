@@ -1384,6 +1384,7 @@ function coverTile(run, row) {
   const px = side => (side > 0 ? `${side} px` : 'No cover');
   let badge;
   if (row.result === 'soft') badge = `<span class="cover-badge">${esc(px(row.fromSide))}</span>`;
+  else if (row.result === 'found' && row.looksSame === false) badge = `<span class="cover-badge warn" title="This cover does not look like the one the album has now. It may be another edition, or another album with the same name.">Different art · ${esc(px(row.toSide))}</span>`;
   else if (row.result === 'found') badge = `<span class="cover-badge">${esc(px(row.fromSide))} → ${esc(px(row.toSide))}</span>`;
   else if (row.result === 'upgraded') badge = `<span class="cover-badge done">${icon('check')} ${esc(px(row.toSide))}</span>`;
   else badge = '<span class="cover-badge">Nothing larger</span>';
@@ -1457,7 +1458,9 @@ function renderCovers(run) {
   if (!running && run.runId && run.runId !== coverListRunId) {
     coverListRunId = run.runId;
     coverShowAll = false;
-    coverPicked = new Set(rows.filter(row => coverPickable(run, row)).map(row => row.id));
+    // A cover that does not look like the album's own is shown, not pre-picked: it may be
+    // another edition, or another album that shares the name.
+    coverPicked = new Set(rows.filter(row => coverPickable(run, row) && row.looksSame !== false).map(row => row.id));
   }
 
   const progress = coverEl('cover-progress');
@@ -1501,7 +1504,9 @@ function renderCovers(run) {
     sub = `under ${run.smallerThan} px${run.kept ? ` · ${run.kept} already sharp` : ''}`;
   } else if (run.mode === 'Preview') {
     head = run.upgraded ? `${plural(run.upgraded, 'larger cover')} found` : 'No larger covers found';
-    sub = run.kept ? `${run.kept} with nothing larger` : '';
+    const different = rows.filter(row => row.result === 'found' && row.looksSame === false).length;
+    sub = [run.kept ? `${run.kept} with nothing larger` : '',
+      different ? `${different} look different, left unpicked` : ''].filter(Boolean).join(' · ');
   } else {
     head = run.upgraded ? `${plural(run.upgraded, 'cover')} replaced` : 'Nothing replaced';
     sub = run.files ? `in ${plural(run.files, 'song')}` : '';

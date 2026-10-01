@@ -333,7 +333,7 @@ public class CoverChainTests
             var url when url.Contains("itunes.apple.com/search") => Json(ITunesAnswer(
                 ("Daft Punk", "Homework", null, "notExplicit", "https://is1.example/Music/wrong/100x100bb.jpg"),
                 ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/right/100x100bb.jpg"))),
-            var url when url.Contains("/right/3000x3000bb") => Picture(Jpeg(3000, 3000)),
+            var url when url.Contains("/right/5000x5000bb") => Picture(Jpeg(3000, 3000)),
             _ => new HttpResponseMessage(HttpStatusCode.NotFound),
         }, calls);
         var song = new Song { Artist = "Daft Punk", Title = "One More Time", Album = "Discovery",
@@ -373,7 +373,7 @@ public class CoverChainTests
             var url when url.Contains("itunes.apple.com/search") && url.Contains("entity=song") => Json(ITunesAnswer(
                 ("Tame Impala", "Currents", "Let It Happen", "notExplicit", "https://is1.example/Music/album/100x100bb.jpg"),
                 ("Tame Impala", "Let It Happen - Single", "Let It Happen", "notExplicit", "https://is1.example/Music/single/100x100bb.jpg"))),
-            var url when url.Contains("/single/3000x3000bb") => Picture(Jpeg(1400, 1400)),
+            var url when url.Contains("/single/5000x5000bb") => Picture(Jpeg(1400, 1400)),
             _ => new HttpResponseMessage(HttpStatusCode.NotFound),
         });
         var song = new Song { Artist = "Tame Impala", Title = "Let It Happen", Album = "Let It Happen" };
@@ -492,7 +492,7 @@ public class CoverChainTests
                     new { wrapperType = "collection", collectionName = "Some Stray Single - Single", artistName = "Someone Else", collectionExplicitness = "notExplicit", artworkUrl100 = "https://is1.example/Music/stray/100x100bb.jpg" },
                 },
             })),
-            var url when url.Contains("/disc/3000x3000bb") => Picture(Jpeg(3000, 3000)),
+            var url when url.Contains("/disc/5000x5000bb") => Picture(Jpeg(3000, 3000)),
             _ => new HttpResponseMessage(HttpStatusCode.NotFound),
         }, calls);
         var itunes = new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance);
@@ -526,7 +526,7 @@ public class CoverChainTests
             var url when url.Contains("itunes.apple.com/lookup") => Json(ITunesAnswer(
                 ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/disc/100x100bb.jpg"),
                 ("Tame Impala", "Currents", null, "notExplicit", "https://is1.example/Music/curr/100x100bb.jpg"))),
-            var url when url.Contains("/3000x3000bb") => Picture(Jpeg(3000, 3000)),
+            var url when url.Contains("/5000x5000bb") => Picture(Jpeg(3000, 3000)),
             var url when url.Contains("deezer.example") => Picture(Catalog),
             // A search at Apple answers nothing here, so a cover from iTunes proves the barcode path.
             _ => new HttpResponseMessage(HttpStatusCode.NotFound),
@@ -546,5 +546,111 @@ public class CoverChainTests
         Assert.All(found, cover => Assert.Equal(("iTunes", 3000), (cover!.Source, cover.Side)));
         Assert.Equal(["0724384960650", "724384960650", "602547306807"],
             ITunesCoverArtLookup.BarcodeForms("0724384960650").Concat(ITunesCoverArtLookup.BarcodeForms("602547306807")).ToArray());
+    }
+
+    private static byte[] Pattern(int side, bool flipped, int quality = 90)
+    {
+        using var image = new Image<Rgba32>(side, side);
+        image.ProcessPixelRows(rows =>
+        {
+            for (var y = 0; y < rows.Height; y++)
+            {
+                var row = rows.GetRowSpan(y);
+                for (var x = 0; x < row.Length; x++)
+                {
+                    var v = (byte)(flipped ? 255 * (side - 1 - x) / side : 255 * ((x / (side / 8) + y / (side / 8)) % 2));
+                    row[x] = new Rgba32(v, v, v);
+                }
+            }
+        });
+        using var stream = new MemoryStream();
+        image.SaveAsJpeg(stream, new SixLabors.ImageSharp.Formats.Jpeg.JpegEncoder { Quality = quality });
+        return stream.ToArray();
+    }
+
+    [Fact]
+    public void TheSameArtworkLooksAlikeAtAnySizeAndAnotherDoesNot()
+    {
+        var sharp = CoverImage.LooksHash(Pattern(3000, flipped: false))!.Value;
+        var soft = CoverImage.LooksHash(Pattern(200, flipped: false, quality: 40))!.Value;
+        var other = CoverImage.LooksHash(Pattern(3000, flipped: true))!.Value;
+
+        Assert.True(CoverImage.LookAlike(sharp, soft));
+        Assert.False(CoverImage.LookAlike(sharp, other));
+        Assert.Null(CoverImage.LooksHash("not an image"u8.ToArray()));
+    }
+
+    [Fact]
+    public async Task AProbeLearnsTheMastersSizeAndTakesApplesSmallCopyWithoutTheMaster()
+    {
+        var calls = new List<string>();
+        var ranged = false;
+        var http = Http(request =>
+        {
+            var url = request.RequestUri!.ToString();
+            if (url.Contains("itunes.apple.com/search")) return Json(ITunesAnswer(
+                ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/disc/100x100bb.jpg")));
+            if (url.Contains("/5000x5000bb")) { ranged |= request.Headers.Range is not null; return Picture(Jpeg(3000, 3000)); }
+            if (url.Contains("/320x320bb")) return Picture(Jpeg(320, 320));
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }, calls);
+        var itunes = new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance);
+
+        var probe = await itunes.TryProbeAlbumMasterAsync("Daft Punk", "Discovery", "One More Time", CancellationToken.None);
+
+        Assert.Equal(3000, probe!.Value.Side);
+        Assert.Equal((320, 320), CoverImage.Measure(probe.Value.Thumb));
+        Assert.True(ranged);
+    }
+
+    [Fact]
+    public async Task AppleMatchesAreRememberedOnDiskAcrossARestart()
+    {
+        var cache = Path.Combine(Path.GetTempPath(), "octo-itunes-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            var calls = new List<string>();
+            var http = Http(request => request.RequestUri!.ToString() switch
+            {
+                var url when url.Contains("itunes.apple.com/search") => Json(ITunesAnswer(
+                    ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/disc/100x100bb.jpg"))),
+                var url when url.Contains("/5000x5000bb") => Picture(Jpeg(3000, 3000)),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+            }, calls);
+            using (var first = new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance, cache))
+                Assert.NotNull(await first.TryFetchAlbumMasterAsync("Daft Punk", "Discovery", null, CancellationToken.None));
+            calls.Clear();
+
+            using var second = new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance, cache);
+            Assert.NotNull(await second.TryFetchAlbumMasterAsync("Daft Punk", "Discovery", null, CancellationToken.None));
+            Assert.DoesNotContain(calls, url => url.Contains("itunes.apple.com/search"));
+        }
+        finally
+        {
+            File.Delete(cache);
+        }
+    }
+
+    [Fact]
+    public async Task APreviewReportsTheMastersSizeButCarriesOnlyTheSmallCopy()
+    {
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("itunes.apple.com/search") => Json(ITunesAnswer(
+                ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/disc/100x100bb.jpg"))),
+            var url when url.Contains("/5000x5000bb") => Picture(Jpeg(3000, 3000)),
+            var url when url.Contains("/320x320bb") => Picture(Jpeg(320, 320)),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        });
+        var finder = new AlbumCoverFinder(new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance),
+            new CoverArtArchiveLookup(http, NullLogger<CoverArtArchiveLookup>.Instance),
+            new Octo.Services.Metadata.DeezerMetadataService(http, TestOptions.Monitor(new MetadataSettings()),
+                NullLogger<Octo.Services.Metadata.DeezerMetadataService>.Instance),
+            http, NullLogger<AlbumCoverFinder>.Instance);
+
+        var found = await finder.PreviewAsync(new AlbumCoverQuery("Daft Punk", "Discovery", "One More Time"), CancellationToken.None);
+
+        Assert.Equal(("iTunes", 3000), (found!.Source, found.Side));
+        Assert.Equal((320, 320), CoverImage.Measure(found.Bytes));
     }
 }

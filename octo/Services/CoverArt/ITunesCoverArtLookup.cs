@@ -22,18 +22,24 @@ namespace Octo.Services.CoverArt;
 ///   we use for placeholder songs), fall back from entity=album to entity=song
 ///   when the album-style query whiffs.
 /// </summary>
-public class ITunesCoverArtLookup : ICoverArtSource
+public class ITunesCoverArtLookup : ICoverArtSource, IDisposable
 {
     private readonly HttpClient _http;
     private readonly ILogger<ITunesCoverArtLookup> _logger;
 
     public string Name => "itunes";
 
-    public ITunesCoverArtLookup(IHttpClientFactory httpClientFactory, ILogger<ITunesCoverArtLookup> logger)
+    public ITunesCoverArtLookup(IHttpClientFactory httpClientFactory, ILogger<ITunesCoverArtLookup> logger,
+        string? cachePath = null)
     {
         _http = httpClientFactory.CreateClient();
-        _http.Timeout = TimeSpan.FromSeconds(8);
+        // A master at full size runs to a few megabytes; 8 s was cut close on a slow line.
+        _http.Timeout = TimeSpan.FromSeconds(20);
         _logger = logger;
+        _cachePath = string.IsNullOrWhiteSpace(cachePath) ? null : cachePath;
+        if (_cachePath is null) return;
+        LoadCache();
+        _flushTimer = new Timer(_ => FlushCache(), null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
     }
 
     public async Task<byte[]?> TryFetchAsync(SoulseekRouting routing, bool background = false, CancellationToken ct = default)
@@ -66,21 +72,41 @@ public class ITunesCoverArtLookup : ICoverArtSource
     }
 
     /// <summary>The size asked of Apple's CDN for a master. It answers with the original when
-    /// that is smaller, so this reads as "as large as there is".</summary>
-    internal const int MasterSide = 3000;
+    /// that is smaller, so this reads as "as large as there is". 5000, as sacad asks: 3000
+    /// capped the masters that are larger.</summary>
+    internal const int MasterSide = 5000;
+
+    /// <summary>The tile a preview shows, made by Apple, so a preview never downloads a master.</summary>
+    internal const int ProbeThumbSide = 320;
 
     private static readonly SongMatchOptions AlbumTitles = new() { LengthToleranceSeconds = null };
     private static readonly Regex ReleaseSuffix = new(@"\s+-\s+(?:Single|EP)\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-    private static readonly TimeSpan MasterUrlTtl = TimeSpan.FromHours(6);
+    /// <summary>How long a match is trusted, and a miss (a search may find it later).</summary>
+    private static readonly TimeSpan MasterUrlTtl = TimeSpan.FromDays(30);
+    private static readonly TimeSpan MasterMissTtl = TimeSpan.FromDays(1);
+    private const int MasterUrlCap = 20_000;
     private readonly ConcurrentDictionary<string, (string? Url, DateTime At)> _masterUrls = new();
 
-    /// <summary>Apple's search answers about 20 requests a minute from one address, and turns
-    /// away more for a while. Every search and lookup this class sends for a master waits its
-    /// turn here, however many albums are being worked on at once.</summary>
-    internal static TimeSpan AppleInterval { get; set; } = TimeSpan.FromSeconds(3.2);
+    /// <summary>Matches kept on disk, so a restart does not send a whole library back to
+    /// Apple. Written at most every 15 seconds.</summary>
+    private readonly string? _cachePath;
+    private readonly Timer? _flushTimer;
+    private int _dirty;
+
+    /// <summary>
+    /// Every search and lookup this class sends for a master waits its turn here, however many
+    /// albums are being worked on at once. Apple documents about 20 a minute, but answered 30
+    /// searches at 2 a second on 2026-10-01, and sacad asks up to 10 a second; so one a second,
+    /// doubling (to 8 s at most) each time Apple refuses, and halving again after 50 answers
+    /// in a row.
+    /// </summary>
+    internal static TimeSpan AppleInterval { get; set; } = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan AppleIntervalMax = TimeSpan.FromSeconds(8);
     private static readonly SemaphoreSlim AppleGate = new(1, 1);
     private static DateTime _appleNext = DateTime.MinValue;
+    private static TimeSpan _appleBackoff = TimeSpan.Zero;
+    private static int _appleAnswered;
 
     /// <summary>Barcodes asked in one lookup. 30 came back in under a second, 29 matched.</summary>
     internal const int UpcBatch = 40;
@@ -92,7 +118,8 @@ public class ITunesCoverArtLookup : ICoverArtSource
         {
             var wait = _appleNext - DateTime.UtcNow;
             if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
-            _appleNext = DateTime.UtcNow + AppleInterval;
+            var interval = _appleBackoff > AppleInterval ? _appleBackoff : AppleInterval;
+            _appleNext = DateTime.UtcNow + interval;
         }
         finally
         {
@@ -108,12 +135,23 @@ public class ITunesCoverArtLookup : ICoverArtSource
         {
             await WaitForAppleAsync(ct);
             var response = await _http.GetAsync(url, ct);
-            if ((int)response.StatusCode is 403 or 429 && attempt == 0)
+            if ((int)response.StatusCode is 403 or 429)
             {
+                // Slower from now on, for every album, not just this one.
+                _appleBackoff = TimeSpan.FromTicks(Math.Min(AppleIntervalMax.Ticks,
+                    Math.Max(AppleInterval.Ticks, _appleBackoff.Ticks) * 2));
+                Interlocked.Exchange(ref _appleAnswered, 0);
+                if (attempt > 0) return response;
                 response.Dispose();
-                _logger.LogInformation("Apple asked Octo to slow down; waiting a minute");
+                _logger.LogInformation("Apple asked Octo to slow down; waiting a minute, then one every {Seconds} s",
+                    _appleBackoff.TotalSeconds);
                 await Task.Delay(TimeSpan.FromMinutes(1), ct);
                 continue;
+            }
+            if (_appleBackoff > TimeSpan.Zero && Interlocked.Increment(ref _appleAnswered) >= 50)
+            {
+                Interlocked.Exchange(ref _appleAnswered, 0);
+                _appleBackoff = _appleBackoff / 2 <= AppleInterval ? TimeSpan.Zero : _appleBackoff / 2;
             }
             return response;
         }
@@ -167,8 +205,8 @@ public class ITunesCoverArtLookup : ICoverArtSource
                         if (hit is null) continue;
                         // Kept for both ways a song can ask: as its album, and as a single
                         // named after itself. A barcode names one release either way.
-                        _masterUrls[MasterKey(album.Artist, album.Album, single: false)] = (hit, DateTime.UtcNow);
-                        _masterUrls[MasterKey(album.Artist, album.Album, single: true)] = (hit, DateTime.UtcNow);
+                        Remember(MasterKey(album.Artist, album.Album, single: false), hit);
+                        Remember(MasterKey(album.Artist, album.Album, single: true), hit);
                         matched++;
                     }
                 }
@@ -194,25 +232,7 @@ public class ITunesCoverArtLookup : ICoverArtSource
     public async Task<byte[]?> TryFetchAlbumMasterAsync(string? artist, string? album, string? title,
         CancellationToken ct = default)
     {
-        artist = artist?.Trim();
-        if (string.IsNullOrEmpty(artist)) return null;
-        var single = string.IsNullOrWhiteSpace(album)
-            || (!string.IsNullOrWhiteSpace(title) && SongIdentity.Same(album, artist, title, artist, AlbumTitles).IsSame);
-        var release = (single ? title ?? album : album)?.Trim();
-        if (string.IsNullOrEmpty(release)) return null;
-
-        var key = MasterKey(artist, release, single);
-        string? url;
-        if (_masterUrls.TryGetValue(key, out var known) && DateTime.UtcNow - known.At < MasterUrlTtl)
-            url = known.Url;
-        else
-        {
-            url = await FindMasterUrlAsync(artist, release, single, ct);
-            if (_masterUrls.Count > 2000) _masterUrls.Clear();
-            _masterUrls[key] = (url, DateTime.UtcNow);
-        }
-        if (url is null) return null;
-
+        if (await MasterUrlAsync(artist, album, title, ct) is not { } url) return null;
         foreach (var side in new[] { MasterSide, 1200 })
         {
             var sized = url.Replace("100x100bb", $"{side}x{side}bb");
@@ -227,6 +247,116 @@ public class ITunesCoverArtLookup : ICoverArtSource
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// What the master is, without downloading it: its size from the first 64 KB (Apple
+    /// answers range requests) and Apple's own 320 px copy for a tile. A preview of a thousand
+    /// albums is about 120 KB each this way, where whole masters were about 3.4 MB each.
+    /// </summary>
+    public async Task<(int Side, byte[] Thumb)?> TryProbeAlbumMasterAsync(string? artist, string? album, string? title,
+        CancellationToken ct = default)
+    {
+        if (await MasterUrlAsync(artist, album, title, ct) is not { } url) return null;
+        try
+        {
+            using var head = new HttpRequestMessage(HttpMethod.Get, url.Replace("100x100bb", $"{MasterSide}x{MasterSide}bb"));
+            head.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 65_535);
+            using var first = await _http.SendAsync(head, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!first.IsSuccessStatusCode) return null;
+            var start = await ReadUpToAsync(await first.Content.ReadAsStreamAsync(ct), 65_536, ct);
+            if (CoverImage.Measure(start) is not { } size) return null;
+
+            using var tile = await _http.GetAsync(url.Replace("100x100bb", $"{ProbeThumbSide}x{ProbeThumbSide}bb"), ct);
+            if (!tile.IsSuccessStatusCode) return null;
+            return (Math.Min(size.Width, size.Height), await tile.Content.ReadAsByteArrayAsync(ct));
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("iTunes master probe failed for {Artist} - {Album}: {M}", artist, album, ex.Message);
+            return null;
+        }
+    }
+
+    private static async Task<byte[]> ReadUpToAsync(Stream stream, int limit, CancellationToken ct)
+    {
+        await using var _ = stream;
+        var buffer = new byte[limit];
+        var read = 0;
+        while (read < limit)
+        {
+            var n = await stream.ReadAsync(buffer.AsMemory(read, limit - read), ct);
+            if (n == 0) break;
+            read += n;
+        }
+        return buffer[..read];
+    }
+
+    /// <summary>The album's master URL at 100 px (sizes are swapped into it), from the
+    /// remembered matches or one search.</summary>
+    private async Task<string?> MasterUrlAsync(string? artist, string? album, string? title, CancellationToken ct)
+    {
+        artist = artist?.Trim();
+        if (string.IsNullOrEmpty(artist)) return null;
+        var single = string.IsNullOrWhiteSpace(album)
+            || (!string.IsNullOrWhiteSpace(title) && SongIdentity.Same(album, artist, title, artist, AlbumTitles).IsSame);
+        var release = (single ? title ?? album : album)?.Trim();
+        if (string.IsNullOrEmpty(release)) return null;
+
+        var key = MasterKey(artist, release, single);
+        if (_masterUrls.TryGetValue(key, out var known)
+            && DateTime.UtcNow - known.At < (known.Url is null ? MasterMissTtl : MasterUrlTtl))
+            return known.Url;
+        var url = await FindMasterUrlAsync(artist, release, single, ct);
+        Remember(key, url);
+        return url;
+    }
+
+    private void Remember(string key, string? url)
+    {
+        if (_masterUrls.Count > MasterUrlCap) _masterUrls.Clear();
+        _masterUrls[key] = (url, DateTime.UtcNow);
+        Interlocked.Exchange(ref _dirty, 1);
+    }
+
+    private sealed record CachedMaster(string Key, string? Url, DateTime At);
+
+    private void LoadCache()
+    {
+        try
+        {
+            if (_cachePath is null || !File.Exists(_cachePath)) return;
+            var rows = JsonSerializer.Deserialize<List<CachedMaster>>(File.ReadAllText(_cachePath)) ?? [];
+            foreach (var row in rows.Where(r => DateTime.UtcNow - r.At < (r.Url is null ? MasterMissTtl : MasterUrlTtl)))
+                _masterUrls[row.Key] = (row.Url, row.At);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("iTunes match cache could not be read: {M}", ex.Message);
+        }
+    }
+
+    private void FlushCache()
+    {
+        if (_cachePath is null || Interlocked.Exchange(ref _dirty, 0) == 0) return;
+        try
+        {
+            var rows = _masterUrls.Select(pair => new CachedMaster(pair.Key, pair.Value.Url, pair.Value.At)).ToList();
+            Directory.CreateDirectory(Path.GetDirectoryName(_cachePath)!);
+            File.WriteAllText(_cachePath + ".tmp", JsonSerializer.Serialize(rows));
+            File.Move(_cachePath + ".tmp", _cachePath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref _dirty, 1);
+            _logger.LogDebug("iTunes match cache could not be written: {M}", ex.Message);
+        }
+    }
+
+    public void Dispose()
+    {
+        _flushTimer?.Dispose();
+        FlushCache();
     }
 
     private async Task<string?> FindMasterUrlAsync(string artist, string release, bool single, CancellationToken ct)

@@ -106,6 +106,38 @@ internal static class CoverImage
         }
     }
 
+    /// <summary>
+    /// A 64-bit fingerprint of what a picture looks like (a difference hash: the picture shrunk
+    /// to 9 by 8 greys, one bit per neighbour pair, set when the left one is darker). The same
+    /// artwork at another size or compression comes out within a few bits; a different cover
+    /// about half of them apart. sacad checks covers the same way (a block hash, 8 bits of 64).
+    /// Null when the picture cannot be read.
+    /// </summary>
+    public static ulong? LooksHash(byte[]? bytes)
+    {
+        if (bytes is not { Length: > 0 }) return null;
+        try
+        {
+            using var image = Image.Load<SixLabors.ImageSharp.PixelFormats.L8>(bytes);
+            image.Mutate(ctx => ctx.Resize(9, 8));
+            ulong hash = 0;
+            var bit = 0;
+            for (var y = 0; y < 8; y++)
+                for (var x = 0; x < 8; x++, bit++)
+                    if (image[x, y].PackedValue < image[x + 1, y].PackedValue) hash |= 1UL << bit;
+            return hash;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Bits two fingerprints may differ by and still be the same artwork.</summary>
+    internal const int LikenessTolerance = 10;
+
+    public static bool LookAlike(ulong a, ulong b) => System.Numerics.BitOperations.PopCount(a ^ b) <= LikenessTolerance;
+
     private static readonly byte[] OctoMark = "Written by Octo"u8.ToArray();
 
     /// <summary>

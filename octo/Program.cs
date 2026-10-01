@@ -339,7 +339,10 @@ builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.CoverArtService(
 // adding/removing a source is a one-line registration change here.
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.DeezerCoverArtLookup>();
 // Registered as itself too: downloads and the cover upgrade ask it for an album's master.
-builder.Services.AddSingleton<Octo.Services.CoverArt.ITunesCoverArtLookup>();
+builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.ITunesCoverArtLookup(
+    sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<ILogger<Octo.Services.CoverArt.ITunesCoverArtLookup>>(),
+    // Matches survive a restart, so a library is not sent back to Apple album by album.
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "itunes-masters.json")));
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource>(sp =>
     sp.GetRequiredService<Octo.Services.CoverArt.ITunesCoverArtLookup>());
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.LastFmCoverArtLookup>();

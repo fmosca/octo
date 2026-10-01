@@ -19,6 +19,13 @@ public interface IAlbumCoverFinder
     Task<FoundCover?> FindAsync(AlbumCoverQuery query, CancellationToken ct);
 
     /// <summary>
+    /// The same choice as <see cref="FindAsync"/> without downloading the largest pictures:
+    /// the found cover's size is right, and its bytes may be a small copy, enough for a tile
+    /// and for <see cref="CoverImage.LooksHash"/>. For a preview.
+    /// </summary>
+    Task<FoundCover?> PreviewAsync(AlbumCoverQuery query, CancellationToken ct) => FindAsync(query, ct);
+
+    /// <summary>
     /// Gets ready for many albums at once, before <see cref="FindAsync"/> is asked about each:
     /// what can be matched in bulk is matched here, and what it is doing is reported in words.
     /// Optional; an album it did not reach is found the slow way.
@@ -179,17 +186,27 @@ public sealed class AlbumCoverFinder : IAlbumCoverFinder
         }
     }
 
-    public async Task<FoundCover?> FindAsync(AlbumCoverQuery query, CancellationToken ct)
+    public Task<FoundCover?> FindAsync(AlbumCoverQuery query, CancellationToken ct) => ChooseAsync(query, probeOnly: false, ct);
+
+    public Task<FoundCover?> PreviewAsync(AlbumCoverQuery query, CancellationToken ct) => ChooseAsync(query, probeOnly: true, ct);
+
+    private async Task<FoundCover?> ChooseAsync(AlbumCoverQuery query, bool probeOnly, CancellationToken ct)
     {
         // An album being primed waits for its own batch at Apple, so its master is matched
         // in bulk rather than searched; the other sources start at once.
         var ready = !string.IsNullOrWhiteSpace(query.Album) && _ready.TryGetValue(KeyOf(query.Artist, query.Album!), out var tcs)
             ? tcs.Task.WaitAsync(ReadyTimeout, ct).ContinueWith(_ => { }, TaskScheduler.Default)
             : Task.CompletedTask;
+        // A preview learns the master's size from its first bytes and takes Apple's small copy;
+        // only a replace downloads the master itself.
+        int? probedSide = null;
         var itunes = Try("iTunes", async () =>
         {
             await ready;
-            return await _itunes.TryFetchAlbumMasterAsync(query.Artist, query.Album, query.Title, ct);
+            if (!probeOnly) return await _itunes.TryFetchAlbumMasterAsync(query.Artist, query.Album, query.Title, ct);
+            if (await _itunes.TryProbeAlbumMasterAsync(query.Artist, query.Album, query.Title, ct) is not { } probe) return null;
+            probedSide = probe.Side;
+            return probe.Thumb;
         });
         var archive = string.IsNullOrEmpty(query.MusicBrainzReleaseId) && string.IsNullOrEmpty(query.MusicBrainzReleaseGroupId)
             ? Task.FromResult<byte[]?>(null)
@@ -203,7 +220,7 @@ public sealed class AlbumCoverFinder : IAlbumCoverFinder
         foreach (var (bytes, source) in new[] { (itunes.Result, "iTunes"), (archive.Result, "Cover Art Archive"), (catalog.Result, "Deezer") })
         {
             if (!CoverImage.IsUsable(bytes, requireSquare: true) || CoverImage.Measure(bytes!) is not { } size) continue;
-            var side = Math.Min(size.Width, size.Height);
+            var side = source == "iTunes" && probedSide is { } probed ? probed : Math.Min(size.Width, size.Height);
             if (best is null || side > best.Side) best = new FoundCover(bytes!, source, side);
         }
         return best;

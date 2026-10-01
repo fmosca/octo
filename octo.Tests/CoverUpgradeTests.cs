@@ -390,4 +390,52 @@ public class CoverUpgradeTests : IDisposable
         Assert.Equal(["0724384960650", "724384960650"], ITunesCoverArtLookup.BarcodeForms("0724384960650"));
         Assert.Empty(ITunesCoverArtLookup.BarcodeForms("not a barcode"));
     }
+
+    private static byte[] Stripes(int side, bool across)
+    {
+        using var image = new Image<Rgba32>(side, side);
+        image.ProcessPixelRows(rows =>
+        {
+            for (var y = 0; y < rows.Height; y++)
+            {
+                var row = rows.GetRowSpan(y);
+                for (var x = 0; x < row.Length; x++)
+                {
+                    var v = (byte)(across ? 255 * x / side : 255 * ((x / (side / 8)) % 2));
+                    row[x] = new Rgba32(v, v, v);
+                }
+            }
+        });
+        using var stream = new MemoryStream();
+        image.SaveAsJpeg(stream);
+        return stream.ToArray();
+    }
+
+    /// <summary>A name match can find another edition or another album: it is listed as
+    /// different, and an upgrade nobody picked it for leaves the song alone.</summary>
+    [Fact]
+    public async Task AFoundCoverThatLooksDifferentIsFlaggedAndNotWrittenUnpicked()
+    {
+        var path = Song("Discovery", "One More Time", Stripes(300, across: false));
+        var before = File.ReadAllBytes(path);
+        var (worker, store) = Worker(new FixedFinder(new FoundCover(Stripes(3000, across: true), "iTunes", 3000)));
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Preview, FolderCovers: true));
+        Assert.False(Assert.Single(store.Current.Preview).LooksSame);
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Apply, FolderCovers: true));
+        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.Equal(0, store.Current.Upgraded);
+    }
+
+    [Fact]
+    public async Task TheSameArtworkSharperIsMarkedAlike()
+    {
+        Song("Discovery", "One More Time", Stripes(300, across: false));
+        var (worker, store) = Worker(new FixedFinder(new FoundCover(Stripes(3000, across: false), "iTunes", 3000)));
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Preview, FolderCovers: true));
+
+        Assert.True(Assert.Single(store.Current.Preview).LooksSame);
+    }
 }
