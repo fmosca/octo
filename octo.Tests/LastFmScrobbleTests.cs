@@ -752,7 +752,8 @@ public sealed class LastFmScrobbleEndpointTests
     [Fact]
     public async Task TimesThatDoNotPairWithIds_AreNotRelayed()
     {
-        await using var fixture = new RadioWebFactory(lastFmScrobbling: true);
+        // Library plays left to Navidrome, so the one play sent to Last.fm is the outside one.
+        await using var fixture = new RadioWebFactory(lastFmScrobbling: true, lastFmLibraryPlays: false);
         var outside = RegisterOutsideSong(fixture);
         using var client = fixture.CreateClient();
         var stale = DateTimeOffset.UtcNow.AddDays(-3).ToUnixTimeMilliseconds();
