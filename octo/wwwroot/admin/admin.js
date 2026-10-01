@@ -2936,13 +2936,90 @@ async function loadFetched({ withAcquisitions = true } = {}) {
           <div class="dl-tags"><span class="dl-badge ${badgeClass}">${escapeHtml(fmt)}</span><span class="dl-source">${escapeHtml(d.source)}</span></div>
           <div class="dl-sub">${escapeHtml(relTime(d.downloadedAt))}${size ? ' · ' + size : ''}${who ? ' · ' + who : ''}</div>
         </div>
-      </div>`;
+      </div>${d.tagging ? `<details class="dl-tagging"><summary>How it was tagged</summary>${renderTagReport(d.tagging)}</details>` : ''}`;
     }).join('');
   } catch (e) {
     list.innerHTML = stateBlock('error', `Couldn't load the log: ${e.message || 'error'}`);
   }
 }
 document.getElementById('fetched-refresh')?.addEventListener('click', loadFetched);
+
+// ── How a download was tagged ───────────────────────────────────────────────
+// The same block under a Fetched songs row and under "Try it on a song": the release that won
+// and how sure Octo is, every candidate it weighed with its biggest penalties, what each field
+// was set to and from, the notes, the stage timings and the loudness.
+function renderTagReport(report) {
+  if (!report) return '';
+  const confidence = String(report.confidence || 'None');
+  const badge = { Strong: 'good', Medium: 'state', Ambiguous: 'warn', Low: 'warn', None: 'mp3' }[confidence] || 'mp3';
+  const distance = typeof report.distance === 'number' ? ` · distance ${report.distance.toFixed(3)}` : '';
+  const chosen = report.releaseTitle
+    ? `<strong>${escapeHtml(report.releaseTitle)}</strong>${report.releaseDate ? ' (' + escapeHtml(report.releaseDate) + ')' : ''} from ${escapeHtml(report.source || '?')}`
+    : 'No release was chosen; the tags came from the catalog and the file as before.';
+  const rehearsed = report.rehearsed ? '<span class="dl-badge warn">rehearsal</span>' : '';
+
+  const candidates = (report.candidates || []).map(c => `<div class="config-row tag-candidate">
+      <div><span class="key">${escapeHtml(c.source)}</span> ${escapeHtml(c.title)}<div class="tag-sub">${escapeHtml(c.album || '')}${c.type ? ' · ' + escapeHtml(c.type) : ''}${c.date ? ' · ' + escapeHtml(c.date) : ''}</div></div>
+      <div class="value">${Number(c.distance).toFixed(3)}<div class="tag-sub">${escapeHtml((c.biggestPenalties || []).join(', ') || 'nothing against it')}</div></div>
+    </div>`).join('');
+
+  const fields = Object.entries(report.fields || {}).map(([name, f]) => `<div class="config-row">
+      <div class="key">${escapeHtml(name)}</div>
+      <div class="value">${escapeHtml(f?.value ?? '')}<span class="tag-sub"> from ${escapeHtml(f?.source || '?')}</span></div>
+    </div>`).join('');
+
+  const notes = (report.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
+  const stages = Object.entries(report.stageSeconds || {}).map(([k, v]) => `${escapeHtml(k)} ${Number(v).toFixed(1)}s`).join(' · ');
+  const loudness = typeof report.integratedLufs === 'number'
+    ? `${report.integratedLufs.toFixed(1)} LUFS, peak ${Number(report.truePeakDbfs ?? 0).toFixed(1)} dBTP`
+    : 'not measured';
+
+  return `<div class="tag-report">
+    <div class="tag-report-head"><span class="dl-badge ${badge}">${escapeHtml(confidence)}</span>${rehearsed}<span>${chosen}${distance}</span></div>
+    ${candidates ? `<div class="tag-report-title">Candidates</div><div class="config-table">${candidates}</div>` : ''}
+    ${fields ? `<div class="tag-report-title">Fields</div><div class="config-table">${fields}</div>` : ''}
+    ${notes ? `<ul class="tag-report-notes">${notes}</ul>` : ''}
+    <div class="tag-sub">${stages ? stages + ' · ' : ''}loudness ${escapeHtml(loudness)}${report.detailsPrefetchHit ? ' · release details prefetched' : ''}</div>
+  </div>`;
+}
+
+// "Try it on a song": the whole identification on a library file or on a name, never written.
+document.getElementById('tags-preview-run')?.addEventListener('click', async () => {
+  const button = document.getElementById('tags-preview-run');
+  const status = document.getElementById('tags-preview-status');
+  const out = document.getElementById('tags-preview-out');
+  const body = {
+    path: document.getElementById('tags-preview-path')?.value.trim() || null,
+    artist: document.getElementById('tags-preview-artist')?.value.trim() || null,
+    title: document.getElementById('tags-preview-title')?.value.trim() || null,
+    album: document.getElementById('tags-preview-album')?.value.trim() || null,
+  };
+  if (!body.path && !(body.artist && body.title)) {
+    status.textContent = 'Give a path inside the music folder, or an artist and a title.';
+    status.hidden = false;
+    return;
+  }
+  button.disabled = true;
+  status.textContent = 'Asking the fingerprint service, the catalog and the music database…';
+  status.hidden = false;
+  out.hidden = true;
+  try {
+    const r = await genreBackfillFetch('/api/admin/tags/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
+    out.innerHTML = renderTagReport(result);
+    out.hidden = false;
+    status.hidden = true;
+  } catch (e) {
+    status.textContent = `Could not try it: ${e.message || 'error'}`;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 // ────────────────────────────────────────────────────────────────
 // Segmented controls: buttons built from a hidden <select> they proxy to,

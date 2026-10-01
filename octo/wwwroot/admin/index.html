@@ -915,6 +915,87 @@
 
         <div class="set-section">
           <div class="set-head">
+            <h3 class="set-title">Release matching</h3>
+            <p class="set-desc">How Octo decides which release a download is, before it writes a tag.</p>
+          </div>
+          <form data-section="matching" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">File a song under its original album</div>
+                <div class="set-info-d">A song that arrived without an album goes under the first release of its recording, even when the file was ripped from a compilation or a later pressing.</div>
+                <div class="set-info-more">Off keeps the album the file&rsquo;s own tags name when it has one. Either way, a song whose request named an album keeps that album.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.PreferOriginalAlbum" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Show the original release year</div>
+                <div class="set-info-d">The year is the recording&rsquo;s first release, so a 2011 remaster of a 1991 album reads 1991.</div>
+                <div class="set-info-more">The pressing&rsquo;s own date stays in the download&rsquo;s tag report. Off writes the pressing&rsquo;s date, and M4A tracks of one album matched to different pressings can then show as two albums.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.YearFromOriginalRelease" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Preferred countries <span class="set-opt">optional</span></div>
+                <div class="set-info-d">Two-letter codes, in order, whose pressings win a tie, for example <code>US, XW, GB</code>. Empty means no preference.</div>
+              </div>
+              <input class="set-input" id="f-preferred-countries" name="Metadata.PreferredCountries" placeholder="US, XW, GB" maxlength="64" />
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Ask MusicBrainz for release details</div>
+                <div class="set-info-d">One request per download, about a second, for the label, catalogue number, barcode, status and track ids of the release that won, and a search by name when the fingerprint named nothing.</div>
+                <div class="set-info-more">Needs no key. Off tags from the fingerprint and Deezer alone.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.ReleaseDetailsLookup" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Measure loudness (ReplayGain)</div>
+                <div class="set-info-d">Each download is measured once and gets ReplayGain track tags, which the Octo apps and most players use to even out volume.</div>
+                <div class="set-info-more">Decodes the whole file beside the lookups, so it rarely adds time. An album fetched whole gets album gain too.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.ReplayGain" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Loudness time limit</div>
+                <div class="set-info-d">Seconds the measurement may take before the download goes on without it. A FLAC on local disk takes a few; a slow mount can take far longer.</div>
+              </div>
+              <input class="set-input" id="f-replaygain-timeout" name="Metadata.ReplayGainTimeoutSeconds" type="number" min="10" max="300" />
+            </div>
+            <details class="set-more">
+              <summary>Trying it out</summary>
+              <div class="set-row">
+                <div class="set-info">
+                  <div class="set-info-t">Rehearse the matching</div>
+                  <div class="set-info-d">Work out what every download would be tagged as and show it under Fetched songs, but write only what Octo wrote before.</div>
+                  <div class="set-info-more">ReplayGain, the ISRC and the fingerprint id are still written: none of them depends on the match.</div>
+                </div>
+                <label class="switch"><input type="checkbox" name="Metadata.TagRehearsal" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+              </div>
+              <div class="set-row stack">
+                <div class="set-info">
+                  <div class="set-info-t">Try it on a song</div>
+                  <div class="set-info-d">See how a song would be matched and tagged, without touching anything. A path inside the music folder is fingerprinted and measured; an artist and title alone are matched by name.</div>
+                </div>
+                <div class="tags-preview-fields">
+                  <input class="set-input" id="tags-preview-path" placeholder="/music/Artist/Album/01 - Song.flac" />
+                  <input class="set-input" id="tags-preview-artist" placeholder="Artist" />
+                  <input class="set-input" id="tags-preview-title" placeholder="Title" />
+                  <input class="set-input" id="tags-preview-album" placeholder="Album, if the request would name one" />
+                </div>
+                <div><button type="button" class="btn btn-ghost" id="tags-preview-run">Try it</button></div>
+                <div id="tags-preview-status" class="set-info-d" role="status" aria-live="polite" hidden></div>
+                <div id="tags-preview-out" hidden></div>
+              </div>
+            </details>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
             <h3 class="set-title">Lyrics</h3>
             <p class="set-desc">A lyrics file beside each download, and lyrics for any song as it plays, in every app.</p>
           </div>

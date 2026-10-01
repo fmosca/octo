@@ -1470,6 +1470,23 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
 /* A username is not a number, so it opts out of the tabular figures around it. */
 .dl-asker { font-variant-numeric: normal; }
 
+/* How a download was tagged: folded under its row, and under "Try it on a song". */
+.dl-tagging { padding: 0 var(--s-xl) 10px; }
+.dl-tagging > summary { font-size: var(--t-label); color: var(--text-muted); cursor: pointer; padding: 4px 0; }
+.dl-tagging > summary:hover { color: var(--ink-1); }
+.tag-report { display: flex; flex-direction: column; gap: var(--s-m); padding-top: 6px; }
+.tag-report-head { display: flex; align-items: center; gap: var(--s-m); flex-wrap: wrap; font-size: var(--t-meta); color: var(--ink-1); }
+.tag-report-title { font-size: var(--t-label); font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+.tag-report .config-row { grid-template-columns: 1fr auto; }
+.tag-report .config-row .value { word-break: normal; text-align: right; }
+.tag-sub { font-size: var(--t-label); color: var(--text-muted); font-family: var(--sans); }
+.tag-report-notes { margin: 0; padding-left: 18px; font-size: var(--t-label); color: var(--text-secondary); }
+.dl-badge.good { background: var(--good-wash); color: var(--good); }
+.dl-badge.warn { background: var(--warn-wash, rgba(255, 180, 60, 0.14)); color: var(--warn, #e3a93c); }
+.tags-preview-fields { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-m); }
+.tags-preview-fields > #tags-preview-path { grid-column: 1 / -1; }
+#tags-preview-out .tag-report { padding: 10px 14px; border-radius: var(--r-control); background: rgba(0, 0, 0, 0.1); }
+
 /* Hearted downloads still running, above the log. */
 .acq-wrap { margin-bottom: var(--s-page); }
 .acq-wrap .dl-list { margin-top: 0; }
