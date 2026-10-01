@@ -2564,7 +2564,10 @@ async function loadAcquisitions() {
     const pct = typeof a.progress === 'number' ? Math.round(a.progress * 100) : null;
     const failed = a.state === 'failed';
     const label = a.state === 'downloading' && pct !== null
-      ? `Downloading ${pct}%` : (ACQ_LABELS[a.state] || a.state);
+      ? `Downloading ${pct}%`
+      : a.state === 'queued' && a.ahead > 0
+        ? `Queued, ${a.ahead} ahead`
+        : (ACQ_LABELS[a.state] || a.state);
     const askers = Array.isArray(a.requestedBy) ? a.requestedBy.filter(Boolean) : [];
     const size = fmtSize(a.bytesTotal);
     const sub = [
@@ -2576,7 +2579,9 @@ async function loadAcquisitions() {
       ? `<div class="acq-error">${escapeHtml(a.error)}</div>`
       : pct !== null && a.state === 'downloading'
         ? `<div class="acq-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>`
-        : '';
+        : a.note
+          ? `<div class="dl-sub">${escapeHtml(a.note)}</div>`
+          : '';
     return `<div class="dl-item">
       <div class="dl-art dl-art-ph"></div>
       <div class="dl-main">

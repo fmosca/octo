@@ -121,8 +121,8 @@ public sealed class AcquisitionEndpointTests
         var row = Assert.Single(rows);
 
         Assert.Equal(
-            ["album", "artist", "bytesDone", "bytesTotal", "error", "id", "libraryId", "progress",
-             "source", "startedAt", "state", "title", "updatedAt"],
+            ["ahead", "album", "artist", "bytesDone", "bytesTotal", "error", "id", "libraryId", "note",
+             "progress", "source", "startedAt", "state", "title", "updatedAt"],
             row.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
         Assert.Equal("3kX9Qm", row.GetProperty("id").GetString());
         Assert.Equal("Daft Punk", row.GetProperty("artist").GetString());

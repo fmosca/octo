@@ -52,7 +52,8 @@ public sealed class HeartAcquisitionCoordinator
             _tracker?.Stage(provider, externalId,
                 index == 0 && steps[index] != HeartDownloadSource.Lidarr
                     ? AcquisitionState.Queued : AcquisitionState.Searching,
-                SourceName(steps[index]));
+                SourceName(steps[index]),
+                index == 0 ? null : $"{SourceName(steps[index - 1])} couldn't get it, trying {SourceName(steps[index])}");
             if (steps[index] == HeartDownloadSource.Lidarr)
             {
                 if (await _lidarr.TryAcquireTrackAsync(provider, externalId, isLast, requestedBy)) return;

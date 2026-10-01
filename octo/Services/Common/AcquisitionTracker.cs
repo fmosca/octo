@@ -36,7 +36,9 @@ public sealed record AcquisitionSnapshot(
     DateTime StartedAt,
     DateTime UpdatedAt,
     string? Error,
-    string? LibraryId);
+    string? LibraryId,
+    int? Ahead = null,
+    string? Note = null);
 
 /// <summary>
 /// Live progress of every hearted download, from the moment the star is accepted until a while
@@ -84,6 +86,13 @@ public sealed class AcquisitionTracker
         public string? Error { get; set; }
         public string? LibraryId { get; set; }
 
+        /// <summary>A short line for the listener, such as which source is being tried now.</summary>
+        public string? Note { get; set; }
+
+        /// <summary>Order of arrival. Tracks an album walk lists together share a start time,
+        /// so this, not the time, is what says which of them is ahead.</summary>
+        public long Seq { get; set; }
+
         /// <summary>Bumped on every restart, so a watcher left over from an earlier run of the
         /// same song can never finish the new one.</summary>
         public int Run { get; set; }
@@ -100,15 +109,33 @@ public sealed class AcquisitionTracker
     }
 
     private readonly object _lock = new();
+    private long _seq;
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private readonly Dictionary<string, AlbumClaim> _albums = new(StringComparer.Ordinal);
     private readonly ILogger<AcquisitionTracker> _logger;
     private readonly IServiceProvider? _services;
     private readonly TimeProvider _time;
 
-    /// <summary>How often, and for how many tries, an imported song is looked for in Navidrome.</summary>
+    /// <summary>
+    /// How an imported song is looked for in Navidrome: every <see cref="VisibilityPoll"/> for
+    /// <see cref="VisibilityAttempts"/> tries, then every <see cref="SlowVisibilityPoll"/> for
+    /// <see cref="SlowVisibilityAttempts"/> more. About ten minutes in all, because a song the
+    /// app is waiting on should arrive with its id, not after the next full sync.
+    /// </summary>
     internal TimeSpan VisibilityPoll { get; set; } = TimeSpan.FromSeconds(5);
     internal int VisibilityAttempts { get; set; } = 36;
+    internal TimeSpan SlowVisibilityPoll { get; set; } = TimeSpan.FromSeconds(15);
+    internal int SlowVisibilityAttempts { get; set; } = 28;
+
+    /// <summary>
+    /// After this many tries without the song, Navidrome is asked to scan once, past the
+    /// debounce. A scan takes seconds, so a song still missing after a minute usually means the
+    /// scan that should have found it was swallowed by the debounce behind another one.
+    /// </summary>
+    internal int RescanAfterAttempts { get; set; } = 12;
+
+    /// <summary>Asks Navidrome to scan. Tests set it; otherwise the library service does.</summary>
+    internal Func<Task>? Rescan { get; set; }
 
     /// <summary>
     /// Finds the Navidrome id of a placed file. Null means nothing can look, and an imported song
@@ -219,8 +246,12 @@ public sealed class AcquisitionTracker
     // reported by a play of a song that was hearted an hour ago cannot reopen a finished row.
     // ---------------------------------------------------------------------------------------
 
-    /// <summary>Move to a stage, and name the source when it is known.</summary>
-    public void Stage(string provider, string externalId, AcquisitionState state, string? source = null)
+    /// <summary>
+    /// Move to a stage, and name the source when it is known. A note replaces the last one; a
+    /// stage without one keeps it, so "trying YouTube" stays up while YouTube searches.
+    /// </summary>
+    public void Stage(string provider, string externalId, AcquisitionState state, string? source = null,
+        string? note = null)
     {
         Guard(nameof(Stage), () =>
         {
@@ -241,6 +272,7 @@ public sealed class AcquisitionTracker
                 entry.State = state;
                 entry.Progress = null;
                 if (!string.IsNullOrWhiteSpace(source)) entry.Source = source;
+                if (!string.IsNullOrWhiteSpace(note)) entry.Note = note.Trim();
             });
         });
     }
@@ -254,7 +286,9 @@ public sealed class AcquisitionTracker
 
     /// <summary>
     /// A transfer started or moved on. Any figure may be missing; progress comes from the bytes
-    /// when both are known, otherwise from the percentage.
+    /// when both are known, otherwise from the percentage. Nothing moved yet reads as unknown
+    /// rather than zero: slskd reports a transfer in progress before its first byte, and a
+    /// ring drawn at 0% looks like a download that died.
     /// </summary>
     public void Transfer(string provider, string externalId, long? bytesDone, long? bytesTotal,
         double? percentComplete = null, string? source = null)
@@ -265,7 +299,8 @@ public sealed class AcquisitionTracker
             if (!string.IsNullOrWhiteSpace(source)) entry.Source = source;
             entry.BytesDone = bytesDone is >= 0 ? bytesDone : null;
             entry.BytesTotal = bytesTotal is > 0 ? bytesTotal : null;
-            entry.Progress = FractionOf(bytesDone, bytesTotal, percentComplete);
+            var fraction = FractionOf(bytesDone, bytesTotal, percentComplete);
+            entry.Progress = fraction is > 0d ? fraction : null;
         }));
     }
 
@@ -368,10 +403,11 @@ public sealed class AcquisitionTracker
             lock (_lock)
             {
                 Prune();
+                var running = _entries.Values.Where(entry => !entry.Finished).ToList();
                 return _entries.Values
                     .Where(entry => username is null || entry.Owners.Contains(username))
                     .OrderByDescending(entry => entry.StartedAt)
-                    .Select(Snapshot)
+                    .Select(entry => Snapshot(entry, AheadOf(entry, running)))
                     .ToList();
             }
         }
@@ -382,12 +418,22 @@ public sealed class AcquisitionTracker
         }
     }
 
-    private static AcquisitionSnapshot Snapshot(Entry entry) => new(
+    private static AcquisitionSnapshot Snapshot(Entry entry, int? ahead) => new(
         entry.ClientId ?? entry.ExternalId, entry.Provider, entry.ExternalId,
         entry.Artist, entry.Title, entry.Album,
         entry.Owners.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList(),
         entry.Source, entry.State, entry.Progress, entry.BytesDone, entry.BytesTotal,
-        entry.StartedAt, entry.UpdatedAt, entry.Error, entry.LibraryId);
+        entry.StartedAt, entry.UpdatedAt, entry.Error, entry.LibraryId, ahead, entry.Note);
+
+    /// <summary>
+    /// How many downloads, anyone's, are ahead of a queued one. Octo fetches one song at a
+    /// time, so every running entry that arrived first is in front of it. Only a count leaves
+    /// here, never whose they are. Null once it is past the queue.
+    /// </summary>
+    private static int? AheadOf(Entry entry, IReadOnlyList<Entry> running) =>
+        entry.State == AcquisitionState.Queued
+            ? running.Count(other => !ReferenceEquals(other, entry) && other.Seq < entry.Seq)
+            : null;
 
     // ---------------------------------------------------------------------------------------
     // Helpers
@@ -449,6 +495,7 @@ public sealed class AcquisitionTracker
             entry.BytesTotal = null;
             entry.Error = null;
             entry.LibraryId = null;
+            entry.Note = null;
         }
         else
         {
@@ -456,6 +503,7 @@ public sealed class AcquisitionTracker
             _entries[key] = entry;
         }
         entry.State = AcquisitionState.Queued;
+        entry.Seq = ++_seq;
         entry.StartedAt = now;
         entry.UpdatedAt = now;
         return entry;
@@ -480,6 +528,7 @@ public sealed class AcquisitionTracker
             entry.State = AcquisitionState.Done;
             entry.Progress = null;
             entry.Error = null;
+            entry.Note = null;
             if (!string.IsNullOrWhiteSpace(libraryId)) entry.LibraryId = libraryId;
             entry.UpdatedAt = Now;
         }
@@ -491,9 +540,12 @@ public sealed class AcquisitionTracker
     {
         try
         {
-            for (var attempt = 0; attempt < Math.Max(1, VisibilityAttempts); attempt++)
+            var fast = Math.Max(1, VisibilityAttempts);
+            var total = fast + Math.Max(0, SlowVisibilityAttempts);
+            for (var attempt = 0; attempt < total; attempt++)
             {
-                if (attempt > 0) await Task.Delay(VisibilityPoll);
+                if (attempt > 0) await Task.Delay(attempt < fast ? VisibilityPoll : SlowVisibilityPoll);
+                if (attempt > 0 && attempt == RescanAfterAttempts) await RescanOnceAsync(path);
                 lock (_lock)
                 {
                     // Restarted or finished by something else while this waited: not ours now.
@@ -513,9 +565,30 @@ public sealed class AcquisitionTracker
         {
             _logger.LogDebug("Watching {Path} for Navidrome failed: {Message}", path, ex.Message);
         }
-        // Registered and in the folder; Navidrome is just slow to say so, or its scan was
-        // debounced. Done is still the truth.
+        // Registered and in the folder; Navidrome is just slow to say so. Done is still the
+        // truth, and the app finds the song on its own from here.
         Finish(key, run, null);
+    }
+
+    private async Task RescanOnceAsync(string path)
+    {
+        try
+        {
+            var rescan = Rescan ?? ResolveRescan();
+            if (rescan is null) return;
+            _logger.LogInformation("{Path} is not in Navidrome yet; asking it to scan again", path);
+            await rescan();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("Rescan for {Path} failed: {Message}", path, ex.Message);
+        }
+    }
+
+    private Func<Task>? ResolveRescan()
+    {
+        var library = _services?.GetService<Octo.Services.Local.ILocalLibraryService>();
+        return library is null ? null : () => library.TriggerLibraryScanAsync(force: true);
     }
 
     private Func<string, string, string, CancellationToken, Task<string?>>? ResolveLookup()
