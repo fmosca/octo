@@ -720,6 +720,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     private readonly bool _enableIcyMetadata;
     private readonly int? _starterPublishTimeoutSeconds;
     private readonly bool _lastFmScrobbling;
+    private readonly bool _lastFmLibraryPlays;
 
     /// <summary>The settings file Octo writes, kept in this fixture's own folder rather than
     /// /app/config, where a test run has no business writing.</summary>
@@ -727,9 +728,11 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
 
     public RadioWebFactory(string explicitFilter = "All", bool exposePlaylists = true,
         bool exposeStreams = true, bool enableIcyMetadata = true,
-        int? starterPublishTimeoutSeconds = null, bool lastFmScrobbling = false)
+        int? starterPublishTimeoutSeconds = null, bool lastFmScrobbling = false,
+        bool lastFmLibraryPlays = true)
     {
         _lastFmScrobbling = lastFmScrobbling;
+        _lastFmLibraryPlays = lastFmLibraryPlays;
         _explicitFilter = explicitFilter;
         _exposePlaylists = exposePlaylists;
         _exposeStreams = exposeStreams;
@@ -797,6 +800,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
                 // Only when asked for: with a key, radio would start calling Last.fm too.
                 ["LastFm:ApiKey"] = FakeLastFm.ApiKey,
                 ["LastFm:ApiSecret"] = FakeLastFm.Secret,
+                ["LastFm:ScrobbleLibraryPlays"] = _lastFmLibraryPlays.ToString(),
                 ["LastFm:UserSessions:bob:SessionKey"] = "sk-bob",
                 ["LastFm:UserSessions:bob:LastFmUser"] = "lfm-bob",
                 // Fails the fixture's credential check, so a session for it must still send nothing.

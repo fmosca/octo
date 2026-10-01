@@ -601,7 +601,7 @@
         <div class="set-section">
           <div class="set-head">
             <h3 class="set-title">Scrobbling</h3>
-            <p class="set-desc">Sends plays of outside songs, such as previews and Continuous Radio, to each listener's own Last.fm. Library plays are left to Navidrome, which already scrobbles them.</p>
+            <p class="set-desc">Sends plays to each listener's own Last.fm: outside songs, such as previews and Continuous Radio, and your library songs too.</p>
           </div>
           <form data-section="lastfm-scrobble" class="set-card">
             <div class="set-row">
@@ -610,6 +610,13 @@
                 <div class="set-info-d">For every listener connected below. A song counts once the player says it was played; Last.fm takes nothing shorter than 30 seconds.</div>
               </div>
               <label class="switch"><input type="checkbox" name="LastFm.ScrobbleExternalPlays" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Also send library plays</div>
+                <div class="set-info-d">Navidrome only scrobbles someone who linked Last.fm in Navidrome's own web settings. Leave this on unless they did, or each library play counts twice.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="LastFm.ScrobbleLibraryPlays" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
           </form>
           <div class="set-card lfm-scrobble-card">

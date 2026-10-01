@@ -34,13 +34,14 @@ public sealed class LastFmScrobbleException(string message, int code = 0) : Exce
 }
 
 /// <summary>
-/// Scrobbles plays of outside songs to each listener's own Last.fm, and runs the dashboard's
-/// Connect flow that links a Navidrome user to a Last.fm account.
+/// Scrobbles plays to each listener's own Last.fm, and runs the dashboard's Connect flow that
+/// links a Navidrome user to a Last.fm account.
 ///
-/// Navidrome already scrobbles library plays, so only songs it has never heard of come through
-/// here; sending a library play too would count it twice. Nothing waits on Last.fm: a play is
-/// queued and the client has its answer straight away. The queue is in memory and bounded, like
-/// the ListenBrainz path it sits beside, so an outage costs at most the plays still waiting when
+/// Outside songs always come through here, since Navidrome has never heard of them. Library
+/// songs come too unless the admin leaves them to Navidrome (<see cref="TakesLibraryPlays"/>),
+/// for a Navidrome linked to Last.fm itself. Nothing waits on Last.fm: a play is queued and the
+/// client has its answer straight away. The queue is in memory and bounded, like the
+/// ListenBrainz path it sits beside, so an outage costs at most the plays still waiting when
 /// Octo restarts.
 /// </summary>
 public sealed class LastFmScrobbleService
@@ -139,13 +140,16 @@ public sealed class LastFmScrobbleService
     /// <summary>True when the API key and shared secret are both saved, which Connect needs.</summary>
     public bool IsReady => IsReadyWith(_settings.CurrentValue);
 
-    /// <summary>True when this listener's outside plays would be sent to Last.fm. A session
-    /// resting after one refusal still counts: its plays wait for it.</summary>
+    /// <summary>True when this listener's plays would be sent to Last.fm. A session resting
+    /// after one refusal still counts: its plays wait for it.</summary>
     public bool IsEnabledFor(string username)
     {
         var settings = _settings.CurrentValue;
         return settings.ScrobbleExternalPlays && IsReadyWith(settings) && SavedSession(settings, username) is not null;
     }
+
+    /// <summary>True when library plays go to Last.fm from here too, not only outside ones.</summary>
+    public bool TakesLibraryPlays => _settings.CurrentValue.ScrobbleLibraryPlays;
 
     /// <summary>Tells Last.fm what the listener has just started. Not retried: by the time a
     /// retry landed the song would be over.</summary>

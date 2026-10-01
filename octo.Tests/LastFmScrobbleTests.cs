@@ -631,11 +631,37 @@ public sealed class LastFmScrobbleEndpointTests
         Assert.Equal("154", call["duration"]);
     }
 
-    /// <summary>Navidrome scrobbles library songs to Last.fm itself. From Octo too would be twice.</summary>
+    /// <summary>Navidrome scrobbles only a listener linked in its own settings, so Octo sends
+    /// library plays too, and still relays them so Navidrome's play counts stay right.</summary>
     [Fact]
-    public async Task LibrarySong_NeverReachesLastFm()
+    public async Task LibrarySong_ReachesLastFm_AndIsStillRelayed()
     {
         await using var fixture = new RadioWebFactory(lastFmScrobbling: true);
+        using var client = fixture.CreateClient();
+
+        await client.GetStringAsync("/rest/scrobble?u=bob&t=token&s=salt&f=json&id=one&submission=false");
+        await WhenIdle(fixture);
+        var playing = Assert.Single(fixture.Handler.LastFm.CallsTo("track.updateNowPlaying"));
+        Assert.Equal("Artist one", playing["artist"]);
+        Assert.Equal("Title one", playing["track"]);
+
+        var playedAt = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
+        await client.GetStringAsync($"/rest/scrobble?u=bob&t=token&s=salt&f=json&id=one&submission=true&time={playedAt}000");
+        await WhenIdle(fixture);
+
+        Assert.Equal(["one"], fixture.Handler.RelayedScrobbleIds);
+        var call = Assert.Single(fixture.Handler.LastFm.CallsTo("track.scrobble"));
+        Assert.Equal("Artist one", call["artist[0]"]);
+        Assert.Equal("Title one", call["track[0]"]);
+        Assert.Equal("Album one", call["album[0]"]);
+        Assert.Equal(playedAt.ToString(), call["timestamp[0]"]);
+    }
+
+    /// <summary>Left to a Navidrome linked to Last.fm itself, a library play is not sent twice.</summary>
+    [Fact]
+    public async Task LibrarySong_LeftToNavidrome_NeverReachesLastFm()
+    {
+        await using var fixture = new RadioWebFactory(lastFmScrobbling: true, lastFmLibraryPlays: false);
         using var client = fixture.CreateClient();
 
         await client.GetStringAsync("/rest/scrobble?u=bob&t=token&s=salt&f=json&id=one&submission=false");
@@ -839,6 +865,7 @@ public sealed class LastFmScrobbleAdminTests
         }
         Assert.Contains("\"connected\":true", status);
         Assert.Contains("lfm-alice", status);
+        Assert.Contains("\"libraryPlays\":true", status);
         foreach (var read in new[] { "/api/admin/lastfm/scrobble", "/api/admin/settings", "/api/admin/raw-config" })
             Assert.DoesNotContain("sk-alice", await client.GetStringAsync(read));
 
