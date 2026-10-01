@@ -41,10 +41,24 @@ public class MetadataSettings
     /// which covers a file the embed did not stick to. Only in the Organized layout and only in a
     /// folder the download created: Navidrome ranks cover.* above embedded art, so in a shared
     /// folder, or an album folder that was already there, one file would change every album's
-    /// cover. Never replaces an existing cover.* or folder.*.
+    /// cover. Never replaces a cover.* or folder.* the owner put there; a cover.jpg Octo wrote
+    /// itself (it carries a comment saying so) gives way to a larger one.
     /// Environment variable: COVER_FILE
     /// </summary>
     public bool WriteCoverFile { get; set; } = true;
+
+    /// <summary>
+    /// Embed the cover at the full size it was found, often 3000 px from iTunes, instead of
+    /// shrinking it to <see cref="EmbeddedCoverSide"/>. Every file of an album carries its own
+    /// copy, so a full-size cover adds a few megabytes to each; cover.jpg always gets the full
+    /// size either way. Also what the cover upgrade embeds.
+    /// Environment variable: FULL_SIZE_COVERS
+    /// </summary>
+    public bool EmbedFullSizeCovers { get; set; }
+
+    /// <summary>The longest side of an embedded cover when <see cref="EmbedFullSizeCovers"/> is
+    /// off: sharp across a phone's whole screen, a few hundred kilobytes.</summary>
+    public const int EmbeddedCoverSide = 1500;
 
     /// <summary>
     /// Fetch lyrics: a sidecar beside each download, and live for any song as it plays when the

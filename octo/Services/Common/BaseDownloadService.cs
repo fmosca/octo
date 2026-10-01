@@ -1060,10 +1060,12 @@ public abstract class BaseDownloadService : IDownloadService
             if (song.MusicBrainzArtistIds.Count == 1) tagFile.Tag.MusicBrainzArtistId = song.MusicBrainzArtistIds[0];
             if (song.IsCompilation) TagWriterExtras.SetCompilation(tagFile, true);
             
-            // One chain (#51) instead of one Deezer URL: the Cover Art Archive when a fingerprint
-            // named the release, then the catalog's own cover, then Deezer, iTunes and Last.fm by
-            // name, then the file's own art. A cover that is not square counts as missing, and a
-            // letterboxed video frame gives up its centre.
+            // One chain (#51) instead of one Deezer URL: Apple's master of the album, the Cover
+            // Art Archive when a fingerprint named the release, the catalog's own cover, then
+            // Deezer, iTunes and Last.fm by name, then the file's own art; the largest wins. A
+            // cover that is not square counts as missing, and a letterboxed video frame gives up
+            // its centre. The file gets it at 1500 px unless full size is asked for; cover.jpg
+            // gets it whole.
             try
             {
                 var embedded = tagFile.Tag.Pictures.FirstOrDefault(picture => picture.Type == TagLib.PictureType.FrontCover)
@@ -1076,17 +1078,19 @@ public abstract class BaseDownloadService : IDownloadService
                     chosenCover = cover.Bytes;
                     if (!cover.KeepsExisting)
                     {
+                        var embed = MetadataSettingsValue.EmbedFullSizeCovers ? cover.Bytes
+                            : Octo.Services.CoverArt.CoverImage.FitWithin(cover.Bytes, MetadataSettings.EmbeddedCoverSide);
                         tagFile.Tag.Pictures = new TagLib.IPicture[]
                         {
                             new TagLib.Picture
                             {
                                 Type = TagLib.PictureType.FrontCover,
-                                MimeType = Octo.Services.CoverArt.CoverImage.MimeType(cover.Bytes),
+                                MimeType = Octo.Services.CoverArt.CoverImage.MimeType(embed),
                                 Description = "Cover",
-                                Data = new TagLib.ByteVector(cover.Bytes),
+                                Data = new TagLib.ByteVector(embed),
                             },
                         };
-                        Logger.LogInformation("Cover art embedded from {Source}: {Size} bytes", cover.Source, cover.Bytes.Length);
+                        Logger.LogInformation("Cover art embedded from {Source}: {Size} bytes", cover.Source, embed.Length);
                     }
                 }
             }
@@ -1136,19 +1140,21 @@ public abstract class BaseDownloadService : IDownloadService
     /// cover.jpg only in the Organized layout and only in a folder this download created.
     /// Navidrome ranks cover.* above embedded art, so in Flat every download shares one folder,
     /// in ByArtist one folder holds all of an artist's albums, and in an album folder that was
-    /// already there one new track would change the whole album's cover.
+    /// already there one new track would change the whole album's cover. The one exception is
+    /// a cover.jpg Octo wrote itself, in the Organized layout: a later track of the same album
+    /// that found a larger cover replaces it, so a soft first track does not set the album's
+    /// cover for good.
     /// </summary>
     protected Task WriteSidecarsAsync(Song song, Placement placement, byte[]? cover, CancellationToken ct)
     {
         try
         {
-            if (MetadataSettingsValue.WriteCoverFile && cover is { Length: > 0 } && placement.CreatedFolder
+            if (MetadataSettingsValue.WriteCoverFile && cover is { Length: > 0 }
                 && SubsonicSettings.FolderStructure == FolderStructure.Organized
                 && Path.GetDirectoryName(placement.Path) is { Length: > 0 } dir
-                && !Directory.EnumerateFiles(dir, "cover.*").Any()
-                && !Directory.EnumerateFiles(dir, "folder.*").Any())
+                && Octo.Services.CoverArt.CoverFiles.ShouldWrite(dir, cover, placement.CreatedFolder))
             {
-                IOFile.WriteAllBytes(Path.Combine(dir, "cover.jpg"), Octo.Services.CoverArt.CoverImage.ToJpeg(cover));
+                Octo.Services.CoverArt.CoverFiles.Write(dir, cover);
                 Logger.LogInformation("Wrote cover.jpg beside {Path}", placement.Path);
             }
         }

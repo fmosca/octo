@@ -297,4 +297,176 @@ public class CoverChainTests
         Assert.Null(await Resolver(http, new FixedSource(null))
             .ResolveAsync(new Song { Artist = "A", Title = "T" }, null, CancellationToken.None));
     }
+
+    // ---- Apple's master -------------------------------------------------------------------
+
+    private static string ITunesAnswer(params (string Artist, string Collection, string? Track, string Explicitness, string Art)[] rows) =>
+        System.Text.Json.JsonSerializer.Serialize(new
+        {
+            resultCount = rows.Length,
+            results = rows.Select(r => new Dictionary<string, string?>
+            {
+                ["artistName"] = r.Artist, ["collectionName"] = r.Collection, ["trackName"] = r.Track,
+                ["collectionExplicitness"] = r.Explicitness, ["artworkUrl100"] = r.Art,
+            }),
+        });
+
+    private static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK) { Content = new StringContent(body) };
+
+    private static DownloadCoverResolver ResolverWithITunes(IHttpClientFactory http, ICoverArtSource aggregated) =>
+        new(new CoverArtArchiveLookup(http, NullLogger<CoverArtArchiveLookup>.Instance),
+            new CoverArtAggregator([aggregated], NullLogger<CoverArtAggregator>.Instance),
+            http, TestOptions.Monitor(new MetadataSettings()), NullLogger<DownloadCoverResolver>.Instance,
+            new ITunesCoverArtLookup(http, NullLogger<ITunesCoverArtLookup>.Instance));
+
+    [Fact]
+    public async Task Resolve_AppleMasterOfTheSameAlbumComesFirstAtFullSize()
+    {
+        var calls = new List<string>();
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("itunes.apple.com/search") => Json(ITunesAnswer(
+                ("Daft Punk", "Homework", null, "notExplicit", "https://is1.example/Music/wrong/100x100bb.jpg"),
+                ("Daft Punk", "Discovery", null, "notExplicit", "https://is1.example/Music/right/100x100bb.jpg"))),
+            var url when url.Contains("/right/3000x3000bb") => Picture(Jpeg(3000, 3000)),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        }, calls);
+        var song = new Song { Artist = "Daft Punk", Title = "One More Time", Album = "Discovery",
+            CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        var choice = await ResolverWithITunes(http, new FixedSource(Catalog)).ResolveAsync(song, null, CancellationToken.None);
+
+        Assert.Equal("iTunes", choice!.Source);
+        Assert.Equal((3000, 3000), CoverImage.Measure(choice.Bytes));
+        Assert.DoesNotContain(calls, url => url.Contains("deezer.example"));
+    }
+
+    /// <summary>Another album by the same artist is a wrong tag, not a soft picture.</summary>
+    [Fact]
+    public async Task Resolve_AppleIsSkippedWhenNoReleaseHasTheAlbumsName()
+    {
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("itunes.apple.com/search") => Json(ITunesAnswer(
+                ("Daft Punk", "Homework", null, "notExplicit", "https://is1.example/Music/wrong/100x100bb.jpg"))),
+            var url when url.Contains("deezer.example") => Picture(Catalog),
+            _ => Picture(Sharp),
+        });
+        var song = new Song { Artist = "Daft Punk", Title = "One More Time", Album = "Discovery",
+            CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        var choice = await ResolverWithITunes(http, new FixedSource(null)).ResolveAsync(song, null, CancellationToken.None);
+
+        Assert.Equal("the catalog", choice!.Source);
+    }
+
+    [Fact]
+    public async Task Resolve_ASingleIsMatchedByItsSongAndAppleSingleSuffix()
+    {
+        var http = Http(request => request.RequestUri!.ToString() switch
+        {
+            var url when url.Contains("itunes.apple.com/search") && url.Contains("entity=song") => Json(ITunesAnswer(
+                ("Tame Impala", "Currents", "Let It Happen", "notExplicit", "https://is1.example/Music/album/100x100bb.jpg"),
+                ("Tame Impala", "Let It Happen - Single", "Let It Happen", "notExplicit", "https://is1.example/Music/single/100x100bb.jpg"))),
+            var url when url.Contains("/single/3000x3000bb") => Picture(Jpeg(1400, 1400)),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        });
+        var song = new Song { Artist = "Tame Impala", Title = "Let It Happen", Album = "Let It Happen" };
+
+        var choice = await ResolverWithITunes(http, new FixedSource(null)).ResolveAsync(song, null, CancellationToken.None);
+
+        Assert.Equal("iTunes", choice!.Source);
+        Assert.Equal((1400, 1400), CoverImage.Measure(choice.Bytes));
+    }
+
+    [Fact]
+    public async Task Resolve_ACompilationNeverAsksApple()
+    {
+        var calls = new List<string>();
+        var http = Http(_ => Picture(Catalog), calls);
+        var song = new Song { Artist = "Various Artists", Title = "T", Album = "Now 42", IsCompilation = true,
+            CoverArtUrlLarge = "https://deezer.example/cover.jpg" };
+
+        await ResolverWithITunes(http, new FixedSource(null)).ResolveAsync(song, null, CancellationToken.None);
+
+        Assert.DoesNotContain(calls, url => url.Contains("itunes"));
+    }
+
+    // ---- Embedding and cover.jpg ----------------------------------------------------------
+
+    [Fact]
+    public void FitWithin_ShrinksAMasterAndLeavesASmallerCoverAlone()
+    {
+        var master = Jpeg(3000, 3000);
+        Assert.Equal((1500, 1500), CoverImage.Measure(CoverImage.FitWithin(master, 1500)));
+        Assert.Same(Catalog, CoverImage.FitWithin(Catalog, 1500));
+    }
+
+    [Fact]
+    public void MarkAsOcto_StaysAReadableJpegAndIsRecognised()
+    {
+        Assert.False(CoverImage.IsOctoCover(Square));
+
+        var marked = CoverImage.MarkAsOcto(Square);
+
+        Assert.True(CoverImage.IsOctoCover(marked));
+        Assert.Equal((600, 600), CoverImage.Measure(marked));
+        Assert.Same(marked, CoverImage.MarkAsOcto(marked));
+        var notJpeg = "not a jpeg"u8.ToArray();
+        Assert.Same(notJpeg, CoverImage.MarkAsOcto(notJpeg));
+    }
+
+    private static string TempFolder()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "octo-covers-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    [Fact]
+    public void CoverFile_IsWrittenIntoANewFolderButNotAnOldOneWithoutACover()
+    {
+        var dir = TempFolder();
+        try
+        {
+            Assert.True(CoverFiles.ShouldWrite(dir, Square, folderIsNew: true));
+            Assert.False(CoverFiles.ShouldWrite(dir, Square, folderIsNew: false));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void CoverFile_OctosOwnGivesWayToALargerOneOnly()
+    {
+        var dir = TempFolder();
+        try
+        {
+            CoverFiles.Write(dir, Square);
+            Assert.True(CoverImage.IsOctoCover(File.ReadAllBytes(Path.Combine(dir, "cover.jpg"))));
+
+            Assert.False(CoverFiles.ShouldWrite(dir, Jpeg(500, 500), folderIsNew: false));
+            Assert.True(CoverFiles.ShouldWrite(dir, Catalog, folderIsNew: false));
+
+            CoverFiles.Write(dir, Catalog);
+            Assert.Equal((1000, 1000), CoverImage.Measure(File.ReadAllBytes(Path.Combine(dir, "cover.jpg"))));
+            Assert.Single(Directory.GetFiles(dir));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void CoverFile_TheOwnersCoverIsNeverReplaced()
+    {
+        var dir = TempFolder();
+        try
+        {
+            File.WriteAllBytes(Path.Combine(dir, "cover.jpg"), Thumbnail);
+            Assert.False(CoverFiles.ShouldWrite(dir, Sharp, folderIsNew: true));
+
+            File.Delete(Path.Combine(dir, "cover.jpg"));
+            File.WriteAllBytes(Path.Combine(dir, "folder.jpg"), Thumbnail);
+            Assert.False(CoverFiles.ShouldWrite(dir, Sharp, folderIsNew: true));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }

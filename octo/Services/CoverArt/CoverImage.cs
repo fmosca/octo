@@ -78,6 +78,79 @@ internal static class CoverImage
         }
     }
 
+    /// <summary>
+    /// No larger than <paramref name="maxSide"/> on its longer side, as a JPEG. The cover kept
+    /// in every file of an album is its copy of the art, so a 3000 px master embedded in fifteen
+    /// tracks would add tens of megabytes; the full master goes to cover.jpg instead. Returned
+    /// as it is when it already fits or cannot be read.
+    /// </summary>
+    public static byte[] FitWithin(byte[] bytes, int maxSide)
+    {
+        try
+        {
+            if (Measure(bytes) is not { } size || Math.Max(size.Width, size.Height) <= maxSide) return bytes;
+            using var image = Image.Load(bytes);
+            image.Mutate(ctx => ctx.Resize(new ResizeOptions
+            {
+                Size = new Size(maxSide, maxSide),
+                Mode = ResizeMode.Max,
+                Sampler = KnownResamplers.Lanczos3,
+            }));
+            using var output = new MemoryStream();
+            image.Save(output, new JpegEncoder { Quality = 92 });
+            return output.ToArray();
+        }
+        catch
+        {
+            return bytes;
+        }
+    }
+
+    private static readonly byte[] OctoMark = "Written by Octo"u8.ToArray();
+
+    /// <summary>
+    /// The JPEG with a comment saying Octo wrote it, so a later, sharper cover may replace a
+    /// cover.jpg that is Octo's own and never one the owner put there. The comment goes after
+    /// the APPn segments, where JFIF readers expect them to stay first. Anything that is not a
+    /// JPEG comes back unchanged.
+    /// </summary>
+    public static byte[] MarkAsOcto(byte[] jpeg)
+    {
+        if (jpeg.Length < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 || IsOctoCover(jpeg)) return jpeg;
+        var at = 2;
+        while (at + 4 <= jpeg.Length && jpeg[at] == 0xFF && jpeg[at + 1] is >= 0xE0 and <= 0xEF)
+            at += 2 + ((jpeg[at + 2] << 8) | jpeg[at + 3]);
+        if (at > jpeg.Length) return jpeg;
+        var length = OctoMark.Length + 2;
+        var marked = new byte[jpeg.Length + 2 + length];
+        Buffer.BlockCopy(jpeg, 0, marked, 0, at);
+        marked[at] = 0xFF;
+        marked[at + 1] = 0xFE;
+        marked[at + 2] = (byte)(length >> 8);
+        marked[at + 3] = (byte)length;
+        Buffer.BlockCopy(OctoMark, 0, marked, at + 4, OctoMark.Length);
+        Buffer.BlockCopy(jpeg, at, marked, at + 2 + length, jpeg.Length - at);
+        return marked;
+    }
+
+    /// <summary>True when the JPEG carries the comment <see cref="MarkAsOcto"/> writes.</summary>
+    public static bool IsOctoCover(byte[] jpeg)
+    {
+        if (jpeg.Length < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return false;
+        var at = 2;
+        // Only the header segments; the picture itself starts at SOS.
+        while (at + 4 <= jpeg.Length && jpeg[at] == 0xFF && jpeg[at + 1] != 0xDA && jpeg[at + 1] != 0xD9)
+        {
+            var length = (jpeg[at + 2] << 8) | jpeg[at + 3];
+            if (length < 2) return false;
+            if (jpeg[at + 1] == 0xFE && length - 2 == OctoMark.Length && at + 4 + OctoMark.Length <= jpeg.Length
+                && jpeg.AsSpan(at + 4, OctoMark.Length).SequenceEqual(OctoMark))
+                return true;
+            at += 2 + length;
+        }
+        return false;
+    }
+
     public static string MimeType(byte[] bytes)
     {
         try

@@ -169,6 +169,8 @@ services:
       Metadata__UseCoverArtArchive: ${COVER_ART_ARCHIVE:-true}
       Metadata__ReplaceVideoCovers: ${REPLACE_VIDEO_COVERS:-true}
       Metadata__WriteCoverFile: ${COVER_FILE:-true}
+      # Embed covers at full size (often 3000 px) instead of 1500 px. cover.jpg is full size either way.
+      Metadata__EmbedFullSizeCovers: ${FULL_SIZE_COVERS:-false}
       # Lyrics: a .lrc (synced) or .txt (plain) beside each download, and live lyrics
       # for songs as they play. kugou and netease are unofficial APIs; netease only
       # runs if listed, and leaving kugou out switches it off.

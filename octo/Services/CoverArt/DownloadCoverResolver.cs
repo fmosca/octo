@@ -15,8 +15,9 @@ public sealed record CoverChoice(byte[] Bytes, string Source, bool KeepsExisting
 /// so anything Deezer did not know was written with no art, while the aggregator that already
 /// knew iTunes and Last.fm sat unused beside it.
 ///
-/// Asked in order: the Cover Art Archive when a fingerprint named the release the album tag
-/// describes, the catalog's own cover, the aggregator by name, and last the file's own art. The
+/// Asked in order: Apple's master of the same album (often 3000 px, and only on a strict match),
+/// the Cover Art Archive when a fingerprint named the release the album tag describes, the
+/// catalog's own cover, the aggregator by name, and last the file's own art. The
 /// first one at least <see cref="SharpSide"/> wide wins at once; otherwise the largest one seen
 /// does. Taking the first usable one let a 500 px archive scan or a peer's 200 px thumbnail
 /// beat the catalog's 1000 px cover. A cover that is not square counts as missing, and a
@@ -28,7 +29,8 @@ public sealed class DownloadCoverResolver
     /// phase runs under the download lock.</summary>
     private static readonly TimeSpan CatalogTimeout = TimeSpan.FromSeconds(8);
 
-    /// <summary>Big enough to stop looking: the catalog's own covers are 1000 px.</summary>
+    /// <summary>Big enough to stop looking: the catalog's own covers are 1000 px. Apple's master,
+    /// asked first, is usually far larger, and is what a match there gets.</summary>
     internal const int SharpSide = 1000;
 
     private readonly CoverArtArchiveLookup _archive;
@@ -36,10 +38,13 @@ public sealed class DownloadCoverResolver
     private readonly IHttpClientFactory _http;
     private readonly IOptionsMonitor<MetadataSettings> _settings;
     private readonly ILogger<DownloadCoverResolver> _logger;
+    private readonly ITunesCoverArtLookup? _itunes;
 
     public DownloadCoverResolver(CoverArtArchiveLookup archive, CoverArtAggregator aggregator,
-        IHttpClientFactory http, IOptionsMonitor<MetadataSettings> settings, ILogger<DownloadCoverResolver> logger)
+        IHttpClientFactory http, IOptionsMonitor<MetadataSettings> settings, ILogger<DownloadCoverResolver> logger,
+        ITunesCoverArtLookup? itunes = null)
     {
+        _itunes = itunes;
         _archive = archive;
         _aggregator = aggregator;
         _http = http;
@@ -65,6 +70,13 @@ public sealed class DownloadCoverResolver
                 bestSide = side;
             }
             return side >= SharpSide;
+        }
+
+        // A compilation's album artist is nobody Apple would list it under.
+        if (_itunes is not null && !song.IsCompilation)
+        {
+            var master = await _itunes.TryFetchAlbumMasterAsync(song.PrimaryArtist ?? song.Artist, song.Album, song.Title, ct);
+            if (Offer(master, "iTunes")) return best;
         }
 
         // Only when the album tag IS the release the fingerprint matched: a download tagged with

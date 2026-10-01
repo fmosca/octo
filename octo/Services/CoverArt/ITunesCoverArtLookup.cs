@@ -1,11 +1,14 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using Octo.Services.Common;
 using Octo.Services.Soulseek;
 
 namespace Octo.Services.CoverArt;
 
 /// <summary>
-/// Cover art via Apple's free iTunes Search API. No key, ~600x600 JPEGs after
-/// CDN substitution, very high coverage for mainstream Western releases —
+/// Cover art via Apple's free iTunes Search API. No key, 1200x1200 JPEGs after
+/// CDN substitution (and the full master for downloads, see TryFetchAlbumMasterAsync), very high coverage for mainstream Western releases —
 /// weaker for international, indie, and underground.
 ///
 /// Improvements over the original implementation:
@@ -61,6 +64,99 @@ public class ITunesCoverArtLookup : ICoverArtSource
         var songHit = await SearchAndScoreAsync($"{artist} {title}", "song", artist, ct);
         return songHit is null ? null : await DownloadHiResAsync(songHit, ct);
     }
+
+    /// <summary>The size asked of Apple's CDN for a master. It answers with the original when
+    /// that is smaller, so this reads as "as large as there is".</summary>
+    internal const int MasterSide = 3000;
+
+    private static readonly SongMatchOptions AlbumTitles = new() { LengthToleranceSeconds = null };
+    private static readonly Regex ReleaseSuffix = new(@"\s+-\s+(?:Single|EP)\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly TimeSpan MasterUrlTtl = TimeSpan.FromHours(6);
+    private readonly ConcurrentDictionary<string, (string? Url, DateTime At)> _masterUrls = new();
+
+    /// <summary>
+    /// The album's own cover at the largest size Apple has, or null. Strict where
+    /// <see cref="TryFetchAsync"/> is loose: the artist AND the album title must be the same
+    /// release (a single is matched by its song), because this cover is written into files,
+    /// where another album's art would be a wrong tag rather than a soft picture. The match is
+    /// remembered for a few hours, so an album's tracks ask Apple once between them.
+    /// </summary>
+    public async Task<byte[]?> TryFetchAlbumMasterAsync(string? artist, string? album, string? title,
+        CancellationToken ct = default)
+    {
+        artist = artist?.Trim();
+        if (string.IsNullOrEmpty(artist)) return null;
+        var single = string.IsNullOrWhiteSpace(album)
+            || (!string.IsNullOrWhiteSpace(title) && SongIdentity.Same(album, artist, title, artist, AlbumTitles).IsSame);
+        var release = (single ? title ?? album : album)?.Trim();
+        if (string.IsNullOrEmpty(release)) return null;
+
+        var key = SongIdentity.MatchKey(artist, release) + (single ? "|single" : "|album");
+        string? url;
+        if (_masterUrls.TryGetValue(key, out var known) && DateTime.UtcNow - known.At < MasterUrlTtl)
+            url = known.Url;
+        else
+        {
+            url = await FindMasterUrlAsync(artist, release, single, ct);
+            if (_masterUrls.Count > 2000) _masterUrls.Clear();
+            _masterUrls[key] = (url, DateTime.UtcNow);
+        }
+        if (url is null) return null;
+
+        foreach (var side in new[] { MasterSide, 1200 })
+        {
+            var sized = url.Replace("100x100bb", $"{side}x{side}bb");
+            try
+            {
+                using var resp = await _http.GetAsync(sized, ct);
+                if (resp.IsSuccessStatusCode) return await resp.Content.ReadAsByteArrayAsync(ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogDebug("iTunes master {Url} failed: {M}", sized, ex.Message);
+            }
+        }
+        return null;
+    }
+
+    private async Task<string?> FindMasterUrlAsync(string artist, string release, bool single, CancellationToken ct)
+    {
+        // An album by its name; a single by its song, whose release iTunes names "Song - Single".
+        var entity = single ? "song" : "album";
+        try
+        {
+            var url = $"https://itunes.apple.com/search?term={Uri.EscapeDataString($"{artist} {release}")}&entity={entity}&limit=15";
+            using var resp = await _http.GetAsync(url, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            if (!doc.RootElement.TryGetProperty("results", out var results)) return null;
+
+            string? clean = null;
+            foreach (var item in results.EnumerateArray())
+            {
+                var art = Text(item, "artworkUrl100");
+                var by = Text(item, "artistName");
+                var collection = ReleaseSuffix.Replace(Text(item, "collectionName") ?? "", "");
+                if (string.IsNullOrEmpty(art) || !art.Contains("100x100bb") || string.IsNullOrEmpty(by)) continue;
+                if (!SongIdentity.Same(release, artist, collection, by, AlbumTitles).IsSame) continue;
+                if (single && !SongIdentity.Same(release, artist, Text(item, "trackName"), by, AlbumTitles).IsSame) continue;
+                // The explicit and clean releases share a cover almost always; the explicit one
+                // first, since that is the one a library usually holds.
+                if (Text(item, "collectionExplicitness") == "cleaned") { clean ??= art; continue; }
+                return art;
+            }
+            return clean;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("iTunes master search failed for {Artist} - {Release}: {M}", artist, release, ex.Message);
+            return null;
+        }
+    }
+
+    private static string? Text(JsonElement item, string name) =>
+        item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
     /// <summary>
     /// Issue a search and rank the up-to-5 results by closeness of the artist

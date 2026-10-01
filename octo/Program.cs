@@ -325,7 +325,10 @@ builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.CoverArtService(
 // all out via IEnumerable<ICoverArtSource> and queries them sequentially —
 // adding/removing a source is a one-line registration change here.
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.DeezerCoverArtLookup>();
-builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.ITunesCoverArtLookup>();
+// Registered as itself too: downloads and the cover upgrade ask it for an album's master.
+builder.Services.AddSingleton<Octo.Services.CoverArt.ITunesCoverArtLookup>();
+builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource>(sp =>
+    sp.GetRequiredService<Octo.Services.CoverArt.ITunesCoverArtLookup>());
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.LastFmCoverArtLookup>();
 builder.Services.AddSingleton<Octo.Services.CoverArt.CoverArtAggregator>();
 
