@@ -1464,7 +1464,9 @@ function renderCovers(run) {
   const byAlbum = run.albumsTotal > 0;
   const done = byAlbum ? run.albumsDone : run.songsTotal ? run.songsRead : run.processed;
   const all = byAlbum ? run.albumsTotal : run.songsTotal || run.total;
-  if (running) coverEl('cover-progress-fill').style.width = `${all ? Math.min(100, Math.round(100 * done / all)) : 0}%`;
+  const starting = running && (run.starting || !run.total);
+  progress.classList.toggle('starting', starting);
+  if (running && !starting) coverEl('cover-progress-fill').style.width = `${all ? Math.min(100, Math.round(100 * done / all)) : 0}%`;
 
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   let head = '';
@@ -1473,6 +1475,9 @@ function renderCovers(run) {
   else if (run.undo) {
     head = running ? 'Putting covers back' : run.status === 'Completed' ? 'Covers put back' : 'Undo stopped';
     sub = `${plural(run.files, 'song')}`;
+  } else if (running && (run.starting || !run.total)) {
+    head = 'Getting started';
+    sub = 'Listing your songs';
   } else if (running) {
     head = { Scan: 'Scanning', Preview: 'Finding better covers', Apply: 'Replacing covers' }[run.mode] ?? 'Working';
     const of = (n, total, word) => `${n.toLocaleString()} of ${total.toLocaleString()} ${word}${total === 1 ? '' : 's'}`;
@@ -1516,6 +1521,9 @@ async function loadCoverUpgrade(retry = false) {
   const response = await genreBackfillFetch('/api/admin/covers/upgrade', {}, retry);
   if (!response.ok) return null;
   const run = await response.json();
+  // Accepted but not started yet: show it as starting, so the page keeps watching and never
+  // sits on the last run's results while a new one gets going.
+  if (run.busy && run.status !== 'Running') Object.assign(run, { status: 'Running', starting: true, preview: [] });
   const previous = lastCoverRun;
   lastCoverRun = run;
 

@@ -1143,6 +1143,8 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
 .link-btn:hover { color: var(--ink); }
 .cover-progress { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.06); overflow: hidden; }
 .cover-progress > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 200ms cubic-bezier(.2, .8, .2, 1); }
+.cover-progress.starting > span { width: 30% !important; animation: cover-starting 1.2s ease-in-out infinite; }
+@keyframes cover-starting { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 .cover-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--s-m); padding: 40px var(--s-xl); }
 .cover-empty > .icon { width: 40px; height: 40px; color: var(--ink-2); margin-bottom: var(--s-s); }
 .cover-empty .btn { margin-top: var(--s-m); }
@@ -1170,7 +1172,7 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
 .cover-how { color: var(--ink-2); font-size: 12px; }
 .cover-how summary { cursor: pointer; width: max-content; }
 .cover-how p { margin: var(--s-m) 0 0; max-width: 72ch; line-height: 1.55; }
-@media (prefers-reduced-motion: reduce) { .cover-progress > span, .cover-art { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .cover-progress > span, .cover-art { transition: none; } .cover-progress.starting > span { animation: none; width: 100% !important; opacity: 0.4; } }
 
 /* ── Ordered lists of rows: heart sources, lyrics sources, genre rules, library actions ── */
 .source-priority-list,

@@ -456,8 +456,9 @@ public sealed class CoverUpgradeWorker : BackgroundService
             _store.Update(run => { run.Status = CoverUpgradeStatus.Running; run.Reason = null; });
         else
         {
-            var queue = selected is null ? await EnumerateAsync(request.Scope) : QueueOf(previous, selected);
-            if (request.Mode != CoverUpgradeMode.Apply) _store.ClearFoundThumbs();
+            // Running from the first moment, with nothing listed yet: listing the songs and
+            // asking Navidrome about them takes seconds, and a dashboard that looked in that
+            // time saw the last run and never noticed this one start.
             _store.Replace(new CoverUpgradeRun
             {
                 RunId = Guid.NewGuid().ToString("N")[..12],
@@ -469,10 +470,17 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 Selected = selected,
                 FullSize = _settings.CurrentValue.EmbedFullSizeCovers,
                 StartedUtc = DateTime.UtcNow,
-                Total = queue.Count,
-                SongsTotal = queue.Sum(item => item.Files?.Count ?? 0),
-                AlbumsTotal = selected?.Count ?? queue.Count(item => item.NavidromeAlbumId is not null),
-                Queue = queue,
+                Reason = "Listing your songs.",
+            });
+            var queue = selected is null ? await EnumerateAsync(request.Scope) : QueueOf(previous, selected);
+            if (request.Mode != CoverUpgradeMode.Apply) _store.ClearFoundThumbs();
+            _store.Update(run =>
+            {
+                run.Reason = null;
+                run.Total = queue.Count;
+                run.SongsTotal = queue.Sum(item => item.Files?.Count ?? 0);
+                run.AlbumsTotal = selected?.Count ?? queue.Count(item => item.NavidromeAlbumId is not null);
+                run.Queue = queue;
             });
         }
         var current = _store.Current;

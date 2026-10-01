@@ -84,6 +84,8 @@ public sealed class CoverUpgradeController : ControllerBase
                 row.FolderCover, row.Result,
             }),
             canResume = run.CanResume,
+            // Accepted and not yet started, or started: the dashboard watches while this is true.
+            busy = _worker.IsBusy,
             canUndo = _worker.CanUndo,
             musicPath = MusicPath(),
         });
