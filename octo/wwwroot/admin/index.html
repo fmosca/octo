@@ -94,6 +94,10 @@
             <svg class="icon" aria-hidden="true"><use href="#i-tag"/></svg>
             <span>Tags &amp; genres</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="covers">
+            <svg class="icon" aria-hidden="true"><use href="#i-image-square"/></svg>
+            <span>Cover art</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="libraryactions">
             <svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg>
             <span>Library actions</span>
@@ -906,100 +910,7 @@
               </div>
               <label class="switch"><input type="checkbox" name="Metadata.AlbumFromTitle" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Cover Art Archive first</div>
-                <div class="set-info-d">When a fingerprint named the release, take its cover from the Cover Art Archive first.</div>
-                <div class="set-info-more">Before Deezer, iTunes and Last.fm: the right pressing, with no guessing by name.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.UseCoverArtArchive" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Replace video covers</div>
-                <div class="set-info-d">A cover that is not square is a video still, so Octo looks for a real one.</div>
-                <div class="set-info-more">When nothing better turns up, its centre square is used, which for a YouTube &ldquo;Topic&rdquo; upload is the real cover inside the letterbox.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.ReplaceVideoCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Write cover.jpg</div>
-                <div class="set-info-d">Also save the cover beside the file, where Navidrome looks first.</div>
-                <div class="set-info-more">Only in the Organized layout, and only in a folder the download created, so an album already there never changes cover.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.WriteCoverFile" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Embed full-size covers</div>
-                <div class="set-info-d">Put the cover in each song at the full size it was found, often 3000 px, instead of 1500 px.</div>
-                <div class="set-info-more">Every song carries its own copy, so this adds a few MB to each. cover.jpg is always full size. Also what Upgrade cover art embeds.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.EmbedFullSizeCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
           </form>
-        </div>
-
-        <div class="set-section">
-          <div class="set-head">
-            <h3 class="set-title">Upgrade cover art</h3>
-            <p class="set-desc">Scan your songs for small or missing covers, pick all of them or just some, and Octo puts the largest cover it can find in every song of each album.</p>
-          </div>
-          <div class="set-card">
-            <div class="set-row stack">
-              <div class="set-info">
-                <div class="set-info-t">Which songs</div>
-                <div class="set-info-d">Only downloads Octo made, or the whole library, your own rips and purchases included.</div>
-              </div>
-              <select class="set-input" id="cover-upgrade-scope">
-                <option value="OctoDownloads">Downloads Octo made</option>
-                <option value="WholeLibrary">The whole library</option>
-              </select>
-            </div>
-            <div class="set-row stack">
-              <div class="set-info">
-                <div class="set-info-t">Soft means smaller than</div>
-                <div class="set-info-d">An album counts as soft when its cover is under this size, or it has none.</div>
-              </div>
-              <select class="set-input" id="cover-upgrade-threshold">
-                <option value="600">600 px</option>
-                <option value="1000" selected>1000 px</option>
-                <option value="1500">1500 px</option>
-                <option value="3000">3000 px</option>
-              </select>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Also cover.jpg and folder.jpg</div>
-                <div class="set-info-d">Navidrome shows the picture beside an album before the one inside its songs, so a soft one there hides the upgrade.</div>
-                <div class="set-info-more">Only JPEG files, and only in a folder that holds just that album.</div>
-              </div>
-              <label class="switch"><input type="checkbox" id="cover-upgrade-folder" checked /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="notice">
-              A cover is taken only from a release with the same artist and album name: Apple's full-size master, the Cover Art Archive for the release your files name, or Deezer. It replaces a song's cover only when the new one is clearly larger. Every cover replaced is kept, so <strong>Undo</strong> puts them all back. Saving a song rewrites its whole tag block, so your own backup of the music folder is the full safety net.
-            </div>
-            <div class="set-row">
-              <div class="set-info"><div class="set-info-t">Scan</div><div class="set-info-d">Reads your songs only. Looks nothing up and writes nothing, so it is quick.</div></div>
-              <button class="btn btn-ghost" type="button" id="cover-upgrade-scan">Scan for soft covers</button>
-            </div>
-            <div id="cover-upgrade-status" class="set-row stack"></div>
-            <div id="cover-upgrade-results"></div>
-            <div class="set-row" id="cover-upgrade-actions">
-              <div class="set-info">
-                <div class="set-info-t" id="cover-upgrade-picked">Nothing picked</div>
-                <div class="set-info-d">Preview looks the picked albums up and writes nothing. Upgrade writes; it embeds at 1500 px unless Embed full-size covers is on. Lookups pause about 3 s per album.</div>
-              </div>
-              <div class="genre-preset-actions">
-                <button class="btn btn-ghost" type="button" id="cover-upgrade-preview" hidden>Preview picked</button>
-                <button class="btn" type="button" id="cover-upgrade-apply" hidden>Upgrade picked</button>
-                <button class="btn btn-ghost" type="button" id="cover-upgrade-resume" hidden>Resume</button>
-                <button class="btn btn-ghost" type="button" id="cover-upgrade-cancel" hidden>Stop</button>
-                <button class="btn btn-ghost" type="button" id="cover-upgrade-undo" hidden>Undo upgrades</button>
-              </div>
-            </div>
-          </div>
         </div>
 
         <div class="set-section">
@@ -1505,6 +1416,131 @@
       </section>
 
       <!-- ─── LIBRARY ACTIONS ────────────────────────────────── -->
+      <section data-pane="covers">
+        <header class="page-header">
+          <div>
+            <h1>Cover art</h1>
+            <p>Where covers come from, how large they are, and a wall of the soft ones to replace.</p>
+          </div>
+        </header>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Soft covers</h3>
+            <p class="set-desc">Find albums with small or missing covers, and give them the largest cover out there.</p>
+          </div>
+          <div class="set-card cover-tool">
+            <div class="cover-toolbar">
+              <div class="cover-chips">
+                <select class="seg-src" id="cover-scope" aria-label="Which songs" hidden>
+                  <option value="OctoDownloads">Octo's downloads</option>
+                  <option value="WholeLibrary">Whole library</option>
+                </select>
+                <div class="seg" data-seg-for="cover-scope"><span class="seg-thumb"></span></div>
+                <span class="cover-chip-group">
+                  <span class="cover-chip-label" id="cover-threshold-label">Soft under</span>
+                  <select class="seg-src" id="cover-threshold" aria-label="Soft means smaller than" hidden>
+                    <option value="600">600 px</option>
+                    <option value="1000" selected>1000 px</option>
+                    <option value="1500">1500 px</option>
+                  </select>
+                  <div class="seg" data-seg-for="cover-threshold"><span class="seg-thumb"></span></div>
+                </span>
+              </div>
+              <div class="cover-toolbar-end">
+                <details class="cover-options">
+                  <summary class="btn btn-ghost btn-icon" aria-label="Options" title="Options"><svg class="icon" aria-hidden="true"><use href="#i-sliders-horizontal"/></svg></summary>
+                  <div class="cover-options-panel">
+                    <label class="cover-option">
+                      <span>
+                        <span class="set-info-t">Also cover.jpg and folder.jpg</span>
+                        <span class="set-info-d">Navidrome shows the picture beside an album before the one inside its songs. JPEG only, and only where the folder holds just that album.</span>
+                      </span>
+                      <span class="switch"><input type="checkbox" id="cover-folder" checked /><span class="sw-track"></span><span class="sw-thumb"></span></span>
+                    </label>
+                  </div>
+                </details>
+                <button class="btn btn-ghost" type="button" id="cover-scan"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Scan</span></button>
+              </div>
+            </div>
+
+            <div class="cover-summary">
+              <div class="cover-summary-text"><span class="cover-head" id="cover-head"></span><span class="cover-sub" id="cover-sub"></span></div>
+              <div class="cover-select" id="cover-select" hidden>
+                <button type="button" class="link-btn" id="cover-all">Select all</button>
+                <span aria-hidden="true">·</span>
+                <button type="button" class="link-btn" id="cover-none">Clear</button>
+              </div>
+            </div>
+            <div class="cover-progress" id="cover-progress" hidden><span id="cover-progress-fill"></span></div>
+
+            <div class="cover-empty" id="cover-empty">
+              <svg class="icon" aria-hidden="true"><use href="#i-image-square"/></svg>
+              <div class="set-info-t">Find your soft covers</div>
+              <div class="set-info-d">A scan only reads your songs: it looks nothing up and changes nothing, so it is quick.</div>
+              <button class="btn btn-primary" type="button" id="cover-scan-first">Scan</button>
+            </div>
+            <div class="cover-wall" id="cover-wall" role="list"></div>
+            <p class="cover-more" id="cover-more" hidden></p>
+
+            <div class="cover-bar" id="cover-bar" hidden>
+              <span class="cover-count" id="cover-count"></span>
+              <span class="cover-hint" id="cover-hint"></span>
+              <button class="btn btn-ghost" type="button" id="cover-undo" hidden>Undo</button>
+              <button class="btn btn-ghost" type="button" id="cover-stop" hidden>Stop</button>
+              <button class="btn btn-ghost" type="button" id="cover-resume" hidden>Resume</button>
+              <button class="btn btn-primary" type="button" id="cover-go" hidden></button>
+            </div>
+
+            <details class="cover-how">
+              <summary>How it works</summary>
+              <p>A cover is taken only from a release with the same artist and album name: Apple's full-size master, the Cover Art Archive for the release your files name, or Deezer. The largest wins, and an album changes only when it is clearly larger than what it has. Only the front cover is replaced; other pictures stay. Every cover replaced is kept, so Undo puts them all back. Saving a song rewrites its whole tag block, so your own backup of the music folder is the full safety net. Lookups pause about 3 seconds per album to stay inside Apple's limit.</p>
+            </details>
+          </div>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Covers on new downloads</h3>
+            <p class="set-desc">Where Octo looks for a cover when it saves a song, and how large it keeps it.</p>
+          </div>
+          <form data-section="covers" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Cover Art Archive</div>
+                <div class="set-info-d">When a fingerprint named the release, also ask the Cover Art Archive for that release's cover.</div>
+                <div class="set-info-more">The right pressing, with no guessing by name. Apple's master of the same album, the catalog, Deezer, iTunes and Last.fm are asked too, and the largest cover wins.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.UseCoverArtArchive" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Replace video covers</div>
+                <div class="set-info-d">A cover that is not square is a video still, so Octo looks for a real one.</div>
+                <div class="set-info-more">When nothing better turns up, its centre square is used, which for a YouTube &ldquo;Topic&rdquo; upload is the real cover inside the letterbox.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.ReplaceVideoCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Write cover.jpg</div>
+                <div class="set-info-d">Also save the cover beside the file, full size, where Navidrome looks first.</div>
+                <div class="set-info-more">Only in the Organized layout, and only in a folder the download created. A cover.jpg Octo wrote gives way to a larger one later; one you put there never changes.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.WriteCoverFile" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Embed full-size covers</div>
+                <div class="set-info-d">Put the cover in each song at the full size it was found, often 3000 px, instead of 1500 px.</div>
+                <div class="set-info-more">Every song carries its own copy, so this adds a few MB to each. cover.jpg is always full size. Soft covers above embeds the same way.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.EmbedFullSizeCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+          </form>
+        </div>
+      </section>
+
       <section data-pane="libraryactions">
         <header class="page-header">
           <div>

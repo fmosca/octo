@@ -266,4 +266,23 @@ public class CoverUpgradeTests : IDisposable
         Assert.Equal(("none", 0), (row.Result, row.Files));
         Assert.Equal(1, store.Current.Kept);
     }
+
+    [Fact]
+    public async Task APreviewKeepsASmallCopyOfEachCoverItFoundAndANewScanForgetsThem()
+    {
+        Song("Discovery", "One More Time", Jpeg(300, 10));
+        var (worker, store) = Worker(new FixedFinder(new FoundCover(Jpeg(3000, 200), "iTunes", 3000)));
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
+        var id = Assert.Single(store.Current.Preview).Id;
+        Assert.Null(worker.FoundThumbnail(id));
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Preview,
+            FolderCovers: true, Albums: [id]));
+        var found = worker.FoundThumbnail(id);
+        Assert.NotNull(found);
+        Assert.Equal((CoverUpgradeWorker.ThumbSide, CoverUpgradeWorker.ThumbSide), CoverImage.Measure(found!));
+
+        await Run(worker, store, new CoverUpgradeRequest(CoverUpgradeScope.WholeLibrary, CoverUpgradeMode.Scan, FolderCovers: true));
+        Assert.Null(worker.FoundThumbnail(id));
+    }
 }

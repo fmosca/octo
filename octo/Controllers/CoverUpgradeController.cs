@@ -126,12 +126,13 @@ public sealed class CoverUpgradeController : ControllerBase
         return Accepted(new { resumed = true });
     }
 
-    /// <summary>The cover an album on the list has now, small, so the soft ones can be seen.</summary>
+    /// <summary>The cover an album on the list has now, small, so the soft ones can be seen; with
+    /// <c>found=true</c>, the larger one a preview found for it.</summary>
     [HttpGet("thumb/{id}")]
-    public IActionResult Thumb(string id, [FromHeader(Name = "X-Octo-Browse-Token")] string? token)
+    public IActionResult Thumb(string id, [FromQuery] bool found, [FromHeader(Name = "X-Octo-Browse-Token")] string? token)
     {
         if (!Signed(token)) return SignIn();
-        var bytes = _worker.Thumbnail(id);
+        var bytes = found ? _worker.FoundThumbnail(id) : _worker.Thumbnail(id);
         if (bytes is null) return NotFound();
         Response.Headers.CacheControl = "private, max-age=300";
         return File(bytes, CoverImage.MimeType(bytes));

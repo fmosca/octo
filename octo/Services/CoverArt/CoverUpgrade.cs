@@ -107,9 +107,16 @@ public sealed class CoverUpgradeStore : IDisposable
     private int _dirty;
     private CoverUpgradeRun _run = new();
 
+    /// <summary>Small copies of the covers a preview found, by album id, so the dashboard can
+    /// show the new cover before anything is written. On disk beside the run, or in memory
+    /// when the store has no file (tests).</summary>
+    private readonly string? _thumbs;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _memoryThumbs = new();
+
     public CoverUpgradeStore(string? path = null, ILogger<CoverUpgradeStore>? logger = null)
     {
         _path = string.IsNullOrWhiteSpace(path) ? null : path;
+        _thumbs = _path is null ? null : Path.Combine(Path.GetDirectoryName(_path)!, "cover-upgrade-found");
         _logger = logger;
         if (_path is null) return;
         Load();
@@ -127,6 +134,40 @@ public sealed class CoverUpgradeStore : IDisposable
             if (_run.Preview.Count > MaxPreviewRows) _run.Preview.RemoveRange(MaxPreviewRows, _run.Preview.Count - MaxPreviewRows);
         }
         Interlocked.Exchange(ref _dirty, 1);
+    }
+
+    public void SaveFoundThumb(string id, byte[] bytes)
+    {
+        if (_thumbs is null) { _memoryThumbs[id] = bytes; return; }
+        try
+        {
+            Directory.CreateDirectory(_thumbs);
+            File.WriteAllBytes(Path.Combine(_thumbs, id + ".jpg"), bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug("cover upgrade could not keep a found cover: {M}", ex.Message);
+        }
+    }
+
+    public byte[]? FoundThumb(string id)
+    {
+        if (_thumbs is null) return _memoryThumbs.TryGetValue(id, out var bytes) ? bytes : null;
+        var path = Path.Combine(_thumbs, id + ".jpg");
+        return File.Exists(path) ? File.ReadAllBytes(path) : null;
+    }
+
+    public void ClearFoundThumbs()
+    {
+        _memoryThumbs.Clear();
+        try
+        {
+            if (_thumbs is not null && Directory.Exists(_thumbs)) Directory.Delete(_thumbs, recursive: true);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug("cover upgrade could not clear found covers: {M}", ex.Message);
+        }
     }
 
     public void Replace(CoverUpgradeRun run)
@@ -400,6 +441,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
         else
         {
             var queue = selected is null ? await EnumerateAsync(request.Scope) : QueueOf(previous, selected);
+            if (request.Mode != CoverUpgradeMode.Apply) _store.ClearFoundThumbs();
             _store.Replace(new CoverUpgradeRun
             {
                 RunId = Guid.NewGuid().ToString("N")[..12],
@@ -496,6 +538,12 @@ public sealed class CoverUpgradeWorker : BackgroundService
         Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(folder + "\u0000" + albumKey)))[..16]
             .ToLowerInvariant();
 
+    /// <summary>The side of a dashboard tile's picture: sharp at twice the tile's size.</summary>
+    internal const int ThumbSide = 320;
+
+    /// <summary>A small copy of the cover a preview found for an album on the list.</summary>
+    public byte[]? FoundThumbnail(string id) => _store.FoundThumb(id);
+
     /// <summary>A small copy of the cover an album on the list has now, for the dashboard.</summary>
     public byte[]? Thumbnail(string id)
     {
@@ -507,7 +555,7 @@ public sealed class CoverUpgradeWorker : BackgroundService
             var bytes = FrontOf(file.Tag.Pictures)?.Data?.Data;
             if (bytes is not { Length: > 0 } && FolderCover(row.Folder, quiet: true) is { } folderFile)
                 bytes = File.ReadAllBytes(folderFile.Path);
-            return bytes is { Length: > 0 } ? CoverImage.FitWithin(bytes, 160) : null;
+            return bytes is { Length: > 0 } ? CoverImage.ToJpeg(CoverImage.FitWithin(bytes, ThumbSide)) : null;
         }
         catch
         {
@@ -587,6 +635,8 @@ public sealed class CoverUpgradeWorker : BackgroundService
                 });
                 continue;
             }
+
+            _store.SaveFoundThumb(id, CoverImage.ToJpeg(CoverImage.FitWithin(found.Bytes, ThumbSide)));
 
             var written = 0;
             if (!run.DryRun)

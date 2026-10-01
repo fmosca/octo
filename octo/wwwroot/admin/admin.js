@@ -1342,127 +1342,161 @@ document.getElementById('genre-backfill-undo')?.addEventListener('click', async 
   await loadGenreBackfill();
 });
 
-// ---- Upgrade cover art -----------------------------------------------------
-// Scan (reads the songs only), pick, then preview or upgrade the picked albums. Undo puts every
-// replaced cover back.
+// ---- Cover art: the soft covers wall ------------------------------------------
+// Scan (reads the songs only), pick on the wall, find better covers (looks the picked albums
+// up, writes nothing), replace. One button at the bottom always says the next step. Undo puts
+// every replaced cover back.
 
-let coverUpgradePoll = null;
+let coverPoll = null;
 let lastCoverRun = null;
-let coverControlsInitialised = false;
-// The albums picked on the list, by id. Reset each time a run finishes with a new list.
+let coverControlsSet = false;
 let coverPicked = new Set();
 let coverListRunId = null;
+let coverShowAll = false;
+const COVER_TILE_CAP = 600;
 
-const coverScopeLabels = { OctoDownloads: 'downloads Octo made', WholeLibrary: 'the whole library' };
-const coverResultWords = { soft: '', found: '', upgraded: 'upgraded', none: 'nothing larger' };
+const coverEl = id => document.getElementById(id);
 
 function coverNote(message, kind = 'ok') {
-  note(document.querySelector('#cover-upgrade-actions .genre-preset-actions'), message, kind);
+  note(coverEl('cover-bar'), message, kind);
 }
 
-function coverListRows(run) {
-  return run?.preview || [];
+function coverRows(run) { return run?.preview || []; }
+
+// Which rows can be picked right now: every soft album after a scan, only the ones with a
+// larger cover after a preview, none while running or after a replace.
+function coverPickable(run, row) {
+  if (!run || run.status === 'Running' || run.undo) return false;
+  if (run.mode === 'Scan') return true;
+  if (run.mode === 'Preview') return row.result === 'found';
+  return false;
 }
 
-function renderCoverPicked(run) {
-  const rows = coverListRows(run);
+function coverTile(run, row) {
+  const pickable = coverPickable(run, row);
+  const picked = pickable && coverPicked.has(row.id);
+  const now = `/api/admin/covers/upgrade/thumb/${encodeURIComponent(row.id)}`;
+  const found = `${now}?found=true`;
+  // A preview shows the cover it found over the one the album has; once replaced, the album's
+  // own cover is the new one, so it is shown alone.
+  const showFound = row.result === 'found';
+  const px = side => (side > 0 ? `${side} px` : 'No cover');
+  let badge;
+  if (row.result === 'soft') badge = `<span class="cover-badge">${esc(px(row.fromSide))}</span>`;
+  else if (row.result === 'found') badge = `<span class="cover-badge">${esc(px(row.fromSide))} → ${esc(px(row.toSide))}</span>`;
+  else if (row.result === 'upgraded') badge = `<span class="cover-badge done">${icon('check')} ${esc(px(row.toSide))}</span>`;
+  else badge = '<span class="cover-badge">Nothing larger</span>';
+  const art = showFound
+    ? `<img loading="lazy" alt="" src="${found}" onerror="this.src='${now}';this.onerror=null"><img class="cover-was" loading="lazy" alt="" src="${now}" onerror="this.remove()">`
+    : row.result === 'upgraded'
+      ? `<img loading="lazy" alt="" src="${now}" onerror="this.src='${found}';this.onerror=null">`
+      : `<img loading="lazy" alt="" src="${now}" onerror="this.remove()">`;
+  const name = `${row.album || '(no album)'} by ${row.artist}`;
+  const sub = [row.artist, row.result === 'found' || row.result === 'upgraded' ? row.source : null].filter(Boolean).join(' · ');
+  return `<button type="button" class="cover-tile" role="${pickable ? 'checkbox' : 'listitem'}" data-cover-id="${esc(row.id)}"
+      ${pickable ? `aria-checked="${picked}"` : ''} ${!pickable && (row.result === 'none') ? 'aria-disabled="true"' : ''}
+      aria-label="${esc(name)}" title="${esc(row.folder)}">
+    <span class="cover-art">${art}${pickable ? `<span class="cover-check">${icon('check')}</span>` : ''}${badge}</span>
+    <span class="cover-title">${esc(row.album || '(no album)')}</span>
+    <span class="cover-artist">${esc(sub)}</span>
+  </button>`;
+}
+
+function renderCoverBar(run) {
+  const rows = coverRows(run);
   const running = run.status === 'Running';
-  const listed = !running && !run.undo && rows.length > 0 && run.mode !== 'Apply';
-  const count = rows.filter(row => coverPicked.has(row.id)).length;
-  const label = document.getElementById('cover-upgrade-picked');
-  if (label) label.textContent = listed ? `${count} of ${rows.length} album${rows.length === 1 ? '' : 's'} picked` : 'Nothing picked';
-  document.getElementById('cover-upgrade-preview').hidden = !listed || count === 0;
-  document.getElementById('cover-upgrade-apply').hidden = !listed || count === 0;
-  const all = document.getElementById('cover-pick-all');
-  if (all) {
-    all.checked = count > 0 && count === rows.length;
-    all.indeterminate = count > 0 && count < rows.length;
+  const pickableRows = rows.filter(row => coverPickable(run, row));
+  const count = pickableRows.filter(row => coverPicked.has(row.id)).length;
+  const go = coverEl('cover-go');
+  const hint = coverEl('cover-hint');
+  const countEl = coverEl('cover-count');
+
+  coverEl('cover-stop').hidden = !running;
+  coverEl('cover-resume').hidden = running || !run.canResume;
+  coverEl('cover-undo').hidden = running || !run.canUndo;
+  coverEl('cover-select').hidden = pickableRows.length === 0;
+  go.hidden = true;
+  countEl.textContent = '';
+  hint.textContent = '';
+
+  if (running) {
+    hint.textContent = run.undo ? 'Putting the old covers back.'
+      : run.mode === 'Scan' ? 'Reading your songs. Nothing is looked up or changed.'
+      : run.mode === 'Preview' ? 'Looking up each picked album, about 3 seconds apiece. Nothing changes yet.'
+      : 'Replacing covers. Every old cover is kept, so you can undo.';
+  } else if (run.undo) {
+    hint.textContent = run.status === 'Completed' ? 'Navidrome is picking the old covers back up.' : (run.reason || '');
+  } else if (run.mode === 'Scan' && pickableRows.length) {
+    countEl.textContent = `${count} selected`;
+    hint.textContent = 'Looks up a larger cover for each. Nothing changes yet.';
+    go.textContent = 'Find better covers';
+    go.hidden = false;
+  } else if (run.mode === 'Preview' && pickableRows.length) {
+    countEl.textContent = `${count} selected`;
+    hint.textContent = 'Your old covers are kept, so you can undo.';
+    go.textContent = `Replace ${count} cover${count === 1 ? '' : 's'}`;
+    go.hidden = false;
+  } else if (run.mode === 'Apply' && run.status === 'Completed') {
+    hint.textContent = run.files ? 'Navidrome is picking them up.' : 'Nothing needed replacing.';
+  } else if (run.status === 'Cancelled' || run.status === 'Interrupted') {
+    hint.textContent = run.reason || 'Stopped.';
   }
+  coverEl('cover-bar').hidden = run.status === 'Idle'
+    || (go.hidden && coverEl('cover-stop').hidden && coverEl('cover-resume').hidden && coverEl('cover-undo').hidden && !hint.textContent);
 }
 
-function renderCoverUpgrade(run) {
-  const status = document.getElementById('cover-upgrade-status');
-  const results = document.getElementById('cover-upgrade-results');
-  if (!status || !results) return;
-
+function renderCovers(run) {
+  if (!coverEl('cover-wall')) return;
+  const rows = coverRows(run);
   const running = run.status === 'Running';
-  document.getElementById('cover-upgrade-cancel').hidden = !running;
-  document.getElementById('cover-upgrade-resume').hidden = !run.canResume;
-  document.getElementById('cover-upgrade-undo').hidden = !run.canUndo || running;
-  document.getElementById('cover-upgrade-scan').disabled = running;
 
-  if (run.status === 'Idle') {
-    status.innerHTML = '';
-    results.innerHTML = '';
-    renderCoverPicked(run);
-    return;
-  }
-
-  const verb = { Scan: 'Scanning', Preview: 'Previewing', Apply: 'Upgrading' }[run.mode] ?? 'Working';
-  const doneWord = { Scan: 'Scan finished', Preview: 'Preview finished', Apply: 'Upgrade finished' }[run.mode] ?? 'Finished';
-  const label = run.undo
-    ? ({ Running: 'Putting covers back', Completed: 'Covers put back' }[run.status] ?? run.status)
-    : ({ Running: verb, Completed: doneWord, Cancelled: 'Stopped', Interrupted: 'Interrupted', Failed: 'Stopped' }[run.status] ?? run.status);
-
-  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-  let counts;
-  if (run.undo) counts = [`${run.processed} of ${run.total}`, `${run.files} put back`, run.failed ? `${run.failed} failed` : null];
-  else if (run.mode === 'Scan') counts = [
-    `${run.processed} of ${run.total} folders`,
-    `${plural(run.soft, 'album')} under ${run.smallerThan} px`,
-    run.kept ? `${run.kept} already sharp` : null,
-  ];
-  else counts = [
-    `${run.processed} of ${run.total} folders`,
-    `${plural(run.upgraded, 'album')} ${run.mode === 'Apply' ? 'upgraded' : 'would get a larger cover'}`,
-    run.mode === 'Apply' ? plural(run.files, 'song') : null,
-    run.kept ? `${run.kept} with nothing larger` : null,
-    run.failed ? `${run.failed} failed` : null,
-  ];
-  status.innerHTML = `
-    <div class="set-info">
-      <div class="set-info-t">${esc(label)}</div>
-      <div class="set-info-d">${esc(counts.filter(Boolean).join(' · '))}${run.reason ? `. ${esc(run.reason)}` : ''}</div>
-    </div>`;
-
-  // A fresh list from a finished run: pick what is worth upgrading.
-  const rows = coverListRows(run);
-  if (!running && run.runId !== coverListRunId) {
+  // A fresh list from a finished run: pick everything worth carrying to the next step.
+  if (!running && run.runId && run.runId !== coverListRunId) {
     coverListRunId = run.runId;
-    coverPicked = new Set(rows.filter(row => row.result === 'soft' || row.result === 'found').map(row => row.id));
+    coverShowAll = false;
+    coverPicked = new Set(rows.filter(row => coverPickable(run, row)).map(row => row.id));
   }
 
-  const lastError = run.errors?.length ? `<div class="field-error" role="alert">${esc(run.errors[run.errors.length - 1])}</div>` : '';
-  if (!rows.length || run.undo) {
-    results.innerHTML = lastError;
-    renderCoverPicked(run);
-    return;
+  const progress = coverEl('cover-progress');
+  progress.hidden = !running;
+  if (running) coverEl('cover-progress-fill').style.width = `${run.total ? Math.round(100 * run.processed / run.total) : 0}%`;
+
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  let head = '';
+  let sub = '';
+  if (run.status === 'Idle') head = '';
+  else if (run.undo) {
+    head = running ? 'Putting covers back' : run.status === 'Completed' ? 'Covers put back' : 'Undo stopped';
+    sub = `${plural(run.files, 'song')}`;
+  } else if (running) {
+    head = { Scan: 'Scanning', Preview: 'Finding better covers', Apply: 'Replacing covers' }[run.mode] ?? 'Working';
+    sub = `${run.processed} of ${plural(run.total, 'folder')}`;
+  } else if (run.mode === 'Scan') {
+    head = run.soft ? `${plural(run.soft, 'album has a soft cover', 'albums have soft covers')}` : 'Every cover is sharp';
+    sub = `under ${run.smallerThan} px${run.kept ? ` · ${run.kept} already sharp` : ''}`;
+  } else if (run.mode === 'Preview') {
+    head = run.upgraded ? `${plural(run.upgraded, 'larger cover')} found` : 'No larger covers found';
+    sub = run.kept ? `${run.kept} with nothing larger` : '';
+  } else {
+    head = run.upgraded ? `${plural(run.upgraded, 'cover')} replaced` : 'Nothing replaced';
+    sub = run.files ? `in ${plural(run.files, 'song')}` : '';
   }
+  if (!running && ['Cancelled', 'Interrupted', 'Failed'].includes(run.status)) head = `${head || 'Stopped'} (${run.status.toLowerCase()})`;
+  coverEl('cover-head').textContent = head;
+  coverEl('cover-sub').textContent = sub;
 
-  const px = side => (side > 0 ? `${side} px` : 'none');
-  const pickable = !running && run.mode !== 'Apply';
-  const shown = rows.slice(0, 2000);
-  const body = shown.map(row => `
-    <div class="config-row cover-row">
-      <span>${pickable ? `<input type="checkbox" data-cover-pick="${esc(row.id)}" aria-label="Pick ${esc(row.album || row.artist)}"${coverPicked.has(row.id) ? ' checked' : ''}>` : ''}</span>
-      <span class="cover-thumb-box"><img class="cover-thumb" loading="lazy" alt="" src="/api/admin/covers/upgrade/thumb/${encodeURIComponent(row.id)}" onerror="this.removeAttribute('src')"></span>
-      <span class="cover-album">${esc(row.artist)} · ${esc(row.album || '(no album)')}<span class="cover-folder">${esc(row.folder)}</span></span>
-      <span class="value">${esc(px(row.fromSide))}</span>
-      <span class="value${row.toSide ? '' : ' cover-none'}">${row.result === 'soft' ? '' : esc(px(row.toSide))}</span>
-      <span class="value">${esc([row.source, row.folderCover && row.result !== 'soft' ? '+ folder' : '', coverResultWords[row.result] || ''].filter(Boolean).join(' '))}</span>
-    </div>`).join('');
-
-  results.innerHTML = `
-    <div class="config-table">
-      <div class="config-row config-row-head cover-row">
-        <span>${pickable ? '<input type="checkbox" id="cover-pick-all" aria-label="Pick every album">' : ''}</span>
-        <span></span><span>Album</span><span>Now</span><span>Found</span><span>From</span>
-      </div>
-      ${body}
-    </div>
-    ${rows.length > shown.length ? `<p class="set-info-d">Showing ${shown.length} of ${rows.length} albums; picking every album includes the rest.</p>` : ''}
-    ${lastError}`;
-  renderCoverPicked(run);
+  coverEl('cover-empty').hidden = run.status !== 'Idle';
+  const shown = coverShowAll ? rows : rows.slice(0, COVER_TILE_CAP);
+  coverEl('cover-wall').innerHTML = run.undo ? '' : shown.map(row => coverTile(run, row)).join('');
+  const more = coverEl('cover-more');
+  const lastError = run.errors?.length ? run.errors[run.errors.length - 1] : '';
+  more.hidden = !(rows.length > shown.length || lastError);
+  more.innerHTML = [
+    rows.length > shown.length ? `Showing ${shown.length} of ${rows.length}. <button type="button" class="link-btn" id="cover-show-all">Show all</button> Select all includes the rest.` : '',
+    lastError ? `<span class="field-error">${esc(lastError)}</span>` : '',
+  ].filter(Boolean).join(' ');
+  coverEl('cover-scan').disabled = running;
+  renderCoverBar(run);
 }
 
 async function loadCoverUpgrade(retry = false) {
@@ -1472,42 +1506,35 @@ async function loadCoverUpgrade(retry = false) {
   const previous = lastCoverRun;
   lastCoverRun = run;
 
-  // Open on the settings of the list on screen, so what is picked is what it describes.
-  if (!coverControlsInitialised && run.status !== 'Idle' && !run.undo) {
-    const scope = document.getElementById('cover-upgrade-scope');
-    const folder = document.getElementById('cover-upgrade-folder');
-    const threshold = document.getElementById('cover-upgrade-threshold');
-    if (scope && run.scope) scope.value = run.scope;
-    if (folder) folder.checked = run.folderCovers;
-    if (threshold && run.smallerThan) threshold.value = String(run.smallerThan);
+  // Open on the settings of the wall on screen, so what is picked is what it describes.
+  if (!coverControlsSet && run.status !== 'Idle' && !run.undo) {
+    if (run.scope) coverEl('cover-scope').value = run.scope;
+    if (run.smallerThan && [...coverEl('cover-threshold').options].some(o => o.value === String(run.smallerThan)))
+      coverEl('cover-threshold').value = String(run.smallerThan);
+    coverEl('cover-folder').checked = run.folderCovers;
+    document.querySelectorAll('.seg[data-seg-for="cover-scope"], .seg[data-seg-for="cover-threshold"]').forEach(seg => syncSegment(seg, false));
   }
-  coverControlsInitialised = true;
-  renderCoverUpgrade(run);
+  coverControlsSet = true;
+  renderCovers(run);
 
-  if (previous?.status === 'Running' && run.status !== 'Running') {
-    const what = run.undo ? `Undo: ${run.files} song(s) put back`
-      : run.mode === 'Scan' ? `Scan: ${run.soft} soft album(s)`
-      : run.mode === 'Preview' ? `Preview: ${run.upgraded} album(s) would get a larger cover`
-      : `Upgrade: ${run.upgraded} album(s), ${run.files} song(s)`;
-    coverNote(`${what}${run.status === 'Completed' ? '.' : ` (${run.status.toLowerCase()}).`}`, run.status === 'Failed' ? 'error' : 'ok');
-  }
+  if (previous?.status === 'Running' && run.status !== 'Running' && run.status === 'Failed')
+    coverNote(run.reason || 'The run stopped.', 'error');
 
   if (run.status === 'Running') {
-    if (!coverUpgradePoll) coverUpgradePoll = setInterval(() => loadCoverUpgrade(), 2000);
-  } else if (coverUpgradePoll) {
-    clearInterval(coverUpgradePoll);
-    coverUpgradePoll = null;
+    if (!coverPoll) coverPoll = setInterval(() => loadCoverUpgrade(), 1500);
+  } else if (coverPoll) {
+    clearInterval(coverPoll);
+    coverPoll = null;
   }
   return run;
 }
 
-async function startCoverUpgrade(mode, albums = null) {
+async function startCovers(mode, albums = null) {
   const run = lastCoverRun;
-  // A pick belongs to the list it was made on, so it runs with that list's settings.
-  const scope = albums ? run.scope : (document.getElementById('cover-upgrade-scope')?.value ?? 'OctoDownloads');
-  const folderCovers = albums ? run.folderCovers : (document.getElementById('cover-upgrade-folder')?.checked ?? true);
-  const smallerThan = albums ? run.smallerThan : Number(document.getElementById('cover-upgrade-threshold')?.value || 1000);
-
+  // A pick belongs to the wall it was made on, so it runs with that wall's settings.
+  const scope = albums ? run.scope : coverEl('cover-scope').value;
+  const folderCovers = albums ? run.folderCovers : coverEl('cover-folder').checked;
+  const smallerThan = albums ? run.smallerThan : Number(coverEl('cover-threshold').value || 1000);
   const response = await genreBackfillFetch('/api/admin/covers/upgrade', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1518,61 +1545,66 @@ async function startCoverUpgrade(mode, albums = null) {
     coverNote(body.error || `Could not start: HTTP ${response.status}`, 'error');
     return;
   }
-  coverNote({ Scan: 'Scanning. Nothing is looked up or written.', Preview: 'Looking the picked albums up. Nothing is written.', Apply: 'Upgrading the picked albums.' }[mode], 'info');
   await loadCoverUpgrade();
 }
 
-function pickedCoverIds() {
-  return coverListRows(lastCoverRun).filter(row => coverPicked.has(row.id)).map(row => row.id);
+function coverPickedIds() {
+  return coverRows(lastCoverRun).filter(row => coverPickable(lastCoverRun, row) && coverPicked.has(row.id)).map(row => row.id);
 }
 
-document.getElementById('cover-upgrade-scan')?.addEventListener('click', () => startCoverUpgrade('Scan'));
-document.getElementById('cover-upgrade-results')?.addEventListener('change', event => {
-  const box = event.target;
-  if (!(box instanceof HTMLInputElement) || !lastCoverRun) return;
-  if (box.id === 'cover-pick-all') {
-    coverPicked = box.checked ? new Set(coverListRows(lastCoverRun).map(row => row.id)) : new Set();
-    document.querySelectorAll('[data-cover-pick]').forEach(other => { other.checked = box.checked; });
-  } else if (box.dataset.coverPick) {
-    if (box.checked) coverPicked.add(box.dataset.coverPick); else coverPicked.delete(box.dataset.coverPick);
+coverEl('cover-scan')?.addEventListener('click', () => startCovers('Scan'));
+coverEl('cover-scan-first')?.addEventListener('click', () => startCovers('Scan'));
+coverEl('cover-folder')?.addEventListener('change', () => {
+  if (lastCoverRun?.mode === 'Scan' && !lastCoverRun.undo) coverNote('Scan again to use this.', 'info');
+});
+coverEl('cover-wall')?.addEventListener('click', event => {
+  const tile = event.target.closest('.cover-tile[role="checkbox"]');
+  if (!tile || !lastCoverRun) return;
+  const id = tile.dataset.coverId;
+  if (coverPicked.has(id)) coverPicked.delete(id); else coverPicked.add(id);
+  tile.setAttribute('aria-checked', String(coverPicked.has(id)));
+  renderCoverBar(lastCoverRun);
+});
+coverEl('cover-more')?.addEventListener('click', event => {
+  if (event.target.id !== 'cover-show-all' || !lastCoverRun) return;
+  coverShowAll = true;
+  renderCovers(lastCoverRun);
+});
+coverEl('cover-all')?.addEventListener('click', () => {
+  coverPicked = new Set(coverRows(lastCoverRun).filter(row => coverPickable(lastCoverRun, row)).map(row => row.id));
+  renderCovers(lastCoverRun);
+});
+coverEl('cover-none')?.addEventListener('click', () => {
+  coverPicked = new Set();
+  renderCovers(lastCoverRun);
+});
+coverEl('cover-go')?.addEventListener('click', async () => {
+  const run = lastCoverRun;
+  const ids = coverPickedIds();
+  if (!run || !ids.length) { coverNote('Pick at least one album first.', 'info'); return; }
+  if (run.mode === 'Scan') { await startCovers('Preview', ids); return; }
+  if (run.mode === 'Preview') {
+    if (!confirm(`Replace the cover of ${ids.length} album${ids.length === 1 ? '' : 's'}? Every old cover is kept, so Undo puts them back.`)) return;
+    await startCovers('Apply', ids);
   }
-  renderCoverPicked(lastCoverRun);
 });
-document.getElementById('cover-upgrade-preview')?.addEventListener('click', () => {
-  const ids = pickedCoverIds();
-  if (ids.length) startCoverUpgrade('Preview', ids);
-});
-document.getElementById('cover-upgrade-apply')?.addEventListener('click', async () => {
-  const ids = pickedCoverIds();
-  if (!ids.length || !lastCoverRun) return;
-  const scopeLabel = coverScopeLabels[lastCoverRun.scope] ?? lastCoverRun.scope;
-  if (!confirm(`Look up and put a larger cover in ${ids.length} album(s) from ${scopeLabel}? An album only changes when a clearly larger cover turns up, and every cover replaced is kept for Undo.`)) return;
-  await startCoverUpgrade('Apply', ids);
-});
-document.getElementById('cover-upgrade-cancel')?.addEventListener('click', async () => {
+coverEl('cover-stop')?.addEventListener('click', async () => {
   const response = await genreBackfillFetch('/api/admin/covers/upgrade/cancel', { method: 'POST' });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    coverNote(body.error || `Could not stop: HTTP ${response.status}`, 'error');
-    return;
-  }
+  if (!response.ok) { coverNote('Could not stop.', 'error'); return; }
   coverNote('Stopping after the current album.', 'info');
   await loadCoverUpgrade();
 });
-document.getElementById('cover-upgrade-resume')?.addEventListener('click', async () => {
-  const run = lastCoverRun;
-  if (run && run.mode === 'Apply' && !confirm(`Resume upgrading from folder ${run.processed + 1} of ${run.total}?`)) return;
+coverEl('cover-resume')?.addEventListener('click', async () => {
   const response = await genreBackfillFetch('/api/admin/covers/upgrade/resume', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { coverNote(body.error || 'Could not resume.', 'error'); return; }
   await loadCoverUpgrade();
 });
-document.getElementById('cover-upgrade-undo')?.addEventListener('click', async () => {
-  if (!confirm('Put back the cover every upgrade replaced? Songs moved since then stay as they are.')) return;
+coverEl('cover-undo')?.addEventListener('click', async () => {
+  if (!confirm('Put back the old cover on every song the upgrades changed? Songs moved since then stay as they are.')) return;
   const response = await genreBackfillFetch('/api/admin/covers/upgrade/undo', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { coverNote(body.error || 'Could not undo.', 'error'); return; }
-  coverNote('Putting covers back.', 'info');
   await loadCoverUpgrade();
 });
 
