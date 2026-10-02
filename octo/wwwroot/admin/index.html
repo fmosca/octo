@@ -414,6 +414,22 @@
               </div>
               <input class="set-input" id="f-lossless-wait-timeout" name="Subsonic.LosslessWaitTimeoutSeconds" type="number" min="0" />
             </div>
+            <div class="set-row" data-stream-source="YouTube">
+              <div class="set-info">
+                <div class="set-info-t">Keep what is played</div>
+                <div class="set-info-d">Downloads each song played from outside your library, radio included, from the first source in Heart download priority that Octo fetches itself.</div>
+                <div class="set-info-more">Hearts always go first. One played song waits its turn at most; a song played while another waits is skipped and tried again the next time it plays.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-download-on-play" name="Subsonic.DownloadOnPlay" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t"><svg class="icon brand" aria-hidden="true"><use href="#b-lidarr"/></svg>Send played albums to Lidarr</div>
+                <div class="set-info-d">Hands the album of each song played from outside your library to Lidarr, once per song.</div>
+                <div class="set-info-more">Every hand-off makes Lidarr search all its indexers, so radio pulls in an album per song.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-lidarr-album-on-play" name="Subsonic.LidarrAlbumOnPlay" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
             <div class="set-row">
               <div class="set-info">
                 <div class="set-info-t">Record who asked</div>

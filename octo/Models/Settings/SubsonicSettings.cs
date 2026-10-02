@@ -334,8 +334,10 @@ public class SubsonicSettings
     ///
     /// The copy comes from the first source with song hearts enabled in the heart download
     /// priority that Octo downloads from itself (Soulseek, YouTube; Lidarr is skipped, see
-    /// LidarrAlbumOnPlay). Playback still starts from the YouTube stream. Radio and other
-    /// continuous play keep every track they play.
+    /// LidarrAlbumOnPlay). Playback still starts from the YouTube stream. Only a play from
+    /// the first byte counts, not a seek. Hearts always go first: at most one played track
+    /// waits to download, and one played while another waits is skipped until it is played
+    /// again.
     /// </summary>
     public bool DownloadOnPlay { get; set; } = false;
 
@@ -344,7 +346,8 @@ public class SubsonicSettings
     /// Environment variable: LIDARR_ALBUM_ON_PLAY
     ///
     /// Works like a Lidarr song heart, once per track and run. Every hand-off makes Lidarr
-    /// search all its indexers, and radio pulls in an album per played track.
+    /// search all its indexers, and radio pulls in an album per played track. A hand-off
+    /// Lidarr turns down is tried again on the next play.
     /// </summary>
     public bool LidarrAlbumOnPlay { get; set; } = false;
 

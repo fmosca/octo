@@ -1699,6 +1699,7 @@ public class AdminController : ControllerBase
             "Subsonic:DownloadOnStar", "Subsonic:DownloadAlbumOnStar",
             "Subsonic:RecordRequestedBy",
             "Subsonic:WaitForLosslessOnPlay", "Subsonic:LosslessWaitTimeoutSeconds",
+            "Subsonic:DownloadOnPlay", "Subsonic:LidarrAlbumOnPlay",
             "Subsonic:DownloadSource", "Subsonic:AutoDetectDownloadPath", "Subsonic:LibraryPath",
             "Subsonic:FolderStructure",
             "Subsonic:UseLocalStaging", "Subsonic:ExplicitFilter",
