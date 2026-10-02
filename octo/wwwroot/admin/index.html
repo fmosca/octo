@@ -1393,11 +1393,11 @@
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Search wait / per-peer timeout <span class="set-opt">seconds</span></div>
-                <div class="set-info-d">How long to wait for peers to answer, and how long each of up to 5 downloads may take.</div>
+                <div class="set-info-d">How long to wait for peers to answer, and how long a download may send nothing before the next of up to 5 peers is tried. A slow download that keeps going is waited for.</div>
               </div>
               <div class="set-grid2">
                 <input class="set-input" id="f-slskd-wait" name="Soulseek.SearchWaitSeconds" type="number" min="2" max="30" data-restart="true" data-restart-label="Soulseek search wait" aria-label="Search wait in seconds" />
-                <input class="set-input" id="f-slskd-timeout" name="Soulseek.DownloadTimeoutSeconds" type="number" min="30" data-restart="true" data-restart-label="Soulseek per-peer timeout" aria-label="Per-peer download timeout in seconds" />
+                <input class="set-input" id="f-slskd-timeout" name="Soulseek.DownloadTimeoutSeconds" type="number" min="30" data-restart="true" data-restart-label="Soulseek per-peer timeout" aria-label="Seconds a download may send nothing before the next peer" />
               </div>
             </div>
             <div class="set-row stack">

@@ -586,7 +586,7 @@ When a song is starred, Octo:
 1. Searches Soulseek for `<artist> <title>` (cleaned of `[brackets]` and redundant `Artist - ` prefixes).
 2. Falls back to title-only search if the first query returns nothing usable.
 3. Ranks candidates by queue depth, upload speed, file size.
-4. Tries the top 5 peers in sequence with a per-peer timeout of 180 seconds by default (`SLSKD_DOWNLOAD_TIMEOUT_SECONDS`).
+4. Tries the top 5 peers in sequence. A peer that keeps sending is waited for however slow it is (up to an hour); one that sends nothing for 180 seconds by default (`SLSKD_DOWNLOAD_TIMEOUT_SECONDS`) is cancelled in slskd, so its file can never land later as a second copy, and the next peer is tried.
 5. Verifies the file landed on disk (slskd's polling endpoint sometimes drops successful transfers between polls).
 6. Renames per `FolderStructure` setting and triggers a Navidrome rescan.
 

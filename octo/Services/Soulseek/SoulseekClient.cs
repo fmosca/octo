@@ -430,7 +430,7 @@ public class SoulseekClient
         Action<SoulseekTransferProgress>? onProgress = null)
     {
         var timeoutSec = perAttemptTimeoutSeconds ?? _settings.DownloadTimeoutSeconds;
-        var deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+        var watch = new TransferWatch(DateTime.UtcNow, TimeSpan.FromSeconds(timeoutSec), MaxTransferTime);
         var seenAtLeastOnce = false;
         var consecutiveMisses = 0;
         // After we've seen the transfer at least once, missing it for this many
@@ -439,9 +439,9 @@ public class SoulseekClient
         // immediately, so without this we'd poll forever.
         const int MaxConsecutiveMissesAfterSeen = 6;  // ~9s at 1500ms cadence
 
-        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        while (!watch.Expired(DateTime.UtcNow) && !ct.IsCancellationRequested)
         {
-            await Task.Delay(1500, ct);
+            await Task.Delay(PollInterval, ct);
 
             try
             {
@@ -471,9 +471,11 @@ public class SoulseekClient
                     seenAtLeastOnce = true;
                     consecutiveMisses = 0;
 
+                    var progress = ReadTransferProgress(transfer!.Value);
+                    watch.Saw(progress.BytesTransferred, DateTime.UtcNow);
                     if (onProgress is not null)
                     {
-                        try { onProgress(ReadTransferProgress(transfer!.Value)); }
+                        try { onProgress(progress); }
                         catch (Exception ex) { _logger.LogDebug("Transfer progress listener failed: {Msg}", ex.Message); }
                     }
 
@@ -508,9 +510,66 @@ public class SoulseekClient
             }
         }
 
-        _logger.LogWarning("slskd transfer timed out after {Sec}s: {File}", timeoutSec, filename);
+        ct.ThrowIfCancellationRequested();
+
+        // Giving up on this peer. Without a cancel slskd keeps the transfer going, and
+        // a file that lands after the next peer's copy is a second copy in the library.
+        if (await CancelTransferAsync(username, filename) == SoulseekTransferState.Succeeded)
+        {
+            _logger.LogInformation("slskd transfer finished just as it was given up: {File}", filename);
+            return SoulseekTransferState.Succeeded;
+        }
+        if (watch.HitCeiling(DateTime.UtcNow))
+            _logger.LogWarning("slskd transfer still not done after {Min} minutes; cancelled: {File}",
+                (int)MaxTransferTime.TotalMinutes, filename);
+        else
+            _logger.LogWarning("slskd transfer timed out: nothing new for {Sec}s; cancelled: {File}", timeoutSec, filename);
         return SoulseekTransferState.Errored;
     }
+
+    /// <summary>
+    /// The longest a transfer that keeps moving is waited for. A slow peer with the right
+    /// file is worth waiting on; one that trickles for an hour is not.
+    /// </summary>
+    internal static readonly TimeSpan MaxTransferTime = TimeSpan.FromMinutes(60);
+
+    /// <summary>How often a transfer is polled. Only tests shorten it.</summary>
+    internal TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>
+    /// Cancels a download in slskd and removes it from its list, so it can never land.
+    /// Answers Succeeded instead when the transfer turns out to have just finished, and
+    /// Errored otherwise, including when slskd cannot be asked.
+    /// </summary>
+    public async Task<SoulseekTransferState> CancelTransferAsync(string username, string filename)
+    {
+        var user = Uri.EscapeDataString(username);
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/transfers/downloads/{user}", null, CancellationToken.None);
+            if (!resp.IsSuccessStatusCode) return SoulseekTransferState.Errored;
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            if (FindTransfer(doc.RootElement, filename) is not { } file) return SoulseekTransferState.Errored;
+            var state = StateOf(file);
+            if (state.Contains("Completed", StringComparison.OrdinalIgnoreCase) &&
+                state.Contains("Succeeded", StringComparison.OrdinalIgnoreCase))
+                return SoulseekTransferState.Succeeded;
+            if (TransferId(file) is not { } id) return SoulseekTransferState.Errored;
+            using var cancel = await SendAsync(HttpMethod.Delete,
+                $"{Base}/api/v0/transfers/downloads/{user}/{Uri.EscapeDataString(id)}?remove=true", null, CancellationToken.None);
+            if (!cancel.IsSuccessStatusCode)
+                _logger.LogWarning("slskd refused to cancel {File}: HTTP {Code}", filename, (int)cancel.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not cancel slskd transfer {File}: {Msg}", filename, ex.Message);
+        }
+        return SoulseekTransferState.Errored;
+    }
+
+    /// <summary>The id slskd gives a transfer, for cancelling it.</summary>
+    internal static string? TransferId(JsonElement file) =>
+        file.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
 
     /// <summary>
     /// Finds a transfer's state in an slskd downloads response, or null when the
@@ -586,6 +645,29 @@ public class SoulseekFileHit
     public string Extension { get; set; } = "";
     public int? UploadSpeed { get; set; }
     public int? QueueLength { get; set; }
+}
+
+/// <summary>
+/// How long to keep waiting on one transfer. Each time more bytes have arrived, the
+/// quiet window starts again, so a slow peer that keeps sending is waited for. A
+/// transfer with nothing new for the whole window, or still unfinished at the ceiling,
+/// is given up on.
+/// </summary>
+internal sealed class TransferWatch(DateTime started, TimeSpan quiet, TimeSpan ceiling)
+{
+    private DateTime _quietSince = started;
+    private long _bytes;
+
+    public void Saw(long? bytes, DateTime now)
+    {
+        if (bytes is not { } b || b <= _bytes) return;
+        _bytes = b;
+        _quietSince = now;
+    }
+
+    public bool HitCeiling(DateTime now) => now - started >= ceiling;
+
+    public bool Expired(DateTime now) => now - _quietSince >= quiet || HitCeiling(now);
 }
 
 /// <summary>One poll's view of a transfer. PercentComplete is slskd's own, from 0 to 100.</summary>

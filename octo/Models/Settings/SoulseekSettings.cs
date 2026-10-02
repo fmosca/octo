@@ -58,10 +58,10 @@ public class SoulseekSettings
     public string PreferredExtension { get; set; } = "flac";
 
     /// <summary>
-    /// Max time to wait (seconds) for a download to complete before giving up on that
-    /// peer and trying the next one. Per attempt, not per track: a track that has to
-    /// walk all five candidates can spend this five times over. A peer that rejects
-    /// outright is detected in seconds and does not wait this out.
+    /// How long (seconds) a download may go without a new byte before Octo gives up on
+    /// that peer, cancels the transfer in slskd and tries the next one. A peer that
+    /// keeps sending is waited for however slow it is, up to an hour. Per attempt, not
+    /// per track. A peer that rejects outright is detected in seconds.
     /// </summary>
     public int DownloadTimeoutSeconds { get; set; } = 180;
 
