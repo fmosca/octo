@@ -345,10 +345,13 @@ public class SoulseekMetadataService : IMusicMetadataService
     // wait, so most cover fetches timed out and the ones that won starved YouTube prewarm.
     private readonly SemaphoreSlim _coverArtPrewarmGate = new(6);
 
-    public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+    public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default, bool background = false)
     {
         var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
         {
+            // The background pass runs after the client has the results, so a play may already
+            // have pinned a video for this song. It keeps it, and the shim is spared the lookup.
+            if (background && _idRegistry.Lookup(song.Id) is { YouTubeId.Length: > 0 }) return;
             if (!await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
             try
             {
@@ -356,13 +359,21 @@ public class SoulseekMetadataService : IMusicMetadataService
                 // Deezer duration as a hint so it picks the closest-length canonical
                 // video (not a long-form/compilation upload); playback reuses the
                 // stored videoId, so the shown length matches the audio.
-                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", song.Duration, ct: ct);
+                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", song.Duration,
+                    background: background, ct: ct);
                 if (hit is { VideoId.Length: > 0 } && hit.Duration is int d && d > 0)
                 {
                     // Shown only inside the sane range. An hour-long upload is a mix or a
                     // live set, and its length is no better than the one the row has.
-                    if (SongLength.SaneVideoLength(d) is int shown) song.Duration = shown;
+                    // Only the foreground pass may touch the Song. In the background the list is
+                    // already with the client and cached for the next page, being serialised as this
+                    // runs, and Song.Duration is an int? whose torn write can read back as 0.
+                    // getSong builds its answer from routing.Duration, so it still gets this length.
+                    if (!background && SongLength.SaneVideoLength(d) is int shown) song.Duration = shown;
                     var routing = _idRegistry.Lookup(song.Id);
+                    // A play can pin a different video while this lookup runs. The next Range
+                    // request has to get the same video, so the pinned one wins.
+                    if (background && routing is { YouTubeId.Length: > 0 } && routing.YouTubeId != hit.VideoId) return;
                     if (routing != null)
                     {
                         routing.YouTubeId = hit.VideoId; // playback reuses this exact video

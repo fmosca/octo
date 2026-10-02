@@ -224,10 +224,11 @@ public class SubsonicSettings
     /// answers (default: true).
     /// Environment variable: WAIT_FOR_SEARCH_DURATIONS
     ///
-    /// Off, search answers with Deezer's durations and resolves the YouTube ones in the
-    /// background, which saves a few seconds per new query. getSong resolves the exact
-    /// duration when a track starts, so clients that fetch it on play see the right length;
-    /// clients that only use the length from the search results may show Deezer's.
+    /// Off, search answers with Deezer's durations, which saves a few seconds per new query,
+    /// and finds the YouTube ones in the background. Rows already sent keep Deezer's length.
+    /// getSong and the Navidrome API's song lookup report the YouTube length once it is
+    /// known, so apps that look the song up again when it starts show the right length;
+    /// apps that only use the length from the search results show Deezer's.
     /// </summary>
     public bool WaitForSearchDurations { get; set; } = true;
 

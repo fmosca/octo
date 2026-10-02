@@ -270,6 +270,39 @@ public class SongLengthTests
         Assert.Equal(180, song.Duration);
         Assert.Equal("vid-Someone Live Set", fixture.Registry.Lookup(song.Id)!.YouTubeId);
     }
+
+    [Fact]
+    public async Task ResolveTopDurations_InTheBackground_LeavesTheSongAndWritesTheRouting()
+    {
+        var fixture = new LengthFixture { Video = { ["Daft Punk Emotion"] = 417 } };
+        var svc = fixture.Service();
+        var song = (await svc.SearchSongsByArtistTitleAsync("Daft Punk", "Emotion")).Single();
+
+        await svc.ResolveTopDurationsAsync([song], background: true);
+
+        Assert.Equal(180, song.Duration);
+        var routing = fixture.Registry.Lookup(song.Id)!;
+        Assert.Equal(417, routing.Duration);
+        Assert.Equal("vid-Daft Punk Emotion", routing.YouTubeId);
+        Assert.Contains(fixture.Requests, url => url.Contains("/meta") && url.Contains("bg=1"));
+    }
+
+    [Fact]
+    public async Task ResolveTopDurations_InTheBackground_KeepsTheVideoAPlayPinned()
+    {
+        var fixture = new LengthFixture { Video = { ["Daft Punk Emotion"] = 417 } };
+        var svc = fixture.Service();
+        var song = (await svc.SearchSongsByArtistTitleAsync("Daft Punk", "Emotion")).Single();
+        var routing = fixture.Registry.Lookup(song.Id)!;
+        routing.YouTubeId = "playing-now";
+        routing.Duration = 400;
+
+        await svc.ResolveTopDurationsAsync([song], background: true);
+
+        Assert.Equal("playing-now", routing.YouTubeId);
+        Assert.Equal(400, routing.Duration);
+        Assert.DoesNotContain(fixture.Requests, url => url.Contains("/meta"));
+    }
 }
 
 /// <summary>

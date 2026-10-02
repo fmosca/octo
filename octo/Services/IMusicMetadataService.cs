@@ -48,9 +48,11 @@ public interface IMusicMetadataService
     /// <summary>
     /// Resolves the real YouTube video (and its duration) for the top of a search
     /// result so the shown length matches the audio that plays. Bounded + cached;
-    /// also stores the videoId so playback reuses the same video.
+    /// also stores the videoId so playback reuses the same video. When <paramref name="background"/>
+    /// is true the songs are already sent: only the routing is written, a video a play already
+    /// pinned is kept, and the shim's background lane is used.
     /// </summary>
-    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default, bool background = false)
         => Task.CompletedTask;
 
     /// <summary>

@@ -183,11 +183,7 @@ public sealed class ExternalSearchService
         // the one played.
         _ = waitForDurations
             ? _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12)
-            : Task.Run(async () =>
-            {
-                await _metadata.ResolveTopDurationsAsync(songs, CancellationToken.None);
-                await _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
-            });
+            : Task.Run(() => ResolveDurationsThenPrewarmAsync(songs));
 
         // Same reasoning, for cover art: a client renders the first screen of results a
         // moment after this returns, and without a prewarm each row's getCoverArt call
@@ -196,5 +192,24 @@ public sealed class ExternalSearchService
         _ = _metadata.PrewarmCoverArtAsync(songs, topN: 24);
 
         return songs;
+    }
+
+    /// <summary>
+    /// The durations pass search did not wait for, then the videoId prewarm, in that order
+    /// for the reason given in BuildAsync. It runs in background mode, so the songs this
+    /// build returned stay frozen.
+    /// </summary>
+    private async Task ResolveDurationsThenPrewarmAsync(List<Song> songs)
+    {
+        try
+        {
+            await _metadata.ResolveTopDurationsAsync(songs, CancellationToken.None, background: true);
+            await _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
+        }
+        catch (Exception ex)
+        {
+            // Nothing awaits this, so an exception would only surface as an unobserved task.
+            _logger.LogDebug(ex, "Background duration pass failed for {Count} songs", songs.Count);
+        }
     }
 }

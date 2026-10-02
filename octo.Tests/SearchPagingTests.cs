@@ -289,7 +289,7 @@ internal sealed class SearchPagingWebFactory : WebApplicationFactory<Program>
             });
         Metadata.Setup(service => service.EnrichExternalSongsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
-        Metadata.Setup(service => service.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>()))
+        Metadata.Setup(service => service.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>(), It.IsAny<bool>()))
             .Returns(Task.CompletedTask);
         Metadata.Setup(service => service.PrewarmYouTubeIdsAsync(
                 It.IsAny<IEnumerable<Song>>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
