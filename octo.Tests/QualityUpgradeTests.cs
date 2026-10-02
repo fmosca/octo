@@ -119,6 +119,28 @@ public class QualityUpgradeTests
     }
 
     [Fact]
+    public async Task WhenNavidromeCannotListTheLibrary_TheWeeksRunIsNotSpent()
+    {
+        var store = new QualityUpgradeStore();
+        var (w, calls) = Worker(store: store);
+        var answering = false;
+        w.ListSongs = _ =>
+        {
+            calls.List++;
+            return Task.FromResult<(IReadOnlyList<LibrarySongRow>, bool)>(
+                answering ? ([Row("a", "A/a.mp3")], true) : ([], false));
+        };
+
+        Assert.Equal(QualityUpgradeWorker.Tick.Unreachable, await w.TickAsync(default));
+        Assert.Null(store.Snapshot().LastRunUtc);
+        Assert.Null(store.Snapshot().LastOutcome);
+
+        answering = true;
+        Assert.Equal(QualityUpgradeWorker.Tick.Ran, await w.TickAsync(default));
+        Assert.Equal(1, calls.Apply);
+    }
+
+    [Fact]
     public async Task StateSurvivesARestartAndTheNextRunWaitsItsTurn()
     {
         var path = Path.Combine(Path.GetTempPath(), "octo-qu-" + Guid.NewGuid() + ".json");

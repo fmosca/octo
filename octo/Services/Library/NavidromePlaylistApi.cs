@@ -82,7 +82,9 @@ public sealed class NavidromePlaylistApi
             using var doc = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(ct));
             return QualityUpgradeWorker.ParseSongs(doc.RootElement);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // HttpClient's own timeout is a TaskCanceledException too, but nobody asked to stop:
+        // that is Navidrome not answering, the same as any other failure here.
+        catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
         {
             _logger.LogWarning("Could not list songs: {M}", ex.Message);
             return null;

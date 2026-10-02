@@ -80,10 +80,12 @@ public sealed class QualityUpgradeWorker : BackgroundService
     internal static readonly TimeSpan RetryAfter = TimeSpan.FromDays(28);
     private static readonly TimeSpan FirstCheck = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan UnreachableWarningEvery = TimeSpan.FromHours(1);
 
     private readonly QualityUpgradeStore _store;
     private readonly IOptionsMonitor<LibraryActionSettings> _settings;
     private readonly ILogger<QualityUpgradeWorker> _logger;
+    private DateTime? _lastUnreachableWarning;
 
     public QualityUpgradeWorker(QualityUpgradeStore store, LibraryActionExecutor executor,
         IAcquisitionActivity activity, NavidromePlaylistApi navidrome, NavidromeIdentityService identity,
@@ -105,7 +107,7 @@ public sealed class QualityUpgradeWorker : BackgroundService
     internal Func<LibraryActionRequest, CancellationToken, Task<LibraryActionOutcome>> Apply { get; set; }
     internal Func<CancellationToken, Task<(IReadOnlyList<LibrarySongRow> Songs, bool Complete)>> ListSongs { get; set; }
 
-    internal enum Tick { Off, NotDue, Busy, NothingToDo, Ran }
+    internal enum Tick { Off, NotDue, Busy, Unreachable, NothingToDo, Ran }
 
     public static TimeSpan? Interval(int perWeek) =>
         perWeek <= 0 ? null : TimeSpan.FromTicks(TimeSpan.FromDays(7).Ticks / Math.Clamp(perWeek, 1, 500));
@@ -158,6 +160,18 @@ public sealed class QualityUpgradeWorker : BackgroundService
         if (!AcquisitionsIdle()) return Tick.Busy;
 
         var (songs, complete) = await ListSongs(ct);
+        if (!complete && songs.Count == 0)
+        {
+            // Navidrome did not answer. Stamping the run would spend the week's slot on a
+            // library nobody could read, so it is tried again next minute instead.
+            if (_lastUnreachableWarning is not { } warned || now - warned >= UnreachableWarningEvery)
+            {
+                _lastUnreachableWarning = now;
+                _logger.LogWarning("Quality upgrade: Navidrome did not list the library; trying again every minute");
+            }
+            else _logger.LogDebug("Quality upgrade: Navidrome still did not list the library");
+            return Tick.Unreachable;
+        }
         var pick = Pick(songs, state, now, settings.DryRun);
         _store.Update(s =>
         {
