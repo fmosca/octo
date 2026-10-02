@@ -15,8 +15,14 @@ public class LibraryReviewSweepTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "octo-sweep-" + Guid.NewGuid().ToString("N"));
     private string StatePath => Path.Combine(_root, ".state", "review-sweep.json");
 
+    private readonly List<ReviewSweepStore> _stores = [];
+
     public LibraryReviewSweepTests() => Directory.CreateDirectory(_root);
-    public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { } }
+    public void Dispose()
+    {
+        foreach (var store in _stores) store.Dispose();
+        try { Directory.Delete(_root, recursive: true); } catch { }
+    }
 
     private sealed class FakeVerifier : IReviewSweepVerifier
     {
@@ -56,15 +62,134 @@ public class LibraryReviewSweepTests : IDisposable
 
     private LibraryReviewSweepWorker Worker(FakeVerifier verifier, NoticeQueue? queue = null,
         LibraryActionSettings? settings = null, FakeActivity? activity = null,
-        IEnumerable<string>? octoDownloads = null, TimeProvider? time = null)
+        IEnumerable<string>? octoDownloads = null, TimeProvider? time = null,
+        Action<LibraryReviewSweepWorker>? whileListing = null)
     {
+        // A worker built after another is a restart, and a stopping host flushes the store.
+        foreach (var previous in _stores) previous.Flush();
+        var store = new ReviewSweepStore(StatePath);
+        _stores.Add(store);
+        LibraryReviewSweepWorker worker = null!;
         var library = new Mock<ILocalLibraryService>();
-        library.Setup(l => l.GetMappingsAsync()).ReturnsAsync((IReadOnlyList<LocalSongMapping>)
-            (octoDownloads ?? []).Select(path => new LocalSongMapping { LocalPath = path }).ToList());
-        return new LibraryReviewSweepWorker(new ReviewSweepStore(StatePath), queue ?? new NoticeQueue(), verifier,
+        library.Setup(l => l.GetMappingsAsync()).Callback(() => whileListing?.Invoke(worker))
+            .ReturnsAsync((IReadOnlyList<LocalSongMapping>)
+                (octoDownloads ?? []).Select(path => new LocalSongMapping { LocalPath = path }).ToList());
+        worker = new LibraryReviewSweepWorker(store, queue ?? new NoticeQueue(), verifier,
             activity ?? new FakeActivity(), library.Object, TestOptions.Monitor(settings ?? Settings()),
             TestOptions.Monitor(new SubsonicSettings { AdminUsername = "bob" }), () => _root,
             NullLogger<LibraryReviewSweepWorker>.Instance, time);
+        return worker;
+    }
+
+    /// <summary>A clock that moves only when told to, with a flush timer that fires only when told to.</summary>
+    private sealed class StoreClock : TimeProvider
+    {
+        private long _ticks = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero).UtcTicks;
+        public TimeSpan Step { get; init; }
+        public TimerCallback? Tick { get; private set; }
+        public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
+        public override DateTimeOffset GetUtcNow() => new(Interlocked.Add(ref _ticks, Step.Ticks), TimeSpan.Zero);
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            Tick = callback;
+            return new Inert();
+        }
+        private sealed class Inert : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    private int FineOnDisk() =>
+        System.Text.Json.JsonSerializer.Deserialize<ReviewSweepState>(File.ReadAllText(StatePath))!.Fine;
+
+    [Fact]
+    public void TheStore_WritesAtMostOncePerWindow_AndKeepsTheRestForTheNextFlush()
+    {
+        var clock = new StoreClock();
+        var store = new ReviewSweepStore(StatePath, time: clock);
+        _stores.Add(store);
+
+        store.Update(s => s.Fine = 1);
+        Assert.Equal(1, FineOnDisk());
+        store.Update(s => s.Fine = 2);
+        store.Update(s => s.Fine = 3);
+        Assert.Equal(1, FineOnDisk());
+
+        clock.Tick!(null);
+        Assert.Equal(3, FineOnDisk());
+        store.Update(s => s.Fine = 4);
+        Assert.Equal(3, FineOnDisk());
+
+        clock.Advance(ReviewSweepStore.FlushInterval);
+        store.Update(s => s.Fine = 5);
+        Assert.Equal(5, FineOnDisk());
+
+        store.Update(s => s.Fine = 6);
+        Assert.Equal(5, FineOnDisk());
+        store.Flush();
+        Assert.Equal(6, new ReviewSweepStore(StatePath).Read(s => s.Fine));
+    }
+
+    [Fact]
+    public async Task APause_IsNeverLostToAnOlderWrite()
+    {
+        // Every change is old enough to be written at once.
+        var store = new ReviewSweepStore(StatePath, time: new StoreClock { Step = ReviewSweepStore.FlushInterval });
+        _stores.Add(store);
+        using var snapshotTaken = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var held = 0;
+        store.BeforeWrite = () =>
+        {
+            if (Interlocked.Exchange(ref held, 1) == 1) return;
+            snapshotTaken.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        // A tick's write is held between its snapshot and the disk while a Pause comes in.
+        var tick = Task.Run(() => store.Update(s => s.Fine++));
+        Assert.True(snapshotTaken.Wait(TimeSpan.FromSeconds(10)));
+        var pause = Task.Run(() => { store.Update(s => s.Paused = true); store.Flush(); });
+        await Task.WhenAny(pause, Task.Delay(300));
+        release.Set();
+        await Task.WhenAll(tick, pause);
+
+        var restarted = new ReviewSweepStore(StatePath);
+        Assert.True(restarted.Read(s => s.Paused));
+        Assert.Equal(1, restarted.Read(s => s.Fine));
+    }
+
+    [Fact]
+    public async Task StartingOverWhileTheLibraryIsListed_ListsItAgain()
+    {
+        Song("a.flac"); Song("b.flac");
+        var verifier = new FakeVerifier();
+        var resets = 0;
+        var worker = Worker(verifier, whileListing: w => { if (resets++ == 0) w.Reset(); });
+
+        await worker.TickAsync(default);
+        Assert.Empty(verifier.Asked);
+
+        await worker.TickAsync(default);
+        Assert.Equal(["a.flac"], verifier.Asked);
+        Assert.Equal(2, worker.Status().Total);
+    }
+
+    [Fact]
+    public async Task ASongInSlskdsIncompleteFolder_IsNeverChecked()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "incomplete"));
+        Directory.CreateDirectory(Path.Combine(_root, "Artist"));
+        Song(Path.Combine("incomplete", "half.flac"));
+        Song(Path.Combine("Artist", "whole.flac"));
+        var verifier = new FakeVerifier();
+        var worker = Worker(verifier);
+        for (var i = 0; i < 3; i++) await worker.TickAsync(default);
+        Assert.Equal(["whole.flac"], verifier.Asked);
+        Assert.Equal(1, worker.Status().Total);
     }
 
     [Fact]

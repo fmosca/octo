@@ -6,6 +6,7 @@ using Octo.Services.Common;
 using Octo.Services.CoverArt;
 using Octo.Services.Fingerprint;
 using Octo.Services.Local;
+using Octo.Services.Soulseek;
 
 namespace Octo.Services.Library;
 
@@ -49,20 +50,34 @@ public sealed class ReviewSweepState
     public DateTime NextPassUtc { get; set; }
 }
 
-/// <summary>review-sweep.json. Written whole on each change; changes are a file a minute or so.</summary>
-public sealed class ReviewSweepStore
+/// <summary>
+/// review-sweep.json. <see cref="ReviewSweepState.Checked"/> holds a line per library file, so
+/// the file is written at most every <see cref="FlushInterval"/>, not on every change: at 50,000
+/// files a write per song would rewrite hundreds of megabytes an hour.
+/// </summary>
+public sealed class ReviewSweepStore : IDisposable
 {
+    internal static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
+
     private readonly string? _path;
     private readonly ILogger<ReviewSweepStore>? _logger;
+    private readonly TimeProvider _time;
+    private readonly ITimer? _flushTimer;
     private readonly object _lock = new();
-    private readonly object _saveLock = new();
+    private readonly object _flushLock = new();
     private ReviewSweepState _state = new();
+    private int _dirty;
+    private long _lastWriteTicks;
 
-    public ReviewSweepStore(string? path = null, ILogger<ReviewSweepStore>? logger = null)
+    public ReviewSweepStore(string? path = null, ILogger<ReviewSweepStore>? logger = null, TimeProvider? time = null)
     {
         _path = string.IsNullOrWhiteSpace(path) ? null : path;
         _logger = logger;
-        if (_path is null || !File.Exists(_path)) return;
+        _time = time ?? TimeProvider.System;
+        if (_path is null) return;
+        // Picks up a change made just after a write, which no later change may come to flush.
+        _flushTimer = _time.CreateTimer(_ => Flush(), null, FlushInterval, FlushInterval);
+        if (!File.Exists(_path)) return;
         try { _state = JsonSerializer.Deserialize<ReviewSweepState>(File.ReadAllText(_path)) ?? new(); }
         catch (Exception ex)
         {
@@ -72,23 +87,58 @@ public sealed class ReviewSweepStore
         }
     }
 
+    /// <summary>Test seam: runs between taking a snapshot and writing it.</summary>
+    internal Action? BeforeWrite { get; set; }
+
     public T Read<T>(Func<ReviewSweepState, T> read) { lock (_lock) return read(_state); }
 
+    /// <summary>Changes the state in memory. It reaches the disk now if nothing was written in the
+    /// last few seconds, otherwise on the next timer tick or <see cref="Flush"/>.</summary>
     public void Update(Action<ReviewSweepState> change)
     {
-        string json;
-        lock (_lock) { change(_state); json = JsonSerializer.Serialize(_state); }
+        lock (_lock) { change(_state); _dirty = 1; }
         if (_path is null) return;
-        lock (_saveLock)
+        if (_time.GetUtcNow().UtcTicks - Interlocked.Read(ref _lastWriteTicks) >= FlushInterval.Ticks) Flush();
+    }
+
+    /// <summary>
+    /// Writes the state if it changed. The snapshot is taken inside the same lock as the write, so
+    /// an older snapshot can never land after a newer one (a Pause overwritten by the tick before it).
+    /// </summary>
+    public bool Flush()
+    {
+        if (_path is null) return true;
+        lock (_flushLock)
         {
+            string json;
+            lock (_lock)
+            {
+                if (_dirty == 0) return true;
+                _dirty = 0;
+                json = JsonSerializer.Serialize(_state);
+            }
+            BeforeWrite?.Invoke();
+            Interlocked.Exchange(ref _lastWriteTicks, _time.GetUtcNow().UtcTicks);
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
                 File.WriteAllText(_path + ".tmp", json);
                 File.Move(_path + ".tmp", _path, overwrite: true);
+                return true;
             }
-            catch (Exception ex) { _logger?.LogWarning("review sweep state could not be written: {M}", ex.Message); }
+            catch (Exception ex)
+            {
+                lock (_lock) _dirty = 1;
+                _logger?.LogWarning("review sweep state could not be written: {M}", ex.Message);
+                return false;
+            }
         }
+    }
+
+    public void Dispose()
+    {
+        _flushTimer?.Dispose();
+        Flush();
     }
 }
 
@@ -154,6 +204,14 @@ public sealed class LibraryReviewSweepWorker : BackgroundService
             catch (Exception ex) { _logger.LogError(ex, "Library review sweep failed"); wait = IdleCheck; }
             try { await Task.Delay(wait, _time, stoppingToken); } catch (OperationCanceledException) { break; }
         }
+        _store.Flush();
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken);
+        // The store writes every few seconds at most; whatever changed since goes down now.
+        _store.Flush();
     }
 
     internal async Task<TimeSpan> TickAsync(CancellationToken ct)
@@ -185,21 +243,26 @@ public sealed class LibraryReviewSweepWorker : BackgroundService
             _octoFiles = settings.ReviewSweepOctoDownloads ? new(StringComparer.Ordinal)
                 : (await _library.GetMappingsAsync()).Select(mapping => mapping.LocalPath)
                     .Where(path => !string.IsNullOrEmpty(path)).Select(Path.GetFullPath).ToHashSet(StringComparer.Ordinal);
+            // Start over was pressed while the library was being listed. Keeping this listing
+            // would leave the pass with a total of 0, so the next tick lists it again.
+            if (generation != Volatile.Read(ref _generation)) { _files = null; return TimeSpan.Zero; }
             var total = _files.Count;
             Record(generation, s => s.Total = total);
         }
 
         var files = _files;
         var reviewed = _notices.ReviewedPaths();
-        var (cursor, done) = _store.Read(s => (s.Cursor, new Dictionary<string, string>(s.Checked, StringComparer.Ordinal)));
+        var cursor = _store.Read(s => s.Cursor);
         string? target = null, stamp = null, passed = cursor;
         for (var i = FirstAfter(files, cursor); i < files.Count && target is null; i++)
         {
             var full = FullPath(root, files[i]);
             var info = new FileInfo(full);
             var fileStamp = info.Exists ? $"{info.Length}:{info.LastWriteTimeUtc.Ticks}" : null;
+            // One entry looked up at a time: copying the whole map each tick costs a line per library file.
+            var relative = files[i];
             if (fileStamp is null || _octoFiles.Contains(full) || reviewed.Contains(full)
-                || (done.TryGetValue(files[i], out var seen) && seen == fileStamp))
+                || _store.Read(s => s.Checked.TryGetValue(relative, out var seen) && seen == fileStamp))
             { passed = files[i]; continue; }
             (target, stamp) = (files[i], fileStamp);
         }
@@ -216,7 +279,6 @@ public sealed class LibraryReviewSweepWorker : BackgroundService
             _logger.LogInformation("Library review sweep finished a pass over {Count} file(s)", files.Count);
             return Hold("Done", "Every song has been checked. New or changed ones are looked for later.", IdleCheck);
         }
-        if (passed != cursor) Record(generation, s => s.Cursor = passed!);
 
         var path = FullPath(root, target);
         var song = ReadTags(path);
@@ -228,6 +290,9 @@ public sealed class LibraryReviewSweepWorker : BackgroundService
         switch (outcome)
         {
             case Outcome.LookupFailed when ++_lookupFailures < MaxLookupFailuresPerFile:
+                // The songs skipped on the way here are kept; every other path moves the cursor to
+                // the target itself, which is past them, so a tick writes once.
+                if (passed != cursor) Record(generation, s => s.Cursor = passed!);
                 return Hold("Waiting", "AcoustID did not answer; trying that song again.", interval);
             case Outcome.LookupFailed:
                 _lookupFailures = 0;
@@ -305,12 +370,16 @@ public sealed class LibraryReviewSweepWorker : BackgroundService
         catch { return new Song { Artist = "", Title = fallback, Album = "" }; }
     }
 
+    private static readonly string[] IncompleteFolders = SoulseekDownloadService.ExcludedFolderNames(null);
+
     internal static List<string> Enumerate(string root) =>
         Directory.EnumerateFiles(root, "*", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true })
             .Where(path => CoverUpgradeWorker.AudioExtensions.Contains(Path.GetExtension(path)))
             .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
             // A leading dot is the quarantine and anything else kept out of Navidrome's scan.
-            .Where(relative => !relative.Split('/').Any(segment => segment.StartsWith('.')))
+            // slskd's incomplete folder holds half-written downloads when it sits in the library.
+            .Where(relative => !relative.Split('/').Any(segment => segment.StartsWith('.')
+                || IncompleteFolders.Contains(segment, StringComparer.OrdinalIgnoreCase)))
             .OrderBy(relative => relative, StringComparer.Ordinal)
             .ToList();
 
@@ -327,7 +396,11 @@ public sealed class LibraryReviewSweepWorker : BackgroundService
 
     private TimeSpan Hold(string state, string? reason, TimeSpan wait) { _state = state; _reason = reason; return wait; }
 
-    public void SetPaused(bool paused) => _store.Update(s => s.Paused = paused);
+    public void SetPaused(bool paused)
+    {
+        _store.Update(s => s.Paused = paused);
+        _store.Flush();
+    }
 
     public void Reset()
     {
@@ -338,6 +411,7 @@ public sealed class LibraryReviewSweepWorker : BackgroundService
             s.Cursor = ""; s.Checked.Clear(); s.Pass = 1; s.Total = 0; s.Found = 0; s.Fine = 0; s.Undecodable = 0;
             s.LastCheckedUtc = null; s.PassFinishedUtc = null; s.NextPassUtc = default;
         });
+        _store.Flush();
     }
 
     public ReviewSweepStatus Status()

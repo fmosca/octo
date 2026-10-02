@@ -272,6 +272,8 @@ async function loadSettings() {
   loadLyricsChoices();
   loadRadioStatus();
   loadQualityUpgrade();
+  // Again here, so saving a songs-an-hour value enables its Pause button straight away.
+  loadReviewSweep();
   loadLastFmScrobbling();
   // Only when it is the tab on screen; opening the tab later checks then.
   if (document.querySelector('[data-pane="lastfm"].active')) loadLastFmAccount();
@@ -1873,7 +1875,7 @@ document.getElementById('review-sweep-toggle')?.addEventListener('click', (event
   reviewSweepPost(button, `/api/admin/review-sweep/${start ? 'start' : 'pause'}`, start ? 'Carrying on.' : 'Paused.');
 });
 document.getElementById('review-sweep-reset')?.addEventListener('click', (event) => {
-  if (!confirm('Check every song again from the start? Songs already asked about are not asked again.')) return;
+  if (!confirm('Check every song again from the start? Questions you answered recently are not asked again.')) return;
   reviewSweepPost(event.currentTarget, '/api/admin/review-sweep/reset', 'Starting over.');
 });
 loadReviewSweep();
