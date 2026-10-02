@@ -259,10 +259,10 @@ starting a second one. Acquisitions Octo starts itself are unattributed, as are 
 written before this existed. Turning it off stops the username being captured at all rather
 than hiding it afterwards, so nothing downstream holds it; names already written stay.
 
-`STAR_DOWNLOADS_FOR_REQUESTER` (on by default) turns a star on a song or album Octo found for
-you into a Navidrome favourite once it downloads, for the person who starred it, so the star
-means "I like this" as it does everywhere else. An album star favourites the album. Octo's own
-apps are left out, because their star button means Add. The person's sign-in is held in memory
+`STAR_DOWNLOADS_FOR_REQUESTER` (on by default) means a star on a song or album Octo found for
+you also marks it as a favourite: once it downloads, Octo favourites it in Navidrome for the
+person who starred it. An album star favourites the album. Octo's own apps are left out,
+because their star button means Add. The person's sign-in is held in memory
 with the download until the song arrives (a password is first turned into a token, so the
 password itself is never held), and a restart drops it.
 
@@ -374,6 +374,16 @@ works even if the action journal is lost, and only the retention sweep
 (`LIBRARY_ACTIONS_TRASH_DAYS`, 0 to keep forever) really deletes. `LIBRARY_ACTIONS_POLL_SECONDS`
 and `LIBRARY_ACTIONS_MAX_PER_CYCLE` bound how fast actions are noticed and applied.
 
+`LIBRARY_ACTIONS_UPGRADE_PER_WEEK` (0, the default, is off) has Octo upgrade that many lossy
+songs a week to lossless by itself, through Better quality, spread evenly across the week and
+one at a time. It needs library actions on, Better quality switched on, someone on the
+allowlist (it acts as the first person there) and Octo's Navidrome admin credential to read the
+library. It waits while anything else is downloading, takes songs it has never tried first, and
+leaves a song alone for four weeks after trying it. With dry run on it only rehearses. Better
+quality and this weekly upgrade search Soulseek for up to `SLSKD_UPGRADE_SEARCH_WAIT_SECONDS`
+(default 90, 30 to 300) instead of the usual `SLSKD_SEARCH_WAIT_SECONDS`, because they look for
+songs the quick search did not find. A change to it applies after a restart.
+
 Two things to know before turning ratings on. Clearing a rating afterwards needs the rating
 owner's own credentials, because Subsonic ratings are per user, so **Octo caches a replayable
 Subsonic auth triplet per user in memory** for as long as it runs. And because no client asks
@@ -406,13 +416,15 @@ before they existed.
 
 `LIBRARY_ACTIONS_REVIEW_SWEEP_PER_HOUR` (0, the default, is off) has Review check music that
 was already in the library too, that many songs an hour, and only while nothing is
-downloading. It asks one person, the library keeper: the Navidrome admin when they are on the
-allowlist, otherwise the first allowed user. Besides the usual questions it asks when AcoustID
+downloading. It needs download verification on (`SLSKD_VERIFY_DOWNLOADS`) and an AcoustID key
+(`ACOUSTID_API_KEY`). It asks one person, the library keeper: the Navidrome admin when they are
+on the allowlist, otherwise the first allowed user. Besides the usual questions it asks when AcoustID
 is sure a song is something else, or when a song runs much longer or shorter than the
 recording it matched; those are questions too, never acted on by themselves. It stops while 50
 of its questions wait for an answer, and a Keep on one sends nothing to AcoustID, since its
-tags were never confirmed. Octo's own downloads were checked when they arrived, so they are
-skipped unless `LIBRARY_ACTIONS_REVIEW_SWEEP_OCTO_DOWNLOADS` is on.
+tags were never confirmed. Octo's own downloads are skipped, since each was checked when it
+arrived if verification was on at the time; `LIBRARY_ACTIONS_REVIEW_SWEEP_OCTO_DOWNLOADS` checks
+them too.
 
 `LIBRARY_ACTIONS_DUPLICATES` adds a Duplicates playlist per allowed user: recordings the
 library holds more than once, side by side, the copy worth keeping first (lossless before
@@ -537,6 +549,8 @@ The selected Lidarr root and Octo's effective Navidrome library root must expose
 Tracks already in your library play locally through Navidrome. Missing external results stream from YouTube. Playback does not acquire a permanent copy unless one of the two settings below is on; heart the song or album to run the configured source priority.
 
 Set `WAIT_FOR_LOSSLESS_ON_PLAY=true` if you would rather the first play wait for the lossless file. It is off by default because a Soulseek fetch routinely takes minutes and most clients time out long before that, which looks like the play failing. The setting also changes what searches advertise for external tracks, so it needs a restart, and clients that cached earlier results should re-search after you change it.
+
+`WAIT_FOR_SEARCH_DURATIONS` (on by default) has a search wait for the YouTube lengths of the top rows from outside your library before it answers, so the length shown is the length of the video that plays. Turned off, a new search answers a few seconds sooner and those rows show Deezer's length. Octo still finds the YouTube length afterwards, and apps that look the song up again when it starts playing show that one. The change takes effect without a restart.
 
 Set `DOWNLOAD_ON_PLAY=true` to keep a copy of every song played from outside your library, radio included. The copy comes from the first song source in the heart download priority that Octo fetches itself (Soulseek or YouTube, never Lidarr), and playback still starts from YouTube at once. Only the start of a play counts, not a seek. Hearts always go ahead of these downloads, and at most one played song waits its turn: a song played while another is waiting is skipped, and tried again the next time it is played. Each one shows in the app's download list like a heart, and hearting a song that is already downloading this way makes it a heart. `LIDARR_ALBUM_ON_PLAY=true` hands the album of every played song to Lidarr, once per song until Octo restarts; one Lidarr turns down is tried again on the next play. Every hand-off makes Lidarr search all its indexers, so on radio it pulls in an album per song. Both are off by default and have switches under **Streams & hearts, Playing songs you don't own**.
 
