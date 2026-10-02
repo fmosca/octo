@@ -232,6 +232,7 @@ public class AdminController : ControllerBase
             hasApiKey = !string.IsNullOrWhiteSpace(settings.ApiKey),
             hasApiSecret = !string.IsNullOrWhiteSpace(settings.ApiSecret),
             enabled = settings.ScrobbleExternalPlays,
+            libraryPlays = settings.ScrobbleLibraryPlays,
             users = _lastFmScrobbles?.Users(known) ?? [],
         });
     }
@@ -735,6 +736,7 @@ public class AdminController : ControllerBase
                 ["ApiKey"] = lastfm.ApiKey ?? "",
                 ["ApiSecret"] = MaskSecret(lastfm.ApiSecret),
                 ["ScrobbleExternalPlays"] = lastfm.ScrobbleExternalPlays,
+                ["ScrobbleLibraryPlays"] = lastfm.ScrobbleLibraryPlays,
                 ["UserSessions"] = MaskSessions(lastfm.UserSessions),
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
@@ -1470,6 +1472,7 @@ public class AdminController : ControllerBase
                 // Placeholders, which PUT swaps back for what is stored.
                 ["ApiSecret"] = MaskSecret(lastfm.ApiSecret),
                 ["ScrobbleExternalPlays"] = lastfm.ScrobbleExternalPlays,
+                ["ScrobbleLibraryPlays"] = lastfm.ScrobbleLibraryPlays,
                 ["UserSessions"] = MaskSessions(lastfm.UserSessions),
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
@@ -1723,7 +1726,7 @@ public class AdminController : ControllerBase
             "Lidarr:QualityProfileId", "Lidarr:MetadataProfileId",
             "Lidarr:CompletionMode", "Lidarr:ImportTimeoutSeconds",
             "YouTube:ShimUrl",
-            "LastFm:ApiKey", "LastFm:ApiSecret", "LastFm:ScrobbleExternalPlays",
+            "LastFm:ApiKey", "LastFm:ApiSecret", "LastFm:ScrobbleExternalPlays", "LastFm:ScrobbleLibraryPlays",
             "LastFm:EnableRadio", "LastFm:RadioTrackCount",
             "LastFm:RadioCacheDurationHours", "LastFm:StarterPublishTimeoutSeconds",
             "LastFm:RadioLoudnessTargetLufs",

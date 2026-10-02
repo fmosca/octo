@@ -16,10 +16,18 @@ public class LastFmSettings
     public string ApiSecret { get; set; } = string.Empty;
 
     /// <summary>
-    /// Send plays of outside songs to each connected listener's Last.fm. Library plays are
-    /// left alone, because Navidrome scrobbles those itself.
+    /// Send plays to each connected listener's Last.fm. Outside songs always go when this
+    /// is on; library songs go too while <see cref="ScrobbleLibraryPlays"/> is on.
     /// </summary>
     public bool ScrobbleExternalPlays { get; set; } = true;
+
+    /// <summary>
+    /// Send library plays to Last.fm as well as outside ones. On by default: Navidrome scrobbles
+    /// a listener only once they link Last.fm in Navidrome's own web settings, which Octo's apps
+    /// never show, so without this most plays never reach Last.fm. Turn it off for an Octo whose
+    /// Navidrome is linked to the same Last.fm account, or each library play counts twice.
+    /// </summary>
+    public bool ScrobbleLibraryPlays { get; set; } = true;
 
     /// <summary>
     /// Navidrome username to that listener's Last.fm session, written by Connect on the

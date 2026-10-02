@@ -2942,10 +2942,9 @@ public class SubsonicController : ControllerBase
 
     /// <summary>
     /// What a completed scrobble teaches: the radio profile (when personalised radio is
-    /// on) and, for an external track, the listener's ListenBrainz and Last.fm history.
-    /// Navidrome already scrobbles local tracks from the relayed call; an external id is
-    /// unknown to it, so without this the play is gone. A start-of-play event for an
-    /// external track becomes Last.fm's Now Playing, which Navidrome would otherwise show.
+    /// on), the listener's Last.fm history (outside songs, and library songs unless they are
+    /// left to Navidrome) and, for an external track, ListenBrainz. A start-of-play event
+    /// becomes Last.fm's Now Playing.
     /// </summary>
     private async Task LearnFromScrobblesAsync(IReadOnlyList<string> ids,
         IReadOnlyList<string> submissions, IReadOnlyList<string> times,
@@ -2970,10 +2969,11 @@ public class SubsonicController : ControllerBase
             var completed = submissions.Count == 1
                 ? IsTrue(submissions[0])
                 : index >= submissions.Count || IsTrue(submissions[index]);
-            // Last.fm hears only about outside songs. Navidrome scrobbles library songs to
-            // it already, so sending one from here too would count the play twice.
+            // Last.fm hears about outside songs, and library songs too unless the admin left
+            // those to a Navidrome that scrobbles them itself (else they would count twice).
             var outside = _localLibraryService.ParseSongId(ids[index]).isExternal;
-            if (!completed && !(scrobbling && outside)) continue;
+            var lastFmTakes = scrobbling && (outside || _lastFmScrobbles!.TakesLibraryPlays);
+            if (!completed && !lastFmTakes) continue;
             // A client that sends the same completed play again is not playing it again.
             var time = index < times.Count ? times[index] : null;
             var reportedAt = DateTime.UtcNow;
@@ -2996,7 +2996,7 @@ public class SubsonicController : ControllerBase
                 var track = new LastFmTrack(song.Artist, song.Title, song.Album, song.Duration);
                 if (!completed)
                 {
-                    if (!song.IsLocal) _lastFmScrobbles!.NowPlaying(username, track);
+                    if (lastFmTakes) _lastFmScrobbles!.NowPlaying(username, track);
                     continue;
                 }
                 var playedAt = DateTime.UtcNow;
@@ -3014,7 +3014,7 @@ public class SubsonicController : ControllerBase
                         IsLocal = song.IsLocal, PlayedAtUtc = playedAt, Source = "scrobble"
                     });
                 // Queued, not awaited: the client's answer never waits on Last.fm.
-                if (scrobbling && outside && !song.IsLocal)
+                if (lastFmTakes)
                     _lastFmScrobbles!.Scrobble(username, track, playedAt);
                 if (submitting && !song.IsLocal)
                     await _listenBrainz!.SubmitListenAsync(username, song.Artist, song.Title,
