@@ -30,6 +30,13 @@ public sealed class AcquisitionRequest
         _heartJoined = true;
     }
 
+    private int _upgradeSearch;
+
+    /// <summary>Search the slow, wide way. Settable after queueing, like RequestedBy, so a Better
+    /// quality that joins a request already in flight still widens its search.</summary>
+    public bool UpgradeSearch => Volatile.Read(ref _upgradeSearch) == 1;
+    internal void AskForUpgradeSearch() => Volatile.Write(ref _upgradeSearch, 1);
+
     private readonly ConcurrentDictionary<string, byte> _requestedBy =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -114,7 +121,7 @@ public sealed class TrackAcquisitionQueue
     public Task<string> Enqueue(string provider, string externalId, bool isStar,
         bool triggerAlbumDownload, bool forcePermanent,
         DownloadSource? sourceOverride = null, bool notifyOnFailure = true,
-        string? requestedBy = null)
+        string? requestedBy = null, bool upgradeSearch = false)
     {
         var request = new AcquisitionRequest
         {
@@ -127,6 +134,7 @@ public sealed class TrackAcquisitionQueue
             NotifyOnFailure = notifyOnFailure,
         };
         request.AddRequester(requestedBy);
+        if (upgradeSearch) request.AskForUpgradeSearch();
 
         var existing = _inFlight.GetOrAdd(request.Key, request);
         if (!ReferenceEquals(existing, request))
@@ -135,6 +143,7 @@ public sealed class TrackAcquisitionQueue
             // and record this caller on the request that is actually going to run, so the
             // file is attributed to everyone who asked and not just to whoever was first.
             existing.AddRequester(requestedBy);
+            if (upgradeSearch) existing.AskForUpgradeSearch();
             // A heart for a track a play already asked for. The source cannot change any more, but
             // the failure is now someone's explicit ask, and the heart chain still owns its fallback.
             if (isStar && !existing.IsStar) existing.JoinHeart(notifyOnFailure);

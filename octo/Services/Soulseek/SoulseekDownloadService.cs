@@ -164,12 +164,13 @@ public class SoulseekDownloadService : BaseDownloadService
 
     protected override async Task<string> DownloadTrackAsync(
         string trackId, Song song, bool suppressNotify,
-        DownloadSource? sourceOverride, CancellationToken cancellationToken)
+        DownloadSource? sourceOverride, bool upgradeSearch, CancellationToken cancellationToken)
     {
         var routing = _idRegistry.Lookup(song.ExternalId ?? "") ?? SoulseekMetadataService.TryDecodeExternalId(song.ExternalId ?? "");
         if (routing is null || !routing.HasArtistTitle)
             throw new InvalidOperationException(
                 $"Cannot download '{song.Artist} - {song.Title}': missing artist/title in external id");
+        var profile = upgradeSearch ? SearchProfile.Upgrade(_settings) : SearchProfile.Interactive(_settings);
 
         // DownloadOnStar decides WHETHER to download; DownloadSource decides FROM WHERE.
         switch (sourceOverride ?? SubsonicSettings.DownloadSource)
@@ -180,7 +181,7 @@ public class SoulseekDownloadService : BaseDownloadService
                 // The filter matters: a cancelled token means nobody is waiting for
                 // this any more, so falling back would start a second download only
                 // to have it throw on the same token.
-                try { return await DownloadViaSoulseekAsync(routing, song, suppressNotify, cancellationToken); }
+                try { return await DownloadViaSoulseekAsync(routing, song, suppressNotify, profile, cancellationToken); }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     Logger.LogWarning("Soulseek download failed ({Msg}); falling back to YouTube MP3", ex.Message);
@@ -202,7 +203,7 @@ public class SoulseekDownloadService : BaseDownloadService
                     return await DownloadViaYouTubeAsync(routing, song, suppressNotify, announceStart: false, cancellationToken);
                 }
             default:
-                return await DownloadViaSoulseekAsync(routing, song, suppressNotify, cancellationToken);
+                return await DownloadViaSoulseekAsync(routing, song, suppressNotify, profile, cancellationToken);
         }
     }
 
@@ -316,43 +317,35 @@ public class SoulseekDownloadService : BaseDownloadService
 
     // Lossless FLAC via Soulseek/slskd: walk the top-N peers in quality order,
     // first successful transfer wins.
-    private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, Song song, bool suppressNotify, CancellationToken cancellationToken)
+    private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, Song song, bool suppressNotify,
+        SearchProfile profile, CancellationToken cancellationToken)
     {
-        var queries = SearchQueries(routing.Title!, routing.Artist!);
-        var primaryQuery = queries[0].Text;
-
+        // The title alone is the last resort, and held to a stricter filename rule: with the
+        // artist gone from the query, scattered words are no evidence at all. A junk artist
+        // field (an uploader's name) is what it is for.
+        var queries = SearchQueries(routing.Title!, routing.Artist!)
+            .Select(q => (Query: q, Strict: q.Artist.Length == 0)).ToList();
+        var primaryQuery = queries[0].Query.Text;
         var trackKey = song.ExternalId ?? "";
         Track(t => t.Stage(ProviderName, trackKey, AcquisitionState.Searching, "Soulseek"));
 
         List<SoulseekFileHit> hits = [];
         List<SoulseekFileHit> ranked = [];
-        foreach (var query in queries)
+        foreach (var (query, strict) in queries)
         {
-            // The title alone is the last resort, and held to a stricter filename rule: with the
-            // artist gone from the query, scattered words are no evidence at all. A junk artist
-            // field (an uploader's name) is what it is for.
-            var titleOnly = query.Artist.Length == 0;
-            if (ReferenceEquals(query, queries[0]))
+            if (ReferenceEquals(query, queries[0].Query))
                 Logger.LogInformation("Soulseek search-for-star: '{Query}'", query.Text);
             else
                 Logger.LogInformation("Soulseek query returned no usable hits; retrying with '{Query}'", query.Text);
-            hits = await _slskd.SearchAsync(
-                query.Text,
-                _settings.MinFileSizeBytes > 0 ? 30 : 10,
-                cancellationToken,
-                // Stop waiting once there is a real choice to make. Not on the first
-                // usable hit: ranking picks on queue length and upload speed, so
-                // committing to a single candidate would often mean committing to the
-                // slowest peer that happened to answer first. A handful is enough to
-                // choose well without waiting for stragglers.
-                enough: h => RankCandidates(h.ToList(), routing.Title!, routing.Duration, titleOnly).Count >= 3);
-            ranked = RankCandidates(hits, routing.Title!, routing.Duration, titleOnly);
+            // Ranked once, on the whole search: slskd hands over a search's answers only when it
+            // ends, so there is nothing to stop early on.
+            hits = await _slskd.SearchAsync(query.Text, profile, cancellationToken);
+            ranked = RankCandidates(hits, routing.Title!, routing.Duration, strict);
             if (ranked.Count > 0) break;
         }
 
-        // Logged here rather than inside RankCandidates, which the search's `enough:` predicate
-        // calls on every batch of peer responses. This is the line that explains a track that
-        // used to download and now does not.
+        // Logged here, once per song, rather than inside RankCandidates. This is the line that
+        // explains a track that used to download and now does not.
         if (_verification.RemembersRejections)
         {
             var denied = hits.Count(h => _rejectedPeers.IsDenied(h.Username, h.Filename));

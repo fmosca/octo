@@ -180,10 +180,11 @@ public abstract class BaseDownloadService : IDownloadService
     
     public Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
         bool triggerAlbumDownload, bool forcePermanent, DownloadSource? sourceOverride,
-        CancellationToken cancellationToken, IReadOnlyList<string>? requestedBy = null) =>
+        CancellationToken cancellationToken, IReadOnlyList<string>? requestedBy = null,
+        bool upgradeSearch = false) =>
         DownloadSongInternalAsync(externalProvider, externalId, triggerAlbumDownload,
             cancellationToken, forcePermanent, sourceOverride: sourceOverride,
-            requestedBy: requestedBy);
+            requestedBy: requestedBy, upgradeSearch: upgradeSearch);
 
     public Task<bool> DownloadAlbumWithSourceAsync(string externalProvider, string albumExternalId,
         DownloadSource source, bool suppressSummary, CancellationToken cancellationToken = default,
@@ -271,7 +272,7 @@ public abstract class BaseDownloadService : IDownloadService
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Local file path where the track was saved</returns>
     protected abstract Task<string> DownloadTrackAsync(string trackId, Song song, bool suppressNotify,
-        DownloadSource? sourceOverride, CancellationToken cancellationToken);
+        DownloadSource? sourceOverride, bool upgradeSearch, CancellationToken cancellationToken);
 
     /// <summary>Record a completed download in the fetched-songs log. Best-effort:
     /// format + source are derived from the file extension (flac -> Soulseek/lossless,
@@ -387,7 +388,7 @@ public abstract class BaseDownloadService : IDownloadService
         bool triggerAlbumDownload, CancellationToken cancellationToken = default,
         bool forcePermanent = false, bool suppressNotify = false,
         DownloadSource? sourceOverride = null, IReadOnlyList<string>? requestedBy = null,
-        AlbumTagContext? albumContext = null)
+        AlbumTagContext? albumContext = null, bool upgradeSearch = false)
     {
         if (externalProvider != ProviderName)
         {
@@ -531,7 +532,7 @@ public abstract class BaseDownloadService : IDownloadService
             var requested = new RequestedIdentity(song.Artist, song.Title, song.Album ?? "", song.Track);
 
             var landedPath = await DownloadTrackAsync(
-                externalId, song, silence, sourceOverride, cancellationToken);
+                externalId, song, silence, sourceOverride, upgradeSearch, cancellationToken);
             EnsureOnDisk(landedPath);
             song.LocalPath = landedPath;
             Track(t => t.Stage(externalProvider, externalId, AcquisitionState.Importing));

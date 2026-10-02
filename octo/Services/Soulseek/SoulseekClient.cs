@@ -175,109 +175,189 @@ public class SoulseekClient
     }
 
     /// <summary>
-    /// Initiates a search and returns as soon as there is an answer, rather than
-    /// always sitting out a fixed wait.
+    /// Runs one Soulseek search through slskd and returns every file it found.
     ///
-    /// Three things can end the wait, whichever comes first:
-    ///   1. <paramref name="enough"/> says the hits so far are already worth acting on,
-    ///   2. slskd reports the search finished, so nothing more is coming,
-    ///   3. SearchWaitSeconds elapses, which is a ceiling rather than a duration.
+    /// slskd keeps a running search's responses in memory and saves them only when the search
+    /// ends (SearchService.cs, slskd 0.26.0), so /responses is empty until then and there is
+    /// nothing to act on early. Octo reads the search's state until slskd ends it, then reads
+    /// the responses once. A search still running at the profile's ceiling is cancelled, not
+    /// abandoned: a cancelled search still saves what it gathered. Octo used to read nothing at
+    /// the ceiling and delete the search, which returned zero hits and left the search running
+    /// in slskd, because DELETE removes only the record.
     ///
-    /// This matters in both directions. Peer responses arrive in a burst around the
-    /// 20s mark, so a fixed wait either cuts the search off before its results exist
-    /// or idles long after they have arrived; and a search that comes back empty
-    /// should fall through to the fallback source immediately instead of making the
-    /// user wait out a timer for an answer that is already known.
+    /// A caller who gives up still gets an OperationCanceledException, as before, so a cancelled
+    /// acquisition is not mistaken for "not on Soulseek"; the slskd search is cancelled behind it.
     /// </summary>
-    /// <param name="enough">
-    /// Decides whether the hits gathered so far are worth committing to. The client
-    /// cannot judge this itself: "usable" means the right format, size and title
-    /// match, which only the caller's ranking knows. Null means wait for completion
-    /// or the ceiling.
-    /// </param>
-    public async Task<List<SoulseekFileHit>> SearchAsync(
-        string query,
-        int limit,
-        CancellationToken ct = default,
-        Func<IReadOnlyList<SoulseekFileHit>, bool>? enough = null)
+    public async Task<List<SoulseekFileHit>> SearchAsync(string query, SearchProfile profile, CancellationToken ct = default)
     {
         var searchId = Guid.NewGuid().ToString();
-        var payload = JsonSerializer.Serialize(new
+        if (!await StartSearchAsync(searchId, query, profile, ct)) return [];
+
+        var began = Clock();
+        var ended = false;
+        try
+        {
+            var status = await WaitForEndAsync(searchId, began.AddSeconds(profile.CeilingSeconds), ct);
+            string reason;
+            if (status is { Ended: true })
+            {
+                reason = "finished";
+            }
+            else
+            {
+                await CancelSearchAsync(searchId);
+                status = await WaitForEndAsync(searchId, Clock() + CancelGrace, ct) ?? status;
+                reason = status is { Ended: true } ? "ceiling, cancelled" : "ceiling, cancel not confirmed";
+            }
+            ended = status is { Ended: true };
+
+            // Read even when the cancel was not confirmed: slskd may have finished since the last
+            // look, and one request is cheap next to the wait already spent.
+            var hits = await ReadResponsesAsync(searchId, ct);
+            _logger.LogInformation(
+                "Soulseek search '{Query}' ({Profile}): {Count} hits after {Elapsed:F1}s ({Reason}; slskd {State}, {Responses} responses)",
+                query, profile.Name, hits.Count, (Clock() - began).TotalSeconds, reason,
+                status?.State ?? "unknown", status?.ResponseCount ?? 0);
+            return hits;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("Soulseek search '{Query}' ({Profile}): given up after {Elapsed:F1}s; cancelling it in slskd",
+                query, profile.Name, (Clock() - began).TotalSeconds);
+            throw;
+        }
+        finally
+        {
+            // In the background, so nobody waits on housekeeping.
+            LastSearchCleanup = Task.Run(() => CleanUpSearchAsync(searchId, ended));
+        }
+    }
+
+    internal static string SearchPayload(string searchId, string query, SearchProfile profile) =>
+        JsonSerializer.Serialize(new
         {
             id = searchId,
             searchText = query,
-            fileLimit = Math.Max(limit * 5, 50),
-            filterResponses = true
+            // Milliseconds, whatever slskd's own API doc says: it is passed to Soulseek.NET unchanged.
+            searchTimeout = profile.SearchTimeoutMs,
+            responseLimit = profile.ResponseLimit,
+            fileLimit = profile.FileLimit,
+            filterResponses = true,
         });
 
-        try
+    private async Task<bool> StartSearchAsync(string searchId, string query, SearchProfile profile, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
         {
-            using var startResp = await SendAsync(
-                HttpMethod.Post,
-                $"{Base}/api/v0/searches",
-                new StringContent(payload, Encoding.UTF8, "application/json"),
-                ct);
-            startResp.EnsureSuccessStatusCode();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning("Soulseek search start failed: {Msg}", ex.Message);
-            return new List<SoulseekFileHit>();
-        }
-
-        var hits = new List<SoulseekFileHit>();
-        var ceiling = DateTime.UtcNow.AddSeconds(_settings.SearchWaitSeconds);
-        var started = DateTime.UtcNow;
-        var pollIntervalMs = 1000;
-        string stopReason = "ceiling";
-
-        while (DateTime.UtcNow < ceiling && !ct.IsCancellationRequested)
-        {
-            await Task.Delay(pollIntervalMs, ct);
             try
             {
-                using var resp = await SendAsync(
-                    HttpMethod.Get,
-                    $"{Base}/api/v0/searches/{searchId}/responses",
-                    null,
-                    ct);
-                if (!resp.IsSuccessStatusCode) continue;
-
-                var json = await resp.Content.ReadAsStringAsync(ct);
-                hits = ParseResponses(json);
-
-                if (hits.Count >= limit) { stopReason = "hit limit"; break; }
-
-                // Good enough to act on: stop waiting and go download it.
-                if (enough != null && enough(hits)) { stopReason = "found what we needed"; break; }
-
-                // Nothing more is coming. Returning now means an empty search falls
-                // through to the fallback source immediately instead of idling out
-                // the ceiling for an answer that is already settled.
-                if (await IsSearchFinishedAsync(searchId, ct))
+                using var resp = await SendAsync(HttpMethod.Post, $"{Base}/api/v0/searches",
+                    new StringContent(SearchPayload(searchId, query, profile), Encoding.UTF8, "application/json"), ct);
+                // slskd starts one search at a time and refuses a second arriving in the same
+                // moment. Octo never starts two itself, so this is another client's search, and a
+                // start takes milliseconds: one short wait is enough.
+                if (resp.StatusCode == System.Net.HttpStatusCode.TooManyRequests && attempt == 1)
                 {
-                    stopReason = "search finished";
-                    break;
+                    await Task.Delay(SearchStartRetryDelay, ct);
+                    continue;
                 }
+                resp.EnsureSuccessStatusCode();
+                return true;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                _logger.LogDebug("Poll failed (transient): {Msg}", ex.Message);
+                _logger.LogWarning("Soulseek search start failed: {Msg}", ex.Message);
+                return false;
             }
         }
+    }
 
-        _logger.LogInformation(
-            "Soulseek search '{Query}': {Count} hits after {Elapsed:F1}s ({Reason})",
-            query, hits.Count, (DateTime.UtcNow - started).TotalSeconds, stopReason);
-
-        // Fire-and-forget cleanup so we don't accumulate completed searches
-        _ = Task.Run(async () =>
+    /// <summary>Reads the search's state until it has ended or <paramref name="until"/> passes.
+    /// Returns the last state read, or null when none could be read.</summary>
+    private async Task<SearchStatus?> WaitForEndAsync(string searchId, DateTime until, CancellationToken ct)
+    {
+        SearchStatus? last = null;
+        while (Clock() < until)
         {
-            try { using var _ = await SendAsync(HttpMethod.Delete, $"{Base}/api/v0/searches/{searchId}", null, CancellationToken.None); }
-            catch { /* best effort */ }
-        });
+            await Task.Delay(SearchPollInterval, ct);
+            last = await ReadSearchStatusAsync(searchId, ct) ?? last;
+            if (last is { Ended: true }) break;
+        }
+        return last;
+    }
 
-        return hits;
+    internal sealed record SearchStatus(string State, bool Ended, int ResponseCount);
+
+    private async Task<SearchStatus?> ReadSearchStatusAsync(string searchId, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/searches/{searchId}", null, ct);
+            return resp.IsSuccessStatusCode ? ParseSearchStatus(await resp.Content.ReadAsStringAsync(ct)) : null;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("Soulseek search state read failed (transient): {Msg}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// One read of slskd's search record. Ended means endedAt is set, not that the state says
+    /// Completed: slskd saves Completed the moment the network search stops, and the responses a
+    /// moment later in the same save that sets endedAt. Reading on Completed alone can find the
+    /// empty list from in between.
+    /// </summary>
+    internal static SearchStatus? ParseSearchStatus(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        var state = root.TryGetProperty("state", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() ?? "" : "";
+        var ended = root.TryGetProperty("endedAt", out var e) && e.ValueKind == JsonValueKind.String;
+        var responses = root.TryGetProperty("responseCount", out var r) && r.ValueKind == JsonValueKind.Number
+            && r.TryGetInt32(out var n) ? n : 0;
+        return new SearchStatus(state, ended, responses);
+    }
+
+    private async Task CancelSearchAsync(string searchId)
+    {
+        try { using var _ = await SendAsync(HttpMethod.Put, $"{Base}/api/v0/searches/{searchId}", null, CancellationToken.None); }
+        catch (Exception ex) { _logger.LogDebug("Soulseek search cancel failed: {Msg}", ex.Message); }
+    }
+
+    private async Task<List<SoulseekFileHit>> ReadResponsesAsync(string searchId, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/searches/{searchId}/responses", null, ct);
+            return resp.IsSuccessStatusCode ? ParseResponses(await resp.Content.ReadAsStringAsync(ct)) : [];
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning("Soulseek search responses could not be read: {Msg}", ex.Message);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Removes the search from slskd. One that has not ended is cancelled first: DELETE removes
+    /// only the record, and the search would carry on asking the network for nobody. The short
+    /// wait after the cancel lets slskd save the ended search before its record goes, so that
+    /// save does not fail in slskd's log.
+    /// </summary>
+    private async Task CleanUpSearchAsync(string searchId, bool ended)
+    {
+        try
+        {
+            if (!ended)
+            {
+                await CancelSearchAsync(searchId);
+                await WaitForEndAsync(searchId, Clock() + CancelGrace, CancellationToken.None);
+            }
+            using var _ = await SendAsync(HttpMethod.Delete, $"{Base}/api/v0/searches/{searchId}", null, CancellationToken.None);
+        }
+        catch (Exception ex) { _logger.LogDebug("Soulseek search cleanup failed: {Msg}", ex.Message); }
     }
 
     private List<SoulseekFileHit> ParseResponses(string json)
@@ -347,42 +427,6 @@ public class SoulseekClient
             _logger.LogWarning("Failed to parse Soulseek responses: {Msg}", ex.Message);
         }
         return hits;
-    }
-
-    /// <summary>
-    /// <summary>
-    /// True once slskd says the search has stopped gathering responses.
-    ///
-    /// Deliberately reads the STATUS object rather than inferring completion from
-    /// the responses endpoint, and deliberately is not used to decide whether
-    /// results exist: status reports a responseCount well before /responses will
-    /// return the files, so trusting it for anything except "is it over" makes a
-    /// too-short wait look perfectly healthy.
-    ///
-    /// Any failure returns false, so an unreadable status simply means the caller
-    /// keeps polling until the ceiling rather than giving up early.
-    /// </summary>
-    private async Task<bool> IsSearchFinishedAsync(string searchId, CancellationToken ct)
-    {
-        try
-        {
-            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/searches/{searchId}", null, ct);
-            if (!resp.IsSuccessStatusCode) return false;
-
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-            if (!doc.RootElement.TryGetProperty("state", out var stateEl)) return false;
-
-            // slskd reports compound states such as "Completed, TimedOut" or
-            // "Completed, ResponseLimitReached"; all of them mean it is done.
-            var state = stateEl.GetString() ?? "";
-            return state.Contains("Completed", StringComparison.OrdinalIgnoreCase)
-                || state.Contains("Cancelled", StringComparison.OrdinalIgnoreCase)
-                || state.Contains("Errored", StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     /// <summary>
@@ -547,8 +591,21 @@ public class SoulseekClient
     /// <summary>How often a transfer is polled. Only tests shorten it.</summary>
     internal TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(1500);
 
-    /// <summary>The time a transfer's wait goes by. Only tests replace it.</summary>
+    /// <summary>The time a transfer's or a search's wait goes by. Only tests replace it.</summary>
     internal Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>How often a running search's state is read. Only tests shorten it.</summary>
+    internal TimeSpan SearchPollInterval { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long a cancelled search is given to end and save its responses. slskd takes
+    /// well under a second; the rest is slack for a busy disk.</summary>
+    internal static readonly TimeSpan CancelGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>The wait before the one retry of a start slskd refused with 429. Only tests shorten it.</summary>
+    internal TimeSpan SearchStartRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>The latest search's background cleanup. Only tests await it.</summary>
+    internal Task LastSearchCleanup { get; private set; } = Task.CompletedTask;
 
     /// <summary>
     /// Cancels a download in slskd and removes it from its list, so it can never land.

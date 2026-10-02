@@ -560,7 +560,7 @@ public sealed class DownloadPlacementTests : IDisposable
         protected override string ProviderName => "test";
         public override Task<bool> IsAvailableAsync() => Task.FromResult(true);
         protected override Task<string> DownloadTrackAsync(string trackId, Song song, bool suppressNotify,
-            DownloadSource? sourceOverride, CancellationToken cancellationToken) => throw new NotSupportedException();
+            DownloadSource? sourceOverride, bool upgradeSearch, CancellationToken cancellationToken) => throw new NotSupportedException();
         protected override string? ExtractExternalIdFromAlbumId(string albumId) => null;
 
         public Task<Placement> Place(Song song, RequestedIdentity requested, string path) =>

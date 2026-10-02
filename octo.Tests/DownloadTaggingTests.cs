@@ -105,7 +105,7 @@ public sealed class DownloadTaggingTests : IDisposable
         protected override string? ExtractExternalIdFromAlbumId(string albumId) => null;
 
         protected override Task<string> DownloadTrackAsync(string trackId, Song song, bool suppressNotify,
-            DownloadSource? sourceOverride, CancellationToken cancellationToken) => Task.FromResult(Landing(song));
+            DownloadSource? sourceOverride, bool upgradeSearch, CancellationToken cancellationToken) => Task.FromResult(Landing(song));
 
         public Task<string> Download(string id) => DownloadSongAsync("test", id);
 

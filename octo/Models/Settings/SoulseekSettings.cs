@@ -35,16 +35,22 @@ public class SoulseekSettings
     /// responseCount well before /responses will hand the files over, so a status
     /// poll makes short waits look adequate when they are not.
     ///
-    /// This is a CEILING, not a duration: the search returns as soon as it has
-    /// enough usable candidates to choose from, or as soon as slskd says the search
-    /// has finished. A short value is therefore still a hard cap on finding
-    /// anything, while a generous one costs nothing when results arrive early or
-    /// when the search comes back empty.
+    /// This is a CEILING, not a duration. slskd ends most searches itself, after 15 s
+    /// with no new answer or at the response or file limit, and Octo reads the answers
+    /// then. A search still running at the ceiling is cancelled, which makes slskd hand
+    /// over everything it gathered, so a long search costs time but never its results.
     ///
     /// Star-triggered downloads are fire-and-forget, so the wait costs the user
     /// nothing; it only delays the file landing.
     /// </summary>
     public int SearchWaitSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// The search ceiling for Better quality and the weekly upgrade. Longer than SearchWaitSeconds
+    /// because these searches exist for songs the quick search did not find.
+    /// Environment variable: SLSKD_UPGRADE_SEARCH_WAIT_SECONDS
+    /// </summary>
+    public int UpgradeSearchWaitSeconds { get; set; } = 90;
 
     /// <summary>
     /// Minimum file size in bytes to consider a search hit a real lossless file.
@@ -193,6 +199,7 @@ public class SoulseekSettings
     public int EffectiveFingerprintTimeoutSeconds => Math.Clamp(FingerprintTimeoutSeconds, 5, 300);
     public int EffectiveAcoustIdTimeoutSeconds => Math.Clamp(AcoustIdTimeoutSeconds, 2, 120);
     public int EffectiveTranscodeCheckTimeoutSeconds => Math.Clamp(TranscodeCheckTimeoutSeconds, 5, 300);
+    public int EffectiveUpgradeSearchWaitSeconds => Math.Clamp(UpgradeSearchWaitSeconds, 30, 300);
 
     /// <summary>
     /// Below 50 an AcoustID score is noise and acting on it manufactures false rejections;
