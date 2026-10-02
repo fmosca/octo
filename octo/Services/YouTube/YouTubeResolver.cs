@@ -159,13 +159,25 @@ public class YouTubeResolver
                 req.Headers.TryAddWithoutValidation("Range", rangeHeader);
             }
             resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-            // Accept 200 (full body) and 206 (partial content). Anything else
-            // means the upstream/shim couldn't satisfy the request.
-            if ((int)resp.StatusCode != 200 && (int)resp.StatusCode != 206)
+            // Accept 200 (full body) and 206 (partial content). A 416 from the
+            // shim is a real unsatisfiable-range answer and is returned as its
+            // own result so the controller can relay the status + Content-Range
+            // (`bytes */<total>`) to the client — turning it into null would
+            // collapse the probe answer into a 404 and hide the resource size.
+            // Anything else means the upstream/shim couldn't satisfy the request.
+            var shimStatus = (int)resp.StatusCode;
+            if (shimStatus != 200 && shimStatus != 206 && shimStatus != 416)
             {
-                _logger.LogWarning("shim /stream HTTP {Code} for {Vid}", (int)resp.StatusCode, videoId);
+                _logger.LogWarning("shim /stream HTTP {Code} for {Vid}", shimStatus, videoId);
                 resp.Dispose();
                 return null;
+            }
+            if (shimStatus == 416)
+            {
+                var range = resp.Content.Headers.ContentRange?.ToString();
+                var length = resp.Content.Headers.ContentLength;
+                resp.Dispose();
+                return (Stream.Null, "application/json", length, 416, range, null);
             }
             var stream = await resp.Content.ReadAsStreamAsync(ct);
             var contentType = resp.Content.Headers.ContentType?.ToString() ?? "audio/mp4";

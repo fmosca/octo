@@ -814,28 +814,70 @@ def stream():
 
     # Honor the caller's Range against the remuxed body. Every byte we hold
     # is valid MP4 and the moov is at the head, mid-file ranges decode.
+    # Single integer range only (`bytes=N-`, `bytes=N-M`, `bytes=-N`): that is
+    # what AVFoundation probes and players read; a multi-range spec falls
+    # back to the whole body (RFC 9110 allows serving one of the ranges or
+    # the full resource in that case).
+    # The old slice code kept only the start: `bytes=0-1` (AVAsset's standard
+    # two-byte ranges probe) answered with the whole 3 MB body and a
+    # Content-Range claiming `0-<total-1>` for a range that ends at byte 1 —
+    # AVFoundation reads that contradictory reply as garbage, never issues a
+    # follow-up fetch, and the player sits on Loading forever. Honest bounds
+    # per spec are the fix.
     range_hdr = request.headers.get("Range")
     resp_start = 0
+    resp_end = total - 1  # inclusive
+    response_status = 200
     if range_hdr:
         spec = range_hdr.split("=", 1)[1] if "=" in range_hdr else ""
-        first = spec.split(",", 1)[0].strip() if spec else ""
-        start_str = first.split("-", 1)[0]
-        # bytes=N- open-ended and bytes=N-M both start at N; a pure suffix
-        # (-N) or an unsatisfiable spec falls back to the whole body.
-        if start_str.isdigit():
-            resp_start = min(int(start_str), total)
+        first = spec.split(",", 1)[0].strip()
+        if first and "-" in first:
+            start_str, end_str = first.split("-", 1)
+            start_str = start_str.strip()
+            end_str = end_str.strip()
+            if start_str.isdigit():
+                # bytes=N- or bytes=N-M (M inclusive, may run past EOF).
+                resp_start = int(start_str)
+                if end_str.isdigit():
+                    resp_end = min(int(end_str), total - 1)
+                if resp_start >= total or resp_start > resp_end:
+                    # Unsatisfiable: the contract demands 416 with the real
+                    # bounds, not a silent clamp — that is the range Arpeggi's
+                    # probe asks for and what AVFoundation must see to accept
+                    # the resource.
+                    return jsonify(
+                        error="range_not_satisfiable",
+                        size=total,
+                    ), 416, {
+                        "Content-Range": f"bytes */{total}",
+                        "Accept-Ranges": "bytes",
+                        "Cache-Control": "no-store",
+                    }
+            elif end_str.isdigit():
+                # bytes=-N suffix: the final N bytes (N=0 is unsatisfiable).
+                suffix = int(end_str)
+                if suffix == 0:
+                    return jsonify(error="range_not_satisfiable", size=total), 416, {
+                        "Content-Range": f"bytes */{total}",
+                        "Accept-Ranges": "bytes",
+                        "Cache-Control": "no-store",
+                    }
+                resp_start = max(total - suffix, 0)
+            else:
+                # Malformed: serve the whole body.
+                resp_start, resp_end = 0, total - 1
+        response_status = 206
 
-    body = body[resp_start:]
-    available = len(body)
-    response_status = 206 if range_hdr else 200
+    resp_end = min(resp_end, total - 1)
+    available = resp_end - resp_start + 1 if total else 0
 
     def generator():
         ttfb = (time.monotonic() - t_enter) * 1000.0
-        log.info("stream %s ttfb_ms=%.0f bytes=%d remuxed=yes",
-                 video_id, ttfb, available)
+        log.info("stream %s ttfb_ms=%.0f bytes=%d range=%s remuxed=yes",
+                 video_id, ttfb, available, range_hdr or "none")
         # Chunked iteration keeps the yield path flat-memory (the remuxed
         # body is already resident as `body`, so carving it is free).
-        for i in range(0, available, 64 * 1024):
+        for i in range(resp_start, resp_end + 1, 64 * 1024):
             yield body[i:i + 64 * 1024]
 
     # Content-Length is the sliced length actually sent, and Content-Range
@@ -849,14 +891,7 @@ def stream():
         "Content-Length": str(available),
     }
     if response_status == 206:
-        rng = request.headers.get("Range", "")
-        spec = rng.split("=", 1)[1] if "=" in rng else ""
-        first = spec.split(",", 1)[0] if spec else ""
-        start_str = first.split("-", 1)[0] if first else ""
-        start = int(start_str) if start_str.isdigit() else 0
-        # The remuxed body always represents the full file, so a requested
-        # end byte is honored only up to the last byte we have.
-        headers["Content-Range"] = f"bytes {start}-{total - 1}/{total}"
+        headers["Content-Range"] = f"bytes {resp_start}-{resp_end}/{total}"
     return Response(generator(), headers=headers, status=response_status)
 
 

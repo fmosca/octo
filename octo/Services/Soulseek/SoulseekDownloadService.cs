@@ -1149,8 +1149,8 @@ public class SoulseekDownloadService : BaseDownloadService
     private sealed class OwningStream : Stream
     {
         private readonly Stream _inner;
-        private readonly IDisposable _owner;
-        public OwningStream(Stream inner, IDisposable owner) { _inner = inner; _owner = owner; }
+        private readonly IDisposable? _owner;
+        public OwningStream(Stream inner, IDisposable? owner) { _inner = inner; _owner = owner; }
         public override bool CanRead => _inner.CanRead;
         public override bool CanSeek => _inner.CanSeek;
         public override bool CanWrite => _inner.CanWrite;
@@ -1168,14 +1168,14 @@ public class SoulseekDownloadService : BaseDownloadService
             if (disposing)
             {
                 try { _inner.Dispose(); } catch { }
-                try { _owner.Dispose(); } catch { }
+                try { _owner?.Dispose(); } catch { }
             }
             base.Dispose(disposing);
         }
         public override async ValueTask DisposeAsync()
         {
             try { await _inner.DisposeAsync(); } catch { }
-            try { _owner.Dispose(); } catch { }
+            try { _owner?.Dispose(); } catch { }
             await base.DisposeAsync();
         }
     }
