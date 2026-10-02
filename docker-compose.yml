@@ -156,6 +156,10 @@ services:
       # settle. Answer with Keep (5 stars) or an action; removing a track answers too.
       LibraryActions__NoticePrefix: ${LIBRARY_ACTIONS_NOTICE_PREFIX:-▸ }
       LibraryActions__ReviewEnabled: ${LIBRARY_ACTIONS_REVIEW:-false}
+      # Also check songs already in the library, this many an hour (0 is off). Only while nothing
+      # downloads, only the library keeper is asked, and at most 50 such questions wait at once.
+      LibraryActions__ReviewSweepPerHour: ${LIBRARY_ACTIONS_REVIEW_SWEEP_PER_HOUR:-0}
+      LibraryActions__ReviewSweepOctoDownloads: ${LIBRARY_ACTIONS_REVIEW_SWEEP_OCTO_DOWNLOADS:-false}
       # Recordings the library holds more than once, side by side, the copy worth keeping first.
       # Octo only points them out; nothing is removed unless you remove it.
       LibraryActions__DuplicatesEnabled: ${LIBRARY_ACTIONS_DUPLICATES:-false}

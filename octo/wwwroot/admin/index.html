@@ -1736,6 +1736,19 @@
               <div class="set-info"><div class="set-info-t">Review playlist</div><div class="set-info-d">Answer by adding the song to an action playlist, by Keep, or by taking it out of Review.</div><div class="set-info-more"><p>Octo asks when AcoustID had never heard the recording, was not sure of it, or heard a different one in a YouTube download. Each allowed user gets a playlist of their own.</p><p>Keep is its playlist, or five stars. Taking a song out of Review means &ldquo;fine, stop asking&rdquo;. Nothing in Review is ever acted on by itself. Takes effect at the next check, with no restart.</p></div></div>
               <label class="switch"><input type="checkbox" name="LibraryActions.ReviewEnabled" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Check the library <span class="set-opt">songs an hour</span></div><div class="set-info-d">Also asks about songs that were already there. 0 is off.</div><div class="set-info-more"><p>Only while nothing is downloading, and only the library keeper is asked: the Navidrome admin if they are on the allowlist, otherwise its first name. It stops while 50 of these questions wait for an answer.</p><p>Besides what Review already asks, it asks when AcoustID is sure a song is something else, or when a song runs much longer or shorter than the recording. Nothing is ever acted on by itself.</p></div></div>
+              <input class="set-input" name="LibraryActions.ReviewSweepPerHour" type="number" min="0" max="360" data-number="true" />
+            </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Include Octo's own downloads</div><div class="set-info-d">They were checked when they arrived, if verification was on then.</div></div>
+              <label class="switch"><input type="checkbox" name="LibraryActions.ReviewSweepOctoDownloads" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Library check</div><div class="set-info-d" id="review-sweep-status">Not loaded yet.</div></div>
+              <button class="btn btn-ghost" type="button" id="review-sweep-toggle"><span>Pause</span></button>
+              <button class="btn btn-ghost" type="button" id="review-sweep-reset"><svg class="icon" aria-hidden="true"><use href="#i-arrow-counter-clockwise"/></svg><span>Start over</span></button>
+            </div>
             <details class="set-more">
               <summary>Playlist name and size</summary>
               <div class="set-row stack">

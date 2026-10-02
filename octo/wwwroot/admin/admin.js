@@ -1800,7 +1800,7 @@ document.getElementById('notices-refresh')?.addEventListener('click', () =>
   showSessionTable(document.getElementById('notices-list'), '/api/admin/notices',
     ['Track', 'Why', 'Who', 'Answer'], entry => `
             <span class="key">${esc(entry.artist)} - ${esc(entry.title)}</span>
-            <span class="value">${esc(noticeKinds[entry.kind] || entry.kind)}: ${esc(entry.reason)}</span>
+            <span class="value">${esc(noticeKinds[entry.kind] || entry.kind)}: ${esc(entry.reason)}${entry.origin === 'LibrarySweep' ? ' (from the library)' : ''}</span>
             <span class="value">${esc(entry.username)}</span>
             <span class="value">${esc(noticeStates[entry.state] || entry.state)}${entry.submitted ? ', sent to AcoustID' : ''}</span>`,
     body => {
@@ -1825,6 +1825,59 @@ document.getElementById('duplicates-scan')?.addEventListener('click', async (eve
     button.disabled = false;
   }
 });
+
+// ---- Review: the library check (#72) ----
+const reviewSweepStates = { Off: 'Off', Paused: 'Paused', Waiting: 'Waiting', Running: 'Checking', Done: 'Up to date' };
+
+async function loadReviewSweep() {
+  const status = document.getElementById('review-sweep-status');
+  if (!status) return;
+  try {
+    const response = await api('/api/admin/review-sweep');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const s = await response.json();
+    const parts = [`${reviewSweepStates[s.state] || s.state}.`];
+    if (s.total > 0) parts.push(`Checked ${s.position} of ${s.total} songs (pass ${s.pass}).`);
+    parts.push(`Found ${s.found}, ${s.open} waiting for an answer.`);
+    if (s.undecodable > 0) parts.push(`${s.undecodable} could not be decoded.`);
+    if (s.keeper) parts.push(`Asking ${s.keeper}.`);
+    if (s.reason) parts.push(s.reason);
+    status.textContent = parts.join(' ');
+    const toggle = document.getElementById('review-sweep-toggle');
+    toggle.dataset.paused = s.paused ? 'true' : 'false';
+    toggle.querySelector('span').textContent = s.paused ? 'Start' : 'Pause';
+    toggle.disabled = s.perHour === 0;
+  } catch (error) {
+    status.textContent = `Could not read the library check: ${error.message}`;
+  }
+}
+
+async function reviewSweepPost(button, path, message) {
+  button.disabled = true;
+  try {
+    const response = await api(path, { method: 'POST' });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    note(button, message);
+  } catch (error) {
+    note(button, error.message, 'error');
+  } finally {
+    button.disabled = false;
+    await loadReviewSweep();
+  }
+}
+
+document.getElementById('review-sweep-toggle')?.addEventListener('click', (event) => {
+  const button = event.currentTarget;
+  const start = button.dataset.paused === 'true';
+  reviewSweepPost(button, `/api/admin/review-sweep/${start ? 'start' : 'pause'}`, start ? 'Carrying on.' : 'Paused.');
+});
+document.getElementById('review-sweep-reset')?.addEventListener('click', (event) => {
+  if (!confirm('Check every song again from the start? Songs already asked about are not asked again.')) return;
+  reviewSweepPost(event.currentTarget, '/api/admin/review-sweep/reset', 'Starting over.');
+});
+loadReviewSweep();
+setInterval(() => { if (document.visibilityState === 'visible') loadReviewSweep(); }, 30000);
 
 const upgradeOutcomes = { Applied: 'upgraded', Failed: 'no better copy found', Rehearsed: 'dry run',
   Skipped: 'skipped', Unresolved: 'file not found', Nothing: 'nothing left to try' };

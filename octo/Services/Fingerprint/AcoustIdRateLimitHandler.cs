@@ -32,7 +32,11 @@ public sealed class AcoustIdRateLimitHandler : DelegatingHandler
             // "AcoustID had no verdict" path, which keeps the file and remembers nothing.
             // Back-pressure can make verification less effective; it must never make it
             // reject a good download.
-            _logger.LogWarning("acoustid rate limiter rejected a request to {Url}", request.RequestUri);
+            // The background lane is refused by design while a download waits; that is not news.
+            if (AcoustIdRateLimiter.InBackground)
+                _logger.LogDebug("acoustid background request deferred: {Url}", request.RequestUri);
+            else
+                _logger.LogWarning("acoustid rate limiter rejected a request to {Url}", request.RequestUri);
             return new HttpResponseMessage(HttpStatusCode.TooManyRequests) { RequestMessage = request };
         }
 

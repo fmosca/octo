@@ -162,7 +162,11 @@ public sealed class AcoustIdClient
             using var response = await client.PostAsync("v2/lookup", new FormUrlEncodedContent(form), cts.Token);
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("acoustid lookup answered {Status}", (int)response.StatusCode);
+                // The sweep yielding to a download, not AcoustID failing.
+                if (AcoustIdRateLimiter.InBackground && response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                    _logger.LogDebug("acoustid background lookup deferred");
+                else
+                    _logger.LogWarning("acoustid lookup answered {Status}", (int)response.StatusCode);
                 return null;
             }
 

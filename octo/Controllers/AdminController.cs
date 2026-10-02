@@ -69,6 +69,7 @@ public class AdminController : ControllerBase
     private readonly Octo.Services.Common.AcquisitionTracker? _acquisitions;
     private readonly LastFmScrobbleService? _lastFmScrobbles;
     private readonly Octo.Services.Library.QualityUpgradeWorker? _qualityUpgrade;
+    private readonly Octo.Services.Library.LibraryReviewSweepWorker? _reviewSweep;
 
     public AdminController(
         SettingsFileWriter settings,
@@ -111,8 +112,10 @@ public class AdminController : ControllerBase
         IOptionsMonitor<GeneratedPlaylistSettings>? generatedOpts = null,
         Octo.Services.Common.AcquisitionTracker? acquisitions = null,
         LastFmScrobbleService? lastFmScrobbles = null,
-        Octo.Services.Library.QualityUpgradeWorker? qualityUpgrade = null)
+        Octo.Services.Library.QualityUpgradeWorker? qualityUpgrade = null,
+        Octo.Services.Library.LibraryReviewSweepWorker? reviewSweep = null)
     {
+        _reviewSweep = reviewSweep;
         _qualityUpgrade = qualityUpgrade;
         _lastFmScrobbles = lastFmScrobbles;
         _acquisitions = acquisitions;
@@ -783,6 +786,8 @@ public class AdminController : ControllerBase
                 ["NoticePrefix"] = actions.NoticePrefix ?? "",
                 ["ReviewEnabled"] = actions.ReviewEnabled,
                 ["ReviewPlaylistName"] = actions.ReviewPlaylistName ?? "",
+                ["ReviewSweepPerHour"] = actions.ReviewSweepPerHour,
+                ["ReviewSweepOctoDownloads"] = actions.ReviewSweepOctoDownloads,
                 ["DuplicatesEnabled"] = actions.DuplicatesEnabled,
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
@@ -1130,6 +1135,7 @@ public class AdminController : ControllerBase
                 entry.Album,
                 state = entry.State.ToString(),
                 entry.Reason,
+                origin = entry.Origin.ToString(),
                 entry.Submitted,
                 entry.CreatedUtc,
                 entry.ResolvedUtc,
@@ -1152,6 +1158,38 @@ public class AdminController : ControllerBase
             return BadRequest(new { error = "Octo needs a Navidrome admin credential to read the whole library." });
         _duplicates.RequestScan();
         return Accepted(new { ok = true, queued = true });
+    }
+
+    /// <summary>The library Review sweep (#72): how far it has got and why it is waiting. Counts only.</summary>
+    [HttpGet("review-sweep")]
+    public IActionResult GetReviewSweep() => _reviewSweep is null
+        ? NotFound(new { error = "The library check is not available." }) : Ok(_reviewSweep.Status());
+
+    [HttpPost("review-sweep/start")]
+    public IActionResult StartReviewSweep()
+    {
+        var settings = _libraryActionOpts.CurrentValue;
+        if (_reviewSweep is null || !settings.Enabled || !settings.ReviewEnabled || settings.EffectiveReviewSweepPerHour == 0)
+            return BadRequest(new { error = "Turn on library actions and Review, and set how many songs an hour to check, first." });
+        _reviewSweep.SetPaused(false);
+        return Accepted(new { ok = true });
+    }
+
+    [HttpPost("review-sweep/pause")]
+    public IActionResult PauseReviewSweep()
+    {
+        if (_reviewSweep is null) return NotFound(new { error = "The library check is not available." });
+        _reviewSweep.SetPaused(true);
+        return Accepted(new { ok = true });
+    }
+
+    /// <summary>Check every song again from the start. Songs already asked about stay answered.</summary>
+    [HttpPost("review-sweep/reset")]
+    public IActionResult ResetReviewSweep()
+    {
+        if (_reviewSweep is null) return NotFound(new { error = "The library check is not available." });
+        _reviewSweep.Reset();
+        return Accepted(new { ok = true });
     }
 
     /// <summary>The weekly upgrade's last run and next one. Times and an outcome only, no file or
@@ -1530,6 +1568,8 @@ public class AdminController : ControllerBase
                 ["NoticePrefix"] = actions.NoticePrefix ?? "",
                 ["ReviewEnabled"] = actions.ReviewEnabled,
                 ["ReviewPlaylistName"] = actions.ReviewPlaylistName ?? "",
+                ["ReviewSweepPerHour"] = actions.ReviewSweepPerHour,
+                ["ReviewSweepOctoDownloads"] = actions.ReviewSweepOctoDownloads,
                 ["DuplicatesEnabled"] = actions.DuplicatesEnabled,
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
@@ -1741,6 +1781,7 @@ public class AdminController : ControllerBase
             "LibraryActions:RatingsScope", "LibraryActions:DuplicatesEnabled",
             "LibraryActions:DuplicatesPlaylistName", "LibraryActions:DuplicatesScanHours",
             "LibraryActions:UpgradePerWeek",
+            "LibraryActions:ReviewSweepPerHour", "LibraryActions:ReviewSweepOctoDownloads",
             "Soulseek:SubmitConfirmedFingerprints", "Soulseek:AcoustIdUserApiKey",
             "Genre:Enabled", "Genre:MaxGenres", "Genre:OnEmpty", "Genre:Fallback",
             "Genre:UnknownLabel", "Genre:Mappings", "Genre:Blocklist",

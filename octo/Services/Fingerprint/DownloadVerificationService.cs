@@ -30,8 +30,11 @@ public enum VerificationVerdict
 }
 
 /// <summary>
-/// Why a verdict was Inconclusive. Only the last three are questions a person can settle by
-/// listening, so only those reach the Review playlist (#47). The others are Octo not asking.
+/// Why a verdict was Inconclusive, or, for the last two, why the library sweep asks about a file
+/// whose verdict was not. NoEntry, BelowThreshold and SourceDisagreed are questions a person can
+/// settle by listening, so only those reach the Review playlist from a download (#47). The sweep
+/// also asks about a confident answer, because it never acts on one (#72). Appended, never
+/// inserted: the notice queue stores these by name, but order is still what the code reads.
 /// </summary>
 public enum InconclusiveReason
 {
@@ -42,6 +45,8 @@ public enum InconclusiveReason
     NoEntry,
     BelowThreshold,
     SourceDisagreed,
+    SoundsLikeAnother,
+    LengthOff,
 }
 
 public sealed record VerificationResult

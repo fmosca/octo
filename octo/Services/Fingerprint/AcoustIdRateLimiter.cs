@@ -7,11 +7,13 @@ namespace Octo.Services.Fingerprint;
 ///
 /// The same trap as Deezer, and it bites harder here: over-budget is not reliably a 429,
 /// it is an error envelope in a 200 body. That parses as "no match", and this feature reads
-/// "no match" as "accept the file" - so exceeding the budget would silently turn
+/// "no match" as "accept the file", so exceeding the budget would silently turn
 /// verification OFF rather than merely slow it down.
 ///
-/// One lane, unlike Deezer. Every lookup here sits between a finished transfer and a file
-/// joining the library, so there is no background work to yield to.
+/// One budget with a background lane. A download's lookup sits between a finished transfer and
+/// the library and waits in the queue. The library sweep (#72) never waits: it takes a permit
+/// only when one is free and no download is queued (OldestFirst refuses a non-queuing request
+/// while anyone waits), so it can never take a queue slot a download needed.
 /// </summary>
 public sealed class AcoustIdRateLimiter : IDisposable
 {
@@ -20,6 +22,8 @@ public sealed class AcoustIdRateLimiter : IDisposable
     public const string ClientName = "acoustid";
 
     private const int PermitsPerSecond = 3;
+
+    private static readonly AsyncLocal<bool> BackgroundFlow = new();
 
     private readonly SlidingWindowRateLimiter _limiter = new(new SlidingWindowRateLimiterOptions
     {
@@ -35,7 +39,19 @@ public sealed class AcoustIdRateLimiter : IDisposable
         AutoReplenishment = true,
     });
 
-    public ValueTask<RateLimitLease> AcquireAsync(CancellationToken ct) => _limiter.AcquireAsync(1, ct);
+    /// <summary>Lookups started inside <paramref name="work"/> use the background lane.</summary>
+    public static async Task<T> InBackgroundAsync<T>(Func<Task<T>> work)
+    {
+        // Set inside an async method, so the flag ends when it returns and never reaches the caller.
+        BackgroundFlow.Value = true;
+        return await work();
+    }
+
+    internal static bool InBackground => BackgroundFlow.Value;
+
+    public ValueTask<RateLimitLease> AcquireAsync(CancellationToken ct) => BackgroundFlow.Value
+        ? ValueTask.FromResult(_limiter.AttemptAcquire(1))
+        : _limiter.AcquireAsync(1, ct);
 
     public void Dispose() => _limiter.Dispose();
 }

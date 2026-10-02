@@ -404,6 +404,16 @@ reason to rate it is to answer, and `Global` on any track. `Auto`, the default, 
 `NoticeOnly` while either playlist is on and `Global` otherwise, which is how ratings behaved
 before they existed.
 
+`LIBRARY_ACTIONS_REVIEW_SWEEP_PER_HOUR` (0, the default, is off) has Review check music that
+was already in the library too, that many songs an hour, and only while nothing is
+downloading. It asks one person, the library keeper: the Navidrome admin when they are on the
+allowlist, otherwise the first allowed user. Besides the usual questions it asks when AcoustID
+is sure a song is something else, or when a song runs much longer or shorter than the
+recording it matched; those are questions too, never acted on by themselves. It stops while 50
+of its questions wait for an answer, and a Keep on one sends nothing to AcoustID, since its
+tags were never confirmed. Octo's own downloads were checked when they arrived, so they are
+skipped unless `LIBRARY_ACTIONS_REVIEW_SWEEP_OCTO_DOWNLOADS` is on.
+
 `LIBRARY_ACTIONS_DUPLICATES` adds a Duplicates playlist per allowed user: recordings the
 library holds more than once, side by side, the copy worth keeping first (lossless before
 lossy, then the higher bitrate). Two files are copies only when they carry the same

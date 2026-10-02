@@ -244,6 +244,23 @@ builder.Services.AddSingleton(sp => new Octo.Services.Library.QualityUpgradeStor
     sp.GetRequiredService<ILogger<Octo.Services.Library.QualityUpgradeStore>>()));
 builder.Services.AddSingleton<Octo.Services.Library.QualityUpgradeWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.QualityUpgradeWorker>());
+// The library Review sweep (#72): asks about music that was already there, a few songs an hour,
+// only while nothing downloads. Off until LibraryActions:ReviewSweepPerHour is set.
+builder.Services.AddSingleton(sp => new Octo.Services.Library.ReviewSweepStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "review-sweep.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.ReviewSweepStore>>()));
+builder.Services.AddSingleton(sp => new Octo.Services.Library.LibraryReviewSweepWorker(
+    sp.GetRequiredService<Octo.Services.Library.ReviewSweepStore>(),
+    sp.GetRequiredService<Octo.Services.Library.NoticeQueue>(),
+    new Octo.Services.Library.FingerprintSweepVerifier(sp),
+    sp.GetRequiredService<Octo.Services.Common.IAcquisitionActivity>(),
+    sp.GetRequiredService<ILocalLibraryService>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<LibraryActionSettings>>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<SubsonicSettings>>(),
+    // The resolver's root, the same one review actions resolve inside.
+    () => sp.GetRequiredService<Octo.Services.Library.NavidromeSongPathResolver>().MusicRoot(),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.LibraryReviewSweepWorker>>()));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.LibraryReviewSweepWorker>());
 builder.Services.AddHttpClient(Octo.Services.Fingerprint.MusicBrainzClient.ClientName, c =>
 {
     c.BaseAddress = new Uri("https://musicbrainz.org/ws/2/");
