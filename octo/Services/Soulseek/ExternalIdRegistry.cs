@@ -122,6 +122,26 @@ public class ExternalIdRegistry : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Store the loudness of the video that plays this song, for the client to normalise
+    /// with. Looked up by id at write time for the same reason as <see cref="RememberLength"/>:
+    /// a resolve outlives the routing object it started from.
+    /// </summary>
+    /// <returns>True when a value was stored; false for an unknown id or a hit with no
+    /// measurement yet (the shim measures the first time it sees a video, so the first
+    /// resolve of a track legitimately carries none).</returns>
+    public bool RememberGain(string shortId, double? gainDb, double? peakDb)
+    {
+        if (string.IsNullOrEmpty(shortId)
+            || gainDb is not double gain
+            || !_byId.TryGetValue(shortId, out var routing)
+            || routing.Kind != RoutingKind.Song) return false;
+        routing.TrackGain = gain;
+        routing.TrackPeakDb = peakDb;
+        Interlocked.Exchange(ref _dirty, 1);
+        return true;
+    }
+
     private static string MakeShortId(SoulseekRouting r)
     {
         // Derive 22 base62 chars from sha256 of routing fields. Same input -> same id.

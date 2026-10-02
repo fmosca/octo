@@ -72,12 +72,15 @@ public class YouTubeResolver
             var root = doc.RootElement;
             var videoId = root.TryGetProperty("video_id", out var v) ? v.GetString() : null;
             if (string.IsNullOrEmpty(videoId)) return null;
+            var (gain, peak) = Loudness(root);
             return new YouTubeHit
             {
                 VideoId = videoId,
                 Title = root.TryGetProperty("title", out var t) ? t.GetString() : null,
                 Duration = root.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetInt32() : null,
-                Channel = root.TryGetProperty("channel", out var c) ? c.GetString() : null
+                Channel = root.TryGetProperty("channel", out var c) ? c.GetString() : null,
+                GainDb = gain,
+                PeakDb = peak
             };
         }
         catch (Exception ex)
@@ -86,6 +89,15 @@ public class YouTubeResolver
             return null;
         }
     }
+
+    /// <summary>
+    /// The shim's loudness numbers from a resolve payload, when it has measured that
+    /// video. Both are absent for a video the background measurement has not reached yet
+    /// (`measured: false`), which is a normal answer, not an error.
+    /// </summary>
+    private static (double? Gain, double? Peak) Loudness(JsonElement root) =>
+        (root.TryGetProperty("gain_db", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetDouble() : null,
+         root.TryGetProperty("peak_db", out var p) && p.ValueKind == JsonValueKind.Number ? p.GetDouble() : null);
 
     /// <summary>
     /// Fast metadata-only lookup via the shim's /meta (flat search, no URL
@@ -113,11 +125,14 @@ public class YouTubeResolver
             var root = doc.RootElement;
             var vid = root.TryGetProperty("video_id", out var v) ? v.GetString() : null;
             if (string.IsNullOrEmpty(vid)) return null;
+            var (gain, peak) = Loudness(root);
             return new YouTubeHit
             {
                 VideoId = vid,
                 Title = root.TryGetProperty("title", out var t) ? t.GetString() : null,
                 Duration = root.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetInt32() : null,
+                GainDb = gain,
+                PeakDb = peak
             };
         }
         catch
@@ -235,4 +250,18 @@ public class YouTubeHit
     public string? Title { get; set; }
     public int? Duration { get; set; }
     public string? Channel { get; set; }
+
+    /// <summary>
+    /// ReplayGain gain in dB for the video, when the shim has already measured it.
+    /// The shim measures asynchronously when a video is first resolved, so the first
+    /// resolve of a track carries no gain and a later one does: the pin sites store it
+    /// when it appears, and getSong asks again on every request, which is what closes
+    /// the loop. Null means "not measured yet", never "0 dB".
+    /// </summary>
+    public double? GainDb { get; set; }
+
+    /// <summary>Sample peak in dBFS that <see cref="GainDb"/> was capped by, exactly as the
+    /// shim measured it. Served beside the gain (as a linear peak) so a client can apply
+    /// the gain without clipping.</summary>
+    public double? PeakDb { get; set; }
 }

@@ -419,6 +419,7 @@ public sealed class GeneratedPlaylistService
             if (picks.Count >= wanted) break;
             if (!IsNew(candidate, nowUtc, newDays) || Str(candidate, "id") is not { Length: > 0 } id) continue;
             if (!present.Add(SongKey(Str(candidate, "artist"), Str(candidate, "title")))) continue;
+            var replayGain = OpenSubsonicJson.ReplayGain(candidate);
             picks.Add(new Song
             {
                 Id = id,
@@ -434,6 +435,10 @@ public sealed class GeneratedPlaylistService
                 Suffix = Str(candidate, "suffix"),
                 BitRate = NullableInt(candidate, "bitRate"),
                 Isrcs = Texts(candidate, "isrc"),
+                TrackGain = replayGain.TrackGain,
+                AlbumGain = replayGain.AlbumGain,
+                TrackPeak = replayGain.TrackPeak,
+                AlbumPeak = replayGain.AlbumPeak,
                 IsLocal = true,
             });
         }

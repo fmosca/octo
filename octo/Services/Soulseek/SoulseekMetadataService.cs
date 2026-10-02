@@ -374,6 +374,9 @@ public class SoulseekMetadataService : IMusicMetadataService
                         routing.Duration = d;
                     }
                     _idRegistry.RememberLength(song.Id, d, LengthSource.Video);
+                    // The gain belongs to the video just pinned, so it is stored here and
+                    // not at the length-only lookups, which never settle which video plays.
+                    _idRegistry.RememberGain(song.Id, hit.GainDb, hit.PeakDb);
                 }
             }
             catch { /* best-effort; keeps the existing duration on a miss */ }
@@ -436,6 +439,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                     routing.YouTubeId = hit.VideoId;
                     if (hit.Duration is int d) routing.Duration = d;
                     _idRegistry.RememberLength(t.id, hit.Duration, LengthSource.Video);
+                    _idRegistry.RememberGain(t.id, hit.GainDb, hit.PeakDb);
                 }
             }
             catch { /* best-effort warm; never throw out of fire-and-forget */ }
@@ -1170,6 +1174,16 @@ public class SoulseekRouting
     /// <summary>Where <see cref="ShownDuration"/> came from, so a weaker source never
     /// replaces a stronger one.</summary>
     public LengthSource ShownDurationSource { get; set; }
+
+    /// <summary>ReplayGain track gain in dB for the video that plays this song, measured by
+    /// the shim against the same -18 LUFS reference rsgain tags library files with. Served
+    /// to clients as OpenSubsonic's replayGain, so an outside song and a library track in
+    /// one queue sit at the same level. Null until that video has been measured.</summary>
+    public double? TrackGain { get; set; }
+
+    /// <summary>Sample peak of that video in dBFS, exactly as measured. Kept beside the gain
+    /// so a client can apply it without clipping (a positive gain is already capped by it).</summary>
+    public double? TrackPeakDb { get; set; }
 
     public bool HasYouTube => !string.IsNullOrEmpty(YouTubeId);
     public bool HasArtistTitle => !string.IsNullOrEmpty(Artist) && !string.IsNullOrEmpty(Title);

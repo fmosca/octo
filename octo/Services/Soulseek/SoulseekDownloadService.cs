@@ -124,6 +124,9 @@ public class SoulseekDownloadService : BaseDownloadService
                 // length the client should be shown. It used to be dropped, which is why
                 // a played radio track still answered getSong with the 180 s placeholder.
                 _idRegistry.RememberLength(externalId, hit?.Duration, LengthSource.Video);
+                // Same reasoning for the loudness: only a pinned video's gain describes
+                // the audio the client is about to get.
+                _idRegistry.RememberGain(externalId, hit?.GainDb, hit?.PeakDb);
             }
         }
         if (string.IsNullOrEmpty(videoId)) return null;

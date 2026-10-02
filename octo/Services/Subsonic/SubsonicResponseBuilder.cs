@@ -669,6 +669,39 @@ public partial class SubsonicResponseBuilder
     };
 
     /// <summary>
+    /// OpenSubsonic's replayGain object, the field a client's volume normalisation reads.
+    /// A library song carries whatever Navidrome holds for it — Octo rebuilds those rows in
+    /// the radio and Discovery paths, and a rebuilt row that dropped the gains played that
+    /// track unnormalised beside the very tracks it had been normalised against. An outside
+    /// song carries what the shim measured on the video that will play it, against the same
+    /// -18 LUFS reference rsgain tags library files with, so one queue holds both at the same
+    /// level. Empty rather than absent when nothing is known: an empty object is what
+    /// Navidrome itself answers with for an untagged file, and clients handle that already.
+    /// </summary>
+    private Dictionary<string, object> ReplayGainFields(Song song)
+    {
+        var fields = new Dictionary<string, object>();
+        if (song.IsLocal)
+        {
+            if (song.TrackGain is double trackGain) fields["trackGain"] = Math.Round(trackGain, 2);
+            if (song.AlbumGain is double albumGain) fields["albumGain"] = Math.Round(albumGain, 2);
+            if (song.TrackPeak is double trackPeak) fields["trackPeak"] = Math.Round(trackPeak, 6);
+            if (song.AlbumPeak is double albumPeak) fields["albumPeak"] = Math.Round(albumPeak, 6);
+            return fields;
+        }
+
+        if (_idRegistry.Lookup(song.Id) is { TrackGain: double gain } routing)
+        {
+            fields["trackGain"] = Math.Round(gain, 2);
+            // The client wants the peak as a linear multiplier, not the dBFS the shim
+            // measured, which is also the shape Navidrome serves.
+            if (routing.TrackPeakDb is double peakDb)
+                fields["trackPeak"] = Math.Round(Math.Pow(10, peakDb / 20), 6);
+        }
+        return fields;
+    }
+
+    /// <summary>
     /// The length a client is told a song runs. <see cref="Song.Duration"/> carries the
     /// verification length, which is empty for anything nobody downloaded, so an outside
     /// song that played from YouTube left here with the 180 s placeholder while the audio
@@ -803,7 +836,7 @@ public partial class SubsonicResponseBuilder
             ["isrc"] = song.IsrcsForClients().ToArray(),
             ["genres"] = Array.Empty<object>(),
             ["moods"] = Array.Empty<object>(),
-            ["replayGain"] = new Dictionary<string, object>(),
+            ["replayGain"] = ReplayGainFields(song),
             ["sortName"] = (song.Title ?? "").ToLowerInvariant(),
             ["isExternal"] = false
         };

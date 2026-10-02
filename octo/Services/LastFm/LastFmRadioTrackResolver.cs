@@ -40,9 +40,13 @@ public sealed class LastFmRadioTrackResolver
             using var document = JsonDocument.Parse(result.Body);
             if (!document.RootElement.TryGetProperty("subsonic-response", out var response)
                 || !response.TryGetProperty("song", out var song)) return null;
+            var gain = OpenSubsonicJson.ReplayGain(song);
             return new Song { Id = id, Artist = String(song, "artist"), Title = String(song, "title"),
                 Album = String(song, "album"), Genre = NullableString(song, "genre"),
-                Duration = Integer(song, "duration"), IsLocal = true };
+                Duration = Integer(song, "duration"),
+                TrackGain = gain.TrackGain, AlbumGain = gain.AlbumGain,
+                TrackPeak = gain.TrackPeak, AlbumPeak = gain.AlbumPeak,
+                IsLocal = true };
         }
         catch (Exception ex) { _logger.LogDebug(ex, "scrobble metadata lookup failed for {Id}", id); return null; }
     }
@@ -87,6 +91,7 @@ public sealed class LastFmRadioTrackResolver
                 if (string.IsNullOrEmpty(id) || !IsSameRecording(artist, title, hitArtist, hitTitle))
                     continue;
 
+                var replayGain = OpenSubsonicJson.ReplayGain(song);
                 return new Song
                 {
                     Id = id,
@@ -102,6 +107,10 @@ public sealed class LastFmRadioTrackResolver
                     Suffix = NullableString(song, "suffix"),
                     BitRate = Integer(song, "bitRate"),
                     Isrcs = Texts(song, "isrc"),
+                    TrackGain = replayGain.TrackGain,
+                    AlbumGain = replayGain.AlbumGain,
+                    TrackPeak = replayGain.TrackPeak,
+                    AlbumPeak = replayGain.AlbumPeak,
                     IsLocal = true,
                 };
             }

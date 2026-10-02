@@ -70,6 +70,18 @@ public class Song
     public List<string> Isrcs { get; set; } = new();
 
     /// <summary>
+    /// ReplayGain for a library song, carried from Navidrome's own OpenSubsonic
+    /// <c>replayGain</c> for the same reason as <see cref="Isrcs"/>: the radio and Discovery
+    /// paths rebuild a library row from Navidrome's answer, and a rebuild that dropped the
+    /// gains played that track unnormalised in a queue of normalised ones. All null for a
+    /// file with no ReplayGain tags, which is also what Navidrome itself reports.
+    /// </summary>
+    public double? TrackGain { get; set; }
+    public double? AlbumGain { get; set; }
+    public double? TrackPeak { get; set; }
+    public double? AlbumPeak { get; set; }
+
+    /// <summary>
     /// What a Subsonic response lists under OpenSubsonic's <c>isrc</c>: the library's own list
     /// untouched when there is one, otherwise the song's ISRC when it is a valid one.
     /// </summary>
