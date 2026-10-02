@@ -594,4 +594,26 @@ public sealed class DownloadTaggingTests : IDisposable
         Assert.Equal(expected.GainText, Vorbis(b, "REPLAYGAIN_ALBUM_GAIN"));
         Assert.Equal(expected.PeakText, Vorbis(b, "REPLAYGAIN_ALBUM_PEAK"));
     }
+
+    // ---- #69: a download with nothing on disk fails ---------------------------------------
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ALandedPathWithNoAudioFailsAndIsNeverRecorded(bool emptyFile)
+    {
+        var harness = Build(new() { ["1"] = new Song { Artist = "Massive Attack", Title = "Teardrop" } }, new());
+        var path = Path.Combine(_root, "slskd", "incomplete", "peer", "Teardrop.flac");
+        if (emptyFile)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, []);
+        }
+        harness.Service.Landing = _ => path;
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => harness.Service.Download("1"));
+
+        Assert.Empty(harness.History.GetRecent());
+        Assert.False(harness.Meter.Called);
+    }
 }

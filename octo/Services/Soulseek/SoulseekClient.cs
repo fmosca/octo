@@ -126,7 +126,18 @@ public class SoulseekClient
     /// diagnostic: a null (endpoint missing, redacted, or unexpected shape) must
     /// never gate anything.
     /// </summary>
-    public async Task<string?> GetDownloadsDirectoryAsync(CancellationToken ct = default)
+    public Task<string?> GetDownloadsDirectoryAsync(CancellationToken ct = default) =>
+        GetDirectoryOptionAsync("downloads", ct);
+
+    /// <summary>
+    /// Where slskd writes a transfer before moving it to the downloads directory (#69). Only
+    /// its last folder name is any use: the full path is slskd's view of its own container.
+    /// Null is normal and leaves slskd's default name in force.
+    /// </summary>
+    public Task<string?> GetIncompleteDirectoryAsync(CancellationToken ct = default) =>
+        GetDirectoryOptionAsync("incomplete", ct);
+
+    private async Task<string?> GetDirectoryOptionAsync(string name, CancellationToken ct)
     {
         try
         {
@@ -137,8 +148,8 @@ public class SoulseekClient
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
             if (!TryGetPropertyIgnoreCase(doc.RootElement, "directories", out var dirs)) return null;
-            if (!TryGetPropertyIgnoreCase(dirs, "downloads", out var downloads)) return null;
-            return downloads.ValueKind == JsonValueKind.String ? downloads.GetString() : null;
+            if (!TryGetPropertyIgnoreCase(dirs, name, out var value)) return null;
+            return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         }
         catch (Exception ex)
         {

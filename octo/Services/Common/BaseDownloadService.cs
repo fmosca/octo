@@ -532,6 +532,7 @@ public abstract class BaseDownloadService : IDownloadService
 
             var landedPath = await DownloadTrackAsync(
                 externalId, song, silence, sourceOverride, cancellationToken);
+            EnsureOnDisk(landedPath);
             song.LocalPath = landedPath;
             Track(t => t.Stage(externalProvider, externalId, AcquisitionState.Importing));
             var finalize = System.Diagnostics.Stopwatch.StartNew();
@@ -552,6 +553,9 @@ public abstract class BaseDownloadService : IDownloadService
             var placement = await PlaceInLibraryAsync(song, requested, landedPath);
             var localPath = placement.Path;
             song.LocalPath = localPath;
+            // Again after placement: identification takes seconds, and placement hands back the
+            // old path when the file is missing rather than failing.
+            EnsureOnDisk(localPath);
             if (albumContext is not null && song.TagPlan is not null)
                 albumContext.Loudness[localPath] = song.TagPlan.IntegratedLufs is { } lufs
                     ? new Loudness(lufs, 0, song.TagPlan.TruePeakDbfs ?? 0) : null;
@@ -1440,6 +1444,23 @@ public abstract class BaseDownloadService : IDownloadService
         ".flac", ".mp3", ".m4a", ".aac", ".alac", ".ogg", ".opus", ".wav", ".aiff", ".aif",
         ".ape", ".wv", ".wma", ".dsf",
     };
+
+    /// <summary>
+    /// Fail a download whose file is not on disk. Everything after the transfer carries on past a
+    /// missing file (placement keeps the path, tagging logs and moves on), which is how a song was
+    /// recorded as downloaded with 0 bytes and never placed (#69). Throwing marks the request
+    /// Failed, writes no history, and lets the failure notice and any fallback source run.
+    /// </summary>
+    internal static void EnsureOnDisk(string? path)
+    {
+        long length = 0;
+        try { if (!string.IsNullOrEmpty(path) && IOFile.Exists(path)) length = new FileInfo(path).Length; }
+        catch { /* a file that cannot be read is no more use than a missing one */ }
+        if (length > 0) return;
+        throw new FileNotFoundException(string.IsNullOrEmpty(path)
+            ? "The download returned no file"
+            : $"The download returned {path}, but there is no audio there", path);
+    }
 
     /// <summary>
     /// Move a finished download into the configured layout, named by ChooseLayout.
