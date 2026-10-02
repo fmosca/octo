@@ -1699,6 +1699,7 @@ public class AdminController : ControllerBase
             "Subsonic:FolderStructure",
             "Subsonic:UseLocalStaging", "Subsonic:ExplicitFilter",
             "Subsonic:CacheDurationHours", "Subsonic:EnableExternalPlaylists",
+            "Subsonic:WaitForSearchDurations",
             "Subsonic:PlaylistsDirectory",
             "Library:DownloadPath",
             "Server:PublicUrl",
