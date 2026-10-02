@@ -430,7 +430,7 @@ public class SoulseekClient
         Action<SoulseekTransferProgress>? onProgress = null)
     {
         var timeoutSec = perAttemptTimeoutSeconds ?? _settings.DownloadTimeoutSeconds;
-        var watch = new TransferWatch(DateTime.UtcNow, TimeSpan.FromSeconds(timeoutSec), MaxTransferTime);
+        var watch = new TransferWatch(Clock(), TimeSpan.FromSeconds(timeoutSec), MaxTransferTime);
         var seenAtLeastOnce = false;
         var consecutiveMisses = 0;
         // After we've seen the transfer at least once, missing it for this many
@@ -439,7 +439,7 @@ public class SoulseekClient
         // immediately, so without this we'd poll forever.
         const int MaxConsecutiveMissesAfterSeen = 6;  // ~9s at 1500ms cadence
 
-        while (!watch.Expired(DateTime.UtcNow) && !ct.IsCancellationRequested)
+        while (!watch.Expired(Clock()) && !ct.IsCancellationRequested)
         {
             await Task.Delay(PollInterval, ct);
 
@@ -472,7 +472,7 @@ public class SoulseekClient
                     consecutiveMisses = 0;
 
                     var progress = ReadTransferProgress(transfer!.Value);
-                    watch.Saw(progress.BytesTransferred, DateTime.UtcNow);
+                    watch.Saw(progress.BytesTransferred, Clock());
                     if (onProgress is not null)
                     {
                         try { onProgress(progress); }
@@ -519,7 +519,7 @@ public class SoulseekClient
             _logger.LogInformation("slskd transfer finished just as it was given up: {File}", filename);
             return SoulseekTransferState.Succeeded;
         }
-        if (watch.HitCeiling(DateTime.UtcNow))
+        if (watch.HitCeiling(Clock()))
             _logger.LogWarning("slskd transfer still not done after {Min} minutes; cancelled: {File}",
                 (int)MaxTransferTime.TotalMinutes, filename);
         else
@@ -535,6 +535,9 @@ public class SoulseekClient
 
     /// <summary>How often a transfer is polled. Only tests shorten it.</summary>
     internal TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>The time a transfer's wait goes by. Only tests replace it.</summary>
+    internal Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
 
     /// <summary>
     /// Cancels a download in slskd and removes it from its list, so it can never land.

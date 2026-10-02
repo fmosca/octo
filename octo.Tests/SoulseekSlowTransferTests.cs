@@ -57,14 +57,15 @@ public class SoulseekSlowTransferTests
     [Fact]
     public async Task ASlowPeerThatKeepsSendingIsWaitedForPastTheWindow()
     {
+        // Each poll is 0.5 s apart and brings more bytes; it finishes after 20 s, far
+        // past the 1 s window.
         var slskd = new FakeSlskd(poll =>
             poll < 40 ? ("InProgress", poll * 10_000L) : ("Completed, Succeeded", 400_000L));
-        var started = DateTime.UtcNow;
 
         var state = await Client(slskd).WaitForCompletionAsync(Peer, RemoteFile, perAttemptTimeoutSeconds: 1);
 
         Assert.Equal(SoulseekTransferState.Succeeded, state);
-        Assert.True(DateTime.UtcNow - started > TimeSpan.FromSeconds(1), "finished inside the window, so it proves nothing");
+        Assert.True(slskd.Now - Start > TimeSpan.FromSeconds(1), "finished inside the window, so it proves nothing");
         Assert.Empty(slskd.Deletes);
     }
 
@@ -115,15 +116,22 @@ public class SoulseekSlowTransferTests
         });
         return new SoulseekClient(factory.Object, settings, NullLogger<SoulseekClient>.Instance)
         {
-            PollInterval = TimeSpan.FromMilliseconds(40),
+            PollInterval = TimeSpan.FromMilliseconds(1),
+            Clock = () => slskd.Now,
         };
     }
 
     // slskd as far as the wait sees it: a session, the user's downloads with one
     // transfer whose state each poll decides, and cancels.
+    private static readonly DateTime Start = new(2026, 10, 2, 0, 0, 0, DateTimeKind.Utc);
+
+    // slskd's clock moves half a second with every poll, so the wait never depends
+    // on how busy the machine running the tests is.
     private sealed class FakeSlskd(Func<int, (string State, long Bytes)> onPoll) : HttpMessageHandler
     {
         private int _polls;
+
+        public DateTime Now { get; private set; } = Start;
 
         public List<Uri> Deletes { get; } = [];
 
@@ -137,6 +145,7 @@ public class SoulseekSlowTransferTests
                 Deletes.Add(request.RequestUri);
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
             }
+            Now += TimeSpan.FromMilliseconds(500);
             var (state, bytes) = onPoll(_polls++);
             var file = RemoteFile.Replace(@"\", @"\\");
             return Json($$"""
