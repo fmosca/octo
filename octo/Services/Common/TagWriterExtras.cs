@@ -26,6 +26,10 @@ internal static class TagFields
     public static readonly TagField TrackPeak = new(null, "REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_TRACK_PEAK");
     public static readonly TagField AlbumGain = new(null, "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_GAIN");
     public static readonly TagField AlbumPeak = new(null, "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_PEAK");
+    public static readonly TagField AlbumId = new(null, "MusicBrainz Album Id", "MUSICBRAINZ_ALBUMID", "MusicBrainz Album Id");
+    public static readonly TagField AlbumArtists = new(null, "ALBUMARTISTS", "ALBUMARTISTS", "ALBUMARTISTS");
+    public static readonly TagField AlbumVersion = new(null, "ALBUMVERSION", "ALBUMVERSION", "ALBUMVERSION");
+    public static readonly TagField ReleaseDate = new(null, "RELEASEDATE", "RELEASEDATE", "RELEASEDATE");
 }
 
 /// <summary>
@@ -121,6 +125,23 @@ internal static class TagWriterExtras
         }
         xiph?.SetField(field.Vorbis, array);
         apple?.SetDashBoxes(AppleMean, field.Mp4, array);
+    }
+
+    /// <summary>Values exactly as given, untrimmed, replacing the field; none removes it. For
+    /// copying another file's values, where one changed character changes what they hash to.</summary>
+    public static void SetExact(TagLib.File file, TagField field, IReadOnlyList<string> values)
+    {
+        var array = values.Where(value => !string.IsNullOrEmpty(value)).ToArray();
+        var (id3, xiph, apple) = NativeTags(file);
+        if (id3 is not null && field.Id3Description is { } description)
+        {
+            if (array.Length > 0) TagLib.Id3v2.UserTextInformationFrame.Get(id3, description, true).Text = array;
+            else if (TagLib.Id3v2.UserTextInformationFrame.Get(id3, description, false) is { } frame) id3.RemoveFrame(frame);
+        }
+        if (xiph is not null) { if (array.Length > 0) xiph.SetField(field.Vorbis, array); else xiph.RemoveField(field.Vorbis); }
+        // TagLib's SetDashBoxes reads the first value before anything else, so none goes through SetDashBox.
+        if (array.Length > 0) apple?.SetDashBoxes(AppleMean, field.Mp4, array);
+        else if (apple?.GetDashBox(AppleMean, field.Mp4) is not null) apple.SetDashBox(AppleMean, field.Mp4, null);
     }
 
     /// <summary>The original release date: a TDOR frame on a version 4 tag, TORY (the year) on

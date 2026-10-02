@@ -7,8 +7,10 @@ using Octo.Models.Settings;
 using Octo.Services;
 using Octo.Services.Common;
 using Octo.Services.Fingerprint;
+using Octo.Services.Library;
 using Octo.Services.Local;
 using Octo.Services.Notifications;
+using Octo.Services.Soulseek;
 using Octo.Services.Subsonic;
 
 namespace Octo.Tests;
@@ -481,6 +483,45 @@ public sealed class DownloadPlacementTests : IDisposable
         Assert.Equal("T", song.Album);
     }
 
+    // ---- a library action's replacement (W8) --------------------------------------------
+
+    private (PlacementService Service, string Original, string Staged, KeptIdentity Identity) Replacement()
+    {
+        var service = Service(FolderStructure.Organized);
+        var original = Path.Combine(_root, "Odd Folder", "03 teardrop old.mp3");
+        Directory.CreateDirectory(Path.GetDirectoryName(original)!);
+        File.WriteAllBytes(original, AudioFixtures.Mp3());
+        using (var f = TagLib.File.Create(original)) { f.Tag.Title = "Teardrop"; f.Save(); }
+        return (service, original, service.Stage(Landed("peer upload.flac", AudioFixtures.Flac())).Path, KeptIdentityTags.Read(original)!);
+    }
+
+    [Fact]
+    public async Task AReplacementMovesInUnderTheOriginalsFolderAndName()
+    {
+        var (service, original, staged, identity) = Replacement();
+        Assert.Contains(SoulseekDownloadService.IncomingFolderName, staged);
+        var handoff = new ReplacementHandoff { OriginalPath = original, Identity = identity,
+            BeforeReveal = _ => { File.Delete(original); return Task.FromResult<string?>(null); } };
+        var placed = await service.Reveal(new Song { Artist = "Massive Attack", Title = "Teardrop" }, Requested("Massive Attack", "Teardrop"), staged, handoff);
+        Assert.Equal(Path.Combine(_root, "Odd Folder", "03 teardrop old.flac"), placed.Path);
+        Assert.Equal(placed.Path, handoff.RevealedPath);
+        Assert.False(File.Exists(staged));
+        using var revealed = TagLib.File.Create(placed.Path);
+        Assert.Equal("Teardrop", revealed.Tag.Title);
+    }
+
+    [Fact]
+    public async Task ARefusedReplacementIsDeletedBeforeAnyScanCouldSeeIt()
+    {
+        var (service, original, staged, identity) = Replacement();
+        var handoff = new ReplacementHandoff { OriginalPath = original, Identity = identity, BeforeReveal = _ => Task.FromResult<string?>("is not lossless") };
+        var refused = await Assert.ThrowsAsync<ReplacementRejectedException>(() => service.Reveal(new Song(), Requested("A", "T"), staged, handoff));
+        Assert.Equal("is not lossless", refused.Problem);
+        Assert.False(File.Exists(staged));
+        Assert.True(File.Exists(original));
+        Assert.Empty(Directory.EnumerateFiles(_root, "*.flac", SearchOption.AllDirectories));
+    }
+
     // ---- cover.jpg (#51) ----------------------------------------------------------------
 
     private static readonly byte[] CoverBytes = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
@@ -573,6 +614,9 @@ public sealed class DownloadPlacementTests : IDisposable
 
         public Task Sidecars(Song song, Placement placement, byte[]? cover) =>
             WriteSidecarsAsync(song, placement, cover, CancellationToken.None);
+
+        public Placement Stage(string landed) => StageReplacement(landed);
+        public Task<Placement> Reveal(Song s, RequestedIdentity r, string staged, ReplacementHandoff h) => RevealReplacementAsync(s, r, staged, h);
     }
 }
 

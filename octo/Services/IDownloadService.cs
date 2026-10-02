@@ -47,10 +47,11 @@ public interface IDownloadService
     /// Empty when Octo started the acquisition itself or when attribution is switched off.
     /// </param>
     /// <param name="upgradeSearch">Search Soulseek the slow, wide way (Better quality, weekly upgrade).</param>
+    /// <param name="replacement">A library action's replacement, revealed in the original's place (W8).</param>
     Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
         bool triggerAlbumDownload, bool forcePermanent, DownloadSource? sourceOverride,
         CancellationToken cancellationToken, IReadOnlyList<string>? requestedBy = null,
-        bool upgradeSearch = false);
+        bool upgradeSearch = false, Octo.Services.Library.ReplacementHandoff? replacement = null);
 
     /// <summary>Runs one direct source for every missing track in an album.</summary>
     Task<bool> DownloadAlbumWithSourceAsync(string externalProvider, string albumExternalId,

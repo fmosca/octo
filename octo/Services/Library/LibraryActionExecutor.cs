@@ -44,6 +44,15 @@ public sealed class LibraryActionExecutor
     private readonly StarOnArrival? _stars;
     private int _reconciled;
 
+    internal TimeSpan HistoryPoll { get; set; } = TimeSpan.FromSeconds(15);
+    internal int HistoryAttempts { get; set; } = 40;
+    /// <summary>Navidrome shows this id at this file. Tests set it; otherwise the resolver.</summary>
+    internal Func<string, string, CancellationToken, Task<bool>>? ShowsAt { get; set; }
+    internal Func<Task<bool>>? ForceScan { get; set; }
+    internal const string HistoryKeptText = "Navidrome kept it as the same song, so its plays, favourites and playlist places stayed with it.";
+    internal const string HistoryLostText = "Navidrome took it for a new song, so its plays and playlist places stayed with the old entry.";
+    private sealed record Replaced(LibraryActionOutcome Outcome, string? QuarantinePath, string? NewPath);
+
     public LibraryActionExecutor(NavidromeSongPathResolver resolver, LibraryActionQuarantine quarantine,
         LibraryActionJournal journal, ILocalLibraryService library, ExternalIdRegistry ids,
         RejectedPeerRegistry rejectedPeers, TrackAcquisitionQueue acquisitions,
@@ -139,6 +148,10 @@ public sealed class LibraryActionExecutor
             return new(LibraryActionState.Rehearsed, detail);
         }
 
+        // Read now, while Navidrome still knows the song here. Only the acting user's own
+        // favourite can be read, with their own sign-in; anyone else's is out of reach.
+        var carryStar = await WasStarredByRequesterAsync(request);
+
         // Written BEFORE the file is touched. A crash between the two leaves this Pending, and
         // startup reconciles it against the filesystem rather than blindly re-running.
         _journal.Record(pending);
@@ -151,95 +164,161 @@ public sealed class LibraryActionExecutor
         }
 
         var musicRoot = _resolver.MusicRoot();
-        var moved = _quarantine.Move(resolved, musicRoot, request.Action, request.Username);
-        if (!moved.Moved)
+        LibraryActionOutcome outcome;
+        Replaced? replaced = null;
+        string? quarantinePath = null;
+        if (request.Action == LibraryAction.Delete)
         {
-            _journal.Complete(key, LibraryActionState.Failed, moved.Error);
-            return new(LibraryActionState.Failed, moved.Error);
+            var moved = _quarantine.Move(resolved, musicRoot, request.Action, request.Username);
+            if (!moved.Moved)
+            {
+                _journal.Complete(key, LibraryActionState.Failed, moved.Error);
+                return new(LibraryActionState.Failed, moved.Error);
+            }
+            quarantinePath = moved.QuarantinePath;
+            _journal.Complete(key, LibraryActionState.Pending, "Moved to quarantine; finishing.", quarantinePath);
+            _journal.Flush();
+            await _library.ForgetMappingAsync(resolved.AbsolutePath);
+            outcome = new(LibraryActionState.Applied, "Removed. It will not be downloaded again.");
+        }
+        else
+        {
+            // The original stays in place, playable, until its replacement has passed; the two
+            // swap places in one moment (W8).
+            replaced = await ReacquireAsync(request, resolved, key, musicRoot, ct);
+            (outcome, quarantinePath) = (replaced.Outcome, replaced.QuarantinePath);
         }
 
-        // Recorded, and on disk, before the replacement fetch, which can take minutes. Without the
-        // quarantine path on the Pending entry, a crash in that window reconciled as "nothing was
-        // changed" while the file sat in quarantine and the original was never put back.
-        _journal.Complete(key, LibraryActionState.Pending, "Moved to quarantine; finishing.", moved.QuarantinePath);
-        _journal.Flush();
-
-        await _library.ForgetMappingAsync(resolved.AbsolutePath);
-
-        var outcome = request.Action switch
-        {
-            LibraryAction.Delete => new LibraryActionOutcome(LibraryActionState.Applied,
-                "Removed. It will not be downloaded again."),
-            _ => await ReacquireAsync(request, resolved, moved.QuarantinePath!, musicRoot, ct),
-        };
-
-        _journal.Complete(key, outcome.State, outcome.Detail, moved.QuarantinePath);
-        // The file any open question was about has gone or changed, so the question is answered.
+        _journal.Complete(key, outcome.State, outcome.Detail, quarantinePath);
         if (outcome.State == LibraryActionState.Applied) _notices?.MarkActed(request.NavidromeId);
-        // Written now rather than on the next tick: a restart in between would leave this Pending,
-        // and reconciling a finished replacement would put the original back beside it.
         _journal.Flush();
+        // Off this call, which the rating and playlist workers wait on: it can take ten minutes.
+        if (outcome.State == LibraryActionState.Applied && replaced?.NewPath is { } newPath)
+            using (ExecutionContext.SuppressFlow())
+                _ = Task.Run(() => ConfirmHistoryKeptAsync(request, resolved, newPath, key, carryStar));
         return outcome;
     }
 
-    /// <summary>
-    /// Replace the file that was just quarantined.
-    ///
-    /// This is where "keep the current file until the new one is verified" actually lives, and
-    /// it looks contradictory until you see the ordering: DownloadSongInternalAsync
-    /// short-circuits on an existing file, so a re-acquire that left the original in place
-    /// would be a no-op. Moving it out first is what makes the download happen, and the bytes
-    /// are still recoverable the whole time. If the replacement never arrives or does not pass,
-    /// the original goes back exactly where it was.
-    /// </summary>
-    private async Task<LibraryActionOutcome> ReacquireAsync(LibraryActionRequest request,
-        ResolvedSongFile original, string quarantinePath, string musicRoot, CancellationToken ct)
+    private async Task<Replaced> ReacquireAsync(LibraryActionRequest request, ResolvedSongFile original,
+        string key, string musicRoot, CancellationToken ct)
     {
         if (request.Action == LibraryAction.WrongSong) BlacklistSource(original, request);
 
+        // Read while the original is in place: Navidrome built this song's ids from these tags.
+        var identity = KeptIdentityTags.Read(original.AbsolutePath, original.AlbumArtist);
+        string? quarantinePath = null;
+
+        // Judges the new file and, only when it passes, moves the original out. Called by the
+        // download just before the replacement moves in, or here for one that ran without the
+        // handoff, so a scan never sees the song missing for the length of a download.
+        async Task<string?> AdmitAsync(string? candidate)
+        {
+            var problem = Unacceptable(request.Action, candidate, original);
+            if (problem is null && request.Action == LibraryAction.BetterQuality)
+                problem = NotReallyLossless(await SpectrumOfAsync(candidate!));
+            if (problem is not null) return problem;
+            var moved = _quarantine.Move(original, musicRoot, request.Action, request.Username);
+            if (!moved.Moved) return $"could not take the original's place ({moved.Error})";
+            quarantinePath = moved.QuarantinePath;
+            // On disk before the replacement moves in: a crash in between puts the original back.
+            _journal.Complete(key, LibraryActionState.Pending, "Moved to quarantine; finishing.", quarantinePath);
+            _journal.Flush();
+            return null;
+        }
+
         try
         {
+            // DownloadSongInternalAsync hands back a file it has a mapping for instead of fetching.
+            await _library.ForgetMappingAsync(original.AbsolutePath);
             var routing = new SoulseekRouting
             {
-                Kind = RoutingKind.Song,
-                Artist = original.Artist,
-                Title = original.Title,
-                Album = original.Album,
-                Duration = original.DurationSeconds,
+                Kind = RoutingKind.Song, Artist = original.Artist, Title = original.Title,
+                Album = original.Album, Duration = original.DurationSeconds,
             };
             var externalId = _ids.Register(routing);
+            if (identity is null)
+                _logger.LogWarning("Library action {Action}: could not read the tags of {Path}, so Navidrome will treat its replacement as a new song",
+                    request.Action, original.AbsolutePath);
+            var handoff = identity is null ? null : HandoffFor(original, identity, AdmitAsync);
 
             var plan = ReplacementPlan(request.Action);
             var replacement = await _acquisitions.Enqueue(
                 SoulseekMetadataService.ProviderName, externalId, isStar: true,
                 triggerAlbumDownload: false, forcePermanent: true,
                 sourceOverride: plan.Source, notifyOnFailure: false,
-                // The person who asked for the replacement owns the new file the same way
-                // they would have owned a star for it.
-                requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy
-                    ? request.Username : null,
-                upgradeSearch: plan.UpgradeSearch);
+                requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy ? request.Username : null,
+                upgradeSearch: plan.UpgradeSearch, replacement: handoff);
 
-            var problem = Unacceptable(request.Action, replacement, original);
-            if (problem is null && request.Action == LibraryAction.BetterQuality)
-                problem = NotReallyLossless(await SpectrumOfAsync(replacement!));
-            if (problem is null)
+            // Without the handoff the file is already in the library under its own name: judged now.
+            if (handoff?.RevealedPath is null && await AdmitAsync(replacement) is { } late)
             {
-                if (!_settings.CurrentValue.KeepReplacedOriginals) TryDelete(quarantinePath);
-                return new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(replacement)}.");
+                LogRefused(request, original, late);
+                if (!string.IsNullOrEmpty(replacement)) TryDelete(replacement);
+                return new(new(LibraryActionState.Failed, $"The replacement {late}, so nothing changed."), null, null);
             }
-
-            _logger.LogInformation(
-                "Library action {Action}: the replacement for '{Artist} - {Title}' {Problem}; putting the original back",
-                request.Action, original.Artist, original.Title, problem);
-            TryDelete(replacement);
-            return RestoreOriginal(quarantinePath, $"The replacement {problem}, so nothing changed.");
+            if (!_settings.CurrentValue.KeepReplacedOriginals) TryDelete(quarantinePath!);
+            return new(new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(replacement)}."),
+                quarantinePath, replacement);
+        }
+        catch (ReplacementRejectedException rejected)
+        {
+            // Refused before it was ever in the library; the original never moved.
+            LogRefused(request, original, rejected.Problem);
+            return new(new(LibraryActionState.Failed, $"The replacement {rejected.Problem}, so nothing changed."), null, null);
         }
         catch (Exception ex)
         {
-            return RestoreOriginal(quarantinePath,
-                $"Could not find a replacement ({ex.Message}), so nothing changed.");
+            if (quarantinePath is null)
+                return new(new(LibraryActionState.Failed, $"Could not find a replacement ({ex.Message}), so nothing changed."), null, null);
+            // Out, and nothing moved in: back to its exact path, whose row Navidrome still has.
+            return new(RestoreOriginal(quarantinePath, $"Could not finish the replacement ({ex.Message}), so nothing changed."),
+                quarantinePath, null);
         }
+    }
+
+    internal static ReplacementHandoff HandoffFor(ResolvedSongFile original, KeptIdentity identity,
+        Func<string, Task<string?>> admit) =>
+        new() { OriginalPath = original.AbsolutePath, Identity = identity, BeforeReveal = admit };
+
+    private void LogRefused(LibraryActionRequest request, ResolvedSongFile original, string problem) =>
+        _logger.LogInformation("Library action {Action}: the replacement for '{Artist} - {Title}' {Problem}; the original stays",
+            request.Action, original.Artist, original.Title, problem);
+
+    /// <summary>
+    /// One scan, then watch the ORIGINAL id until it shows the replacement (W8): proof that the
+    /// plays, favourites and playlist places stayed with the song. About ten minutes, scanning
+    /// again every two in case Navidrome was busy. If not shown, the rater's favourite (W6).
+    /// </summary>
+    internal async Task<bool> ConfirmHistoryKeptAsync(LibraryActionRequest request, ResolvedSongFile original,
+        string newPath, string key, bool carryStar)
+    {
+        var kept = false;
+        try
+        {
+            var showsAt = ShowsAt ?? _resolver.ShowsAtAsync;
+            var scan = ForceScan ?? (() => _library.TriggerLibraryScanAsync(force: true));
+            for (var attempt = 0; attempt < Math.Max(1, HistoryAttempts) && !kept; attempt++)
+            {
+                if (attempt % 8 == 0) await scan();
+                await Task.Delay(HistoryPoll);
+                kept = await showsAt(original.NavidromeId, newPath, CancellationToken.None);
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug("History check for {Id} failed: {M}", original.NavidromeId, ex.Message); }
+
+        _journal.Complete(key, LibraryActionState.Applied,
+            $"Replaced with {Path.GetFileName(newPath)}. {(kept ? HistoryKeptText : HistoryLostText)}", historyKept: kept);
+        _journal.Flush();
+        if (kept)
+        {
+            _logger.LogInformation("Navidrome kept '{Artist} - {Title}' as the same song after {Action}", original.Artist, original.Title, request.Action);
+            return true;
+        }
+        _logger.LogWarning("Navidrome did not keep '{Artist} - {Title}' as the same song after {Action}; its plays and playlist places stay with the old entry",
+            original.Artist, original.Title, request.Action);
+        if (carryStar && _stars is not null && request.Credential is { } credential)
+            _stars.StarWhenVisible(credential, request.Username, original.Artist, original.Title, newPath);
+        return false;
     }
 
     /// <summary>

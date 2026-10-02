@@ -29,7 +29,11 @@ public sealed record LibraryActionEntry(
     string Key, LibraryAction Action, string NavidromeId, string Username,
     string Title, string Artist, string Album,
     string? SourcePath, string? QuarantinePath, PathSource? Resolution,
-    LibraryActionState State, string? Detail, bool DryRun, DateTime AtUtc);
+    LibraryActionState State, string? Detail, bool DryRun, DateTime AtUtc)
+{
+    /// <summary>Whether Navidrome kept a replaced song as the same song (W8); null until checked.</summary>
+    public bool? HistoryKept { get; init; }
+}
 
 /// <summary>
 /// Write-ahead ledger for library actions. Two jobs, and the order of operations is the point.
@@ -108,7 +112,7 @@ public sealed class LibraryActionJournal : IDisposable
     }
 
     public void Complete(string key, LibraryActionState state, string? detail = null,
-        string? quarantinePath = null)
+        string? quarantinePath = null, bool? historyKept = null)
     {
         if (!_byKey.TryGetValue(key, out var existing)) return;
         Record(existing with
@@ -116,6 +120,7 @@ public sealed class LibraryActionJournal : IDisposable
             State = state,
             Detail = detail ?? existing.Detail,
             QuarantinePath = quarantinePath ?? existing.QuarantinePath,
+            HistoryKept = historyKept ?? existing.HistoryKept,
             AtUtc = DateTime.UtcNow,
         });
     }

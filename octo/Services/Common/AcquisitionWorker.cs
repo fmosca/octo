@@ -63,7 +63,7 @@ public sealed class AcquisitionWorker : BackgroundService
                     // Read here rather than at enqueue time: a second user can join this
                     // request right up until it is dequeued, and they asked for the file
                     // just as much as whoever queued it.
-                    request.RequestedBy, upgradeSearch: request.UpgradeSearch);
+                    request.RequestedBy, upgradeSearch: request.UpgradeSearch, replacement: request.Replacement);
 
                 request.Completion.TrySetResult(path);
                 _logger.LogInformation("Acquisition finished for {Provider}:{Id} -> {Path}",
@@ -73,7 +73,9 @@ public sealed class AcquisitionWorker : BackgroundService
             {
                 // Radio asks for every track it plays, so a play's copy failing is routine. A star, or a
                 // play a heart joined, is someone's explicit ask.
-                if (request.IsStar || request.HeartJoined)
+                if (ex is Octo.Services.Library.ReplacementRejectedException)
+                    _logger.LogInformation("Replacement for {Provider}:{Id} refused: {Problem}", request.Provider, request.ExternalId, ex.Message);
+                else if (request.IsStar || request.HeartJoined)
                     _logger.LogError(ex, "Acquisition failed for {Provider}:{Id}", request.Provider, request.ExternalId);
                 else
                     _logger.LogWarning("Play acquisition failed for {Provider}:{Id}: {Message}",

@@ -181,10 +181,10 @@ public abstract class BaseDownloadService : IDownloadService
     public Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
         bool triggerAlbumDownload, bool forcePermanent, DownloadSource? sourceOverride,
         CancellationToken cancellationToken, IReadOnlyList<string>? requestedBy = null,
-        bool upgradeSearch = false) =>
+        bool upgradeSearch = false, Octo.Services.Library.ReplacementHandoff? replacement = null) =>
         DownloadSongInternalAsync(externalProvider, externalId, triggerAlbumDownload,
             cancellationToken, forcePermanent, sourceOverride: sourceOverride,
-            requestedBy: requestedBy, upgradeSearch: upgradeSearch);
+            requestedBy: requestedBy, upgradeSearch: upgradeSearch, replacement: replacement);
 
     public Task<bool> DownloadAlbumWithSourceAsync(string externalProvider, string albumExternalId,
         DownloadSource source, bool suppressSummary, CancellationToken cancellationToken = default,
@@ -388,7 +388,8 @@ public abstract class BaseDownloadService : IDownloadService
         bool triggerAlbumDownload, CancellationToken cancellationToken = default,
         bool forcePermanent = false, bool suppressNotify = false,
         DownloadSource? sourceOverride = null, IReadOnlyList<string>? requestedBy = null,
-        AlbumTagContext? albumContext = null, bool upgradeSearch = false)
+        AlbumTagContext? albumContext = null, bool upgradeSearch = false,
+        Octo.Services.Library.ReplacementHandoff? replacement = null)
     {
         if (externalProvider != ProviderName)
         {
@@ -412,7 +413,8 @@ public abstract class BaseDownloadService : IDownloadService
         try
         {
             // Check if already downloaded (skip for cache mode as we want to check cache folder)
-            if (!isCache)
+            // A replacement is always a fresh file: an existing one is what is being replaced.
+            if (!isCache && replacement is null)
             {
                 var existingPath = await LocalLibraryService.GetLocalPathForExternalSongAsync(externalProvider, externalId);
                 if (existingPath != null && IOFile.Exists(existingPath))
@@ -422,7 +424,7 @@ public abstract class BaseDownloadService : IDownloadService
                     return existingPath;
                 }
             }
-            else
+            else if (isCache)
             {
                 // For cache mode, check if file exists in cache directory
                 var cachedPath = GetCachedFilePath(externalProvider, externalId);
@@ -551,7 +553,11 @@ public abstract class BaseDownloadService : IDownloadService
 
             // Placed from the Song, so the path and the tags come from one decision (#48). The
             // file used to be moved inside DownloadTrackAsync, before any of this was known.
-            var placement = await PlaceInLibraryAsync(song, requested, landedPath);
+            // A library action's replacement is staged where no scan looks, and moved in only once
+            // it carries the original's identity and has passed (W8).
+            var placement = replacement is null
+                ? await PlaceInLibraryAsync(song, requested, landedPath)
+                : StageReplacement(landedPath);
             var localPath = placement.Path;
             song.LocalPath = localPath;
             // Again after placement: identification takes seconds, and placement hands back the
@@ -567,6 +573,12 @@ public abstract class BaseDownloadService : IDownloadService
             // properly-tagged library citizen.
             var writing = System.Diagnostics.Stopwatch.StartNew();
             var cover = await WriteMetadataAsync(localPath, song, CancellationToken.None);
+            if (replacement is not null)
+            {
+                placement = await RevealReplacementAsync(song, requested, localPath, replacement);
+                localPath = placement.Path;
+                song.LocalPath = localPath;
+            }
             if (!isCache) await WriteSidecarsAsync(song, placement, cover, CancellationToken.None);
             if (song.TagPlan is { } tagPlan)
             {
@@ -665,7 +677,10 @@ public abstract class BaseDownloadService : IDownloadService
                 downloadInfo.Status = DownloadStatus.Failed;
                 downloadInfo.ErrorMessage = ex.Message;
             }
-            Logger.LogError(ex, "Download failed for {SongId}", songId);
+            if (ex is Octo.Services.Library.ReplacementRejectedException)
+                Logger.LogInformation("Replacement download {SongId} refused: {Problem}", songId, ex.Message);
+            else
+                Logger.LogError(ex, "Download failed for {SongId}", songId);
             throw;
         }
         finally
@@ -1477,14 +1492,8 @@ public abstract class BaseDownloadService : IDownloadService
         {
             if (string.IsNullOrEmpty(DownloadPath) || !IOFile.Exists(currentPath)) return new(currentPath, false);
 
-            var choice = ChooseLayout(song, requested, SoulseekSettingsValue.NameFromMatch);
             var structure = SubsonicSettings.FolderStructure;
-            // Flat has no folder to scatter, so its file name keeps the whole credit (#49).
-            var artist = structure == FolderStructure.Flat ? choice.FileArtist : choice.FolderArtist;
-            var target = PathHelper.BuildLayoutPath(structure, DownloadPath,
-                string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist,
-                choice.Album, PathHelper.FileTitle(choice.Title, choice.FileArtist),
-                choice.Track, Path.GetExtension(currentPath));
+            var target = LayoutTarget(song, requested, Path.GetExtension(currentPath));
 
             if (string.Equals(Path.GetFullPath(target), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase))
                 return new(currentPath, false);
@@ -1521,6 +1530,60 @@ public abstract class BaseDownloadService : IDownloadService
         {
             Logger.LogWarning(ex, "Could not place {Path} in the configured layout; leaving it where it landed", currentPath);
             return new(currentPath, false);
+        }
+    }
+
+    /// <summary>Where the configured layout files this song, before any clash is looked at.</summary>
+    private string LayoutTarget(Song song, RequestedIdentity requested, string extension)
+    {
+        var choice = ChooseLayout(song, requested, SoulseekSettingsValue.NameFromMatch);
+        var structure = SubsonicSettings.FolderStructure;
+        // Flat has no folder to scatter, so its file name keeps the whole credit (#49).
+        var artist = structure == FolderStructure.Flat ? choice.FileArtist : choice.FolderArtist;
+        return PathHelper.BuildLayoutPath(structure, DownloadPath,
+            string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist,
+            choice.Album, PathHelper.FileTitle(choice.Title, choice.FileArtist), choice.Track, extension);
+    }
+
+    /// <summary>Move a replacement into the incoming dot folder, which Navidrome never scans.</summary>
+    protected Placement StageReplacement(string landedPath)
+    {
+        var incoming = Path.Combine(DownloadPath, Octo.Services.Soulseek.SoulseekDownloadService.IncomingFolderName);
+        Directory.CreateDirectory(incoming);
+        var staged = Path.Combine(incoming, $"replacement-{Guid.NewGuid():N}{Path.GetExtension(landedPath)}");
+        IOFile.Move(landedPath, staged);
+        TryRemoveEmptyParents(Path.GetDirectoryName(landedPath), DownloadPath);
+        return new(staged, false);
+    }
+
+    /// <summary>
+    /// Give the staged replacement the original's identity, let the library action judge it,
+    /// then move it to the original's folder and name in one rename (W8). Nothing may scan it
+    /// before its tags are final: Navidrome would file it as a new song for good. A refused one
+    /// is deleted here, where no scan ever saw it.
+    /// </summary>
+    protected async Task<Placement> RevealReplacementAsync(Song song, RequestedIdentity requested,
+        string staged, Octo.Services.Library.ReplacementHandoff handoff)
+    {
+        try
+        {
+            Octo.Services.Library.KeptIdentityTags.Apply(staged, handoff.Identity);
+            if (await handoff.BeforeReveal(staged) is { } problem)
+                throw new Octo.Services.Library.ReplacementRejectedException(problem);
+
+            var extension = Path.GetExtension(staged);
+            var target = handoff.TargetFor(extension)
+                ?? PathHelper.ResolveUniquePath(LayoutTarget(song, requested, extension));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            IOFile.Move(staged, target);
+            handoff.RevealedPath = target;
+            Logger.LogInformation("Placed the replacement where the original was: {Path}", target);
+            return new(target, false);
+        }
+        finally
+        {
+            if (handoff.RevealedPath is null)
+                try { if (IOFile.Exists(staged)) IOFile.Delete(staged); } catch { /* swept after a day */ }
         }
     }
 

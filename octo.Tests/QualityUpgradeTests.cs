@@ -27,7 +27,7 @@ public class QualityUpgradeTests
         var queue = new TrackAcquisitionQueue(NullLogger<TrackAcquisitionQueue>.Instance);
         var downloads = new Mock<IDownloadService>();
         downloads.Setup(d => d.ExecuteAcquisitionAsync("soulseek", "id-1", false, true, DownloadSource.Soulseek,
-            It.IsAny<CancellationToken>(), It.IsAny<IReadOnlyList<string>?>(), true)).ReturnsAsync("/music/a.flac");
+            It.IsAny<CancellationToken>(), It.IsAny<IReadOnlyList<string>?>(), true, It.IsAny<ReplacementHandoff?>())).ReturnsAsync("/music/a.flac");
         var worker = new AcquisitionWorker(queue, downloads.Object, new ExternalIdRegistry(),
             new NotificationService([], TestOptions.Monitor(new NotificationSettings()), NullLogger<NotificationService>.Instance),
             NullLogger<AcquisitionWorker>.Instance);

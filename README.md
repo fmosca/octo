@@ -363,6 +363,9 @@ default, and the feature stays inert even when on until at least one username is
 allowlist in the dashboard: **an empty allowlist means nobody, never everybody.** The action
 names, which actions exist, and which star count maps to which action are all editable, and
 five stars means Keep, which removes nothing, so the top of the scale is never destructive.
+A replacement (Better quality, Wrong version, Wrong song) takes the original's place in
+Navidrome: it keeps the original's file name, title, album and album artist tags, so its plays,
+favourites and playlist places stay with it. The action history says whether Navidrome kept it.
 
 `LIBRARY_ACTIONS_DRY_RUN` is on by default, so the first run of a newly enabled install is a
 rehearsal you can read before anything is real. Nothing is ever deleted outright: removed files

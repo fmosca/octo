@@ -23,14 +23,15 @@ public enum PathSource { NativeApi, SubsonicGetSong, LocalMappings, None }
 public sealed record ResolvedSongFile(
     string NavidromeId, string AbsolutePath, long SizeBytes,
     string Title, string Artist, string Album, string Suffix, int? DurationSeconds,
-    PathSource Source);
+    PathSource Source, string? AlbumArtist = null);
 
 public sealed class NavidromeSongPathResolver
 {
     /// <summary>What a leg reported, before any of it is believed.</summary>
     internal sealed record Candidate(
         string Id, string? RawPath, string? LibraryPath, long Size,
-        string Title, string Artist, string Album, string Suffix, int? Duration, PathSource Source);
+        string Title, string Artist, string Album, string Suffix, int? Duration, PathSource Source,
+        bool Missing = false, string? AlbumArtist = null);
 
     private readonly NavidromeIdentityService _identity;
     private readonly ILocalLibraryService _library;
@@ -181,6 +182,19 @@ public sealed class NavidromeSongPathResolver
     }
 
     /// <summary>
+    /// Whether Navidrome has this id as a present song at exactly this file (W8): not missing,
+    /// at this path, at this size. The size proves it read the file after it moved in, since a
+    /// replacement at the original's own path is still the old row until the scan.
+    /// </summary>
+    public async Task<bool> ShowsAtAsync(string navidromeId, string absolutePath, CancellationToken ct = default) =>
+        Shows(await TryNativeAsync(navidromeId, ct), MusicRoot(), absolutePath);
+
+    internal bool Shows(Candidate? song, string root, string absolutePath) =>
+        song is { Missing: false } && Verify(song, root, quiet: true) is { } resolved
+        && string.Equals(Path.GetFullPath(resolved.AbsolutePath), Path.GetFullPath(absolutePath),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    /// <summary>
     /// Subsonic getSong with Octo's admin triplet.
     ///
     /// The `path` here is `fakePath(mf)`, synthesised from TAGS as Artist/Album/NN - Title.ext,
@@ -247,7 +261,7 @@ public sealed class NavidromeSongPathResolver
     /// distinct audio files agreeing byte-for-byte on length is not a thing that happens by
     /// accident.
     /// </summary>
-    internal ResolvedSongFile? Verify(Candidate candidate, string root)
+    internal ResolvedSongFile? Verify(Candidate candidate, string root, bool quiet = false)
     {
         foreach (var attempt in CandidatePaths(candidate, root))
         {
@@ -262,10 +276,11 @@ public sealed class NavidromeSongPathResolver
 
             if (candidate.Size > 0 && info.Length != candidate.Size)
             {
-                _logger.LogWarning(
-                    "Library: {Path} exists but is {Actual} bytes and Navidrome reports {Expected}. "
-                    + "Refusing it, because a path built from tags can name a different file.",
-                    full, info.Length, candidate.Size);
+                if (!quiet)
+                    _logger.LogWarning(
+                        "Library: {Path} exists but is {Actual} bytes and Navidrome reports {Expected}. "
+                        + "Refusing it, because a path built from tags can name a different file.",
+                        full, info.Length, candidate.Size);
                 continue;
             }
 
@@ -274,7 +289,7 @@ public sealed class NavidromeSongPathResolver
                     .Equals(candidate.Suffix, StringComparison.OrdinalIgnoreCase)) continue;
 
             return new ResolvedSongFile(candidate.Id, full, info.Length, candidate.Title,
-                candidate.Artist, candidate.Album, candidate.Suffix, candidate.Duration, candidate.Source);
+                candidate.Artist, candidate.Album, candidate.Suffix, candidate.Duration, candidate.Source, candidate.AlbumArtist);
         }
         return null;
     }
@@ -329,7 +344,7 @@ public sealed class NavidromeSongPathResolver
     public string MusicRoot() =>
         _identity.EffectiveDownloadPath(_config["Library:DownloadPath"] ?? "./downloads");
 
-    private static Candidate? FromJson(JsonElement element, string id, PathSource source,
+    internal static Candidate? FromJson(JsonElement element, string id, PathSource source,
         string? libraryPathProperty)
     {
         if (element.ValueKind != JsonValueKind.Object) return null;
@@ -344,7 +359,9 @@ public sealed class NavidromeSongPathResolver
             Album: Str(element, "album") ?? "",
             Suffix: Str(element, "suffix") ?? "",
             Duration: element.TryGetProperty("duration", out var d) && d.TryGetInt32(out var secs) ? secs : null,
-            Source: source);
+            Source: source,
+            Missing: element.TryGetProperty("missing", out var m) && m.ValueKind == JsonValueKind.True,
+            AlbumArtist: Str(element, "albumArtist"));
     }
 
     private static string? Str(JsonElement element, string name) =>

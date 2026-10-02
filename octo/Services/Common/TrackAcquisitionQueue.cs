@@ -18,6 +18,10 @@ public sealed class AcquisitionRequest
     public DownloadSource? SourceOverride { get; init; }
     public bool NotifyOnFailure { get; init; } = true;
 
+    /// <summary>A library action's replacement: staged, given the original's identity and only
+    /// then moved in (W8). Not joined: a request already in flight runs without it.</summary>
+    public Octo.Services.Library.ReplacementHandoff? Replacement { get; init; }
+
     // Set when a heart joins a request a play started. From then on the heart owns the
     // outcome: a failure is reported the way a star's is, and the play leaves the row alone.
     private volatile bool _heartNotifies;
@@ -121,7 +125,8 @@ public sealed class TrackAcquisitionQueue
     public Task<string> Enqueue(string provider, string externalId, bool isStar,
         bool triggerAlbumDownload, bool forcePermanent,
         DownloadSource? sourceOverride = null, bool notifyOnFailure = true,
-        string? requestedBy = null, bool upgradeSearch = false)
+        string? requestedBy = null, bool upgradeSearch = false,
+        Octo.Services.Library.ReplacementHandoff? replacement = null)
     {
         var request = new AcquisitionRequest
         {
@@ -132,6 +137,7 @@ public sealed class TrackAcquisitionQueue
             ForcePermanent = forcePermanent,
             SourceOverride = sourceOverride,
             NotifyOnFailure = notifyOnFailure,
+            Replacement = replacement,
         };
         request.AddRequester(requestedBy);
         if (upgradeSearch) request.AskForUpgradeSearch();
