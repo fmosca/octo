@@ -35,7 +35,7 @@ public sealed class ExternalPlaybackTests
         await using var factory = CreateFactory(downloads, library, waitForLossless: false);
 
         using var client = factory.CreateClient();
-        using var response = await client.GetAsync("/rest/stream?id=external-track&f=json");
+        using var response = await client.GetAsync("/rest/stream?id=external-track&f=json&u=alice&t=good&s=salt&v=1.16.1&c=test");
 
         response.EnsureSuccessStatusCode();
         Assert.Equal([1, 2, 3], await response.Content.ReadAsByteArrayAsync());
@@ -56,10 +56,12 @@ public sealed class ExternalPlaybackTests
 
         await using var factory = CreateFactory(downloads, library, waitForLossless: true);
         using var client = factory.CreateClient();
-        var responseTask = client.GetAsync("/rest/stream?id=external-track&f=json");
+        var responseTask = client.GetAsync("/rest/stream?id=external-track&f=json&u=alice&t=good&s=salt&v=1.16.1&c=test");
 
         var queue = factory.Services.GetRequiredService<TrackAcquisitionQueue>();
-        using var dequeueTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        // Only a guard against hanging: under a full-suite load the first request through a
+        // fresh host, sign-in check included, has taken over 5 seconds to reach the queue.
+        using var dequeueTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var request = await queue.DequeueAsync(dequeueTimeout.Token);
         Assert.NotNull(request);
         Assert.False(request.IsStar);
@@ -86,6 +88,17 @@ public sealed class ExternalPlaybackTests
         }
     }
 
+    /// <summary>Navidrome accepting every sign-in: these tests are about what plays, not who.</summary>
+    private sealed class PingOk : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"subsonic-response":{"status":"ok","version":"1.16.1"}}""",
+                    System.Text.Encoding.UTF8, "application/json"),
+            });
+    }
+
     private static WebApplicationFactory<Program> CreateFactory(
         Mock<IDownloadService> downloads,
         Mock<ILocalLibraryService> library,
@@ -106,6 +119,9 @@ public sealed class ExternalPlaybackTests
                 builder.ConfigureServices(services =>
                 {
                     services.RemoveAll<IHostedService>();
+                    // An outside song is played only for a sign-in Navidrome accepts.
+                    services.RemoveAll<IHttpClientFactory>();
+                    services.AddSingleton<IHttpClientFactory>(new ReviewFixtures.OneClientFactory(new PingOk()));
                     services.RemoveAll<IDownloadService>();
                     services.RemoveAll<ILocalLibraryService>();
                     services.AddSingleton(downloads.Object);

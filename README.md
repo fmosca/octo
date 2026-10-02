@@ -91,6 +91,7 @@ The installer asks for your Navidrome URL (and, optionally, Last.fm and Soulseek
 **When it's done:**
 
 - Point your Subsonic apps at `http://<your-host>:5274`, **not** Navidrome's own address.
+- Octo checks your Navidrome sign-in before it plays or fetches a song from outside your library; while it cannot reach Navidrome, those songs are refused.
 - Open the admin dashboard at **`http://<your-host>:5274/admin`** to manage every setting from the browser, with no config files to edit by hand.
   It is unauthenticated, so keep Octo on a trusted network. See [Admin dashboard](#admin-dashboard).
 - If a client reports the server is unreachable, that is Octo telling you setup is not finished: its ping response spells out exactly what to fix (usually the Navidrome URL).

@@ -294,6 +294,9 @@ builder.Services.AddSingleton<Octo.Services.Subsonic.SearchSongOrderCache>();
 // Who a request is from when it signs in with an API key and so carries no username.
 builder.Services.AddSingleton<Octo.Services.Subsonic.RequestIdentity>();
 
+// Checks a sign-in with Navidrome before Octo fetches or plays an outside song for it.
+builder.Services.AddSingleton<Octo.Services.Subsonic.CredentialCheck>();
+
 // Completed plays each listener reported lately, so one sent twice is learned from once.
 builder.Services.AddSingleton<Octo.Services.Subsonic.RecentScrobbles>();
 
