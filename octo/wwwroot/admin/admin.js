@@ -271,6 +271,7 @@ async function loadSettings() {
   loadLyricsLibrary();
   loadLyricsChoices();
   loadRadioStatus();
+  loadQualityUpgrade();
   loadLastFmScrobbling();
   // Only when it is the tab on screen; opening the tab later checks then.
   if (document.querySelector('[data-pane="lastfm"].active')) loadLastFmAccount();
@@ -1824,6 +1825,26 @@ document.getElementById('duplicates-scan')?.addEventListener('click', async (eve
     button.disabled = false;
   }
 });
+
+const upgradeOutcomes = { Applied: 'upgraded', Failed: 'no better copy found', Rehearsed: 'dry run',
+  Skipped: 'skipped', Unresolved: 'file not found', Nothing: 'nothing left to try' };
+
+async function loadQualityUpgrade() {
+  const output = document.getElementById('quality-upgrade-status');
+  if (!output) return;
+  try {
+    const response = await api('/api/admin/quality-upgrade');
+    if (!response.ok) { output.textContent = ''; return; }
+    const data = await response.json();
+    const when = value => new Date(value).toLocaleString();
+    const parts = [];
+    if (data.perWeek > 0 && data.off) parts.push(`Not running: ${data.off}`);
+    if (data.lastRunUtc) parts.push(`Last ran ${when(data.lastRunUtc)}`
+      + (data.lastOutcome ? ` (${upgradeOutcomes[data.lastOutcome] || data.lastOutcome}).` : '.'));
+    if (data.nextDueUtc) parts.push(`Next one due ${when(data.nextDueUtc)}.`);
+    output.textContent = parts.join(' ');
+  } catch { output.textContent = ''; }
+}
 
 document.getElementById('lidarr-test-connection')?.addEventListener('click', async (event) => {
   const button = event.currentTarget;

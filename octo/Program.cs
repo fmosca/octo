@@ -238,6 +238,12 @@ builder.Services.AddSingleton(sp => new Octo.Services.Library.GeneratedPlaylistS
     sp.GetRequiredService<ILogger<Octo.Services.Library.GeneratedPlaylistService>>()));
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<Octo.Services.Library.DuplicateScanWorker>());
+// The weekly quality upgrade (#70). What it tried is kept by file, beside the other state files.
+builder.Services.AddSingleton(sp => new Octo.Services.Library.QualityUpgradeStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "quality-upgrade.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.QualityUpgradeStore>>()));
+builder.Services.AddSingleton<Octo.Services.Library.QualityUpgradeWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.QualityUpgradeWorker>());
 builder.Services.AddHttpClient(Octo.Services.Fingerprint.MusicBrainzClient.ClientName, c =>
 {
     c.BaseAddress = new Uri("https://musicbrainz.org/ws/2/");
@@ -303,6 +309,9 @@ builder.Services.AddSingleton<Octo.Services.Subsonic.RecentScrobbles>();
 // Permanent-copy fetches run here, never inside the request that asked for one. A client
 // giving up on a slow play must not cancel a transfer slskd is going to finish anyway.
 builder.Services.AddSingleton<Octo.Services.Common.TrackAcquisitionQueue>();
+// Whether anything is downloading, for the background library jobs that wait until nothing is.
+builder.Services.AddSingleton<Octo.Services.Common.IAcquisitionActivity>(sp =>
+    new Octo.Services.Common.AcquisitionActivity(sp));
 builder.Services.AddHostedService<Octo.Services.Common.AcquisitionWorker>();
 
 // Where each hearted download has got to, for the app's progress ring (getAcquisitions) and

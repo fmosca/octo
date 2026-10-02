@@ -187,6 +187,16 @@ public class LibraryActionSettings
     /// </summary>
     public LibraryRatingScope RatingsScope { get; set; } = LibraryRatingScope.Auto;
 
+    /// <summary>
+    /// Songs a week Octo tries to upgrade to lossless by itself, spread evenly across the week, one
+    /// at a time, through Better quality. 0 is off. Needs Better quality switched on, and runs as
+    /// the first person on AllowedUsers.
+    /// Environment variable: LIBRARY_ACTIONS_UPGRADE_PER_WEEK
+    /// </summary>
+    public int UpgradePerWeek { get; set; } = 0;
+
+    public int EffectiveUpgradePerWeek => Math.Clamp(UpgradePerWeek, 0, 500);
+
     public int EffectiveNoticeMaxTracks => Math.Clamp(NoticeMaxTracks, 1, 500);
 
     public TimeSpan EffectiveDuplicatesScanInterval => TimeSpan.FromHours(Math.Clamp(DuplicatesScanHours, 1, 168));

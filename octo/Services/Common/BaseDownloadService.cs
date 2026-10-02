@@ -201,6 +201,8 @@ public abstract class BaseDownloadService : IDownloadService
         ActiveDownloads.TryGetValue(songId, out var info);
         return info;
     }
+
+    public bool HasActiveDownloads => ActiveDownloads.Values.Any(info => info.Status == DownloadStatus.InProgress);
     
     public async Task<string?> GetLocalPathIfExistsAsync(string externalProvider, string externalId)
     {

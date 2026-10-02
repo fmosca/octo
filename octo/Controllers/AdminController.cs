@@ -68,6 +68,7 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<GeneratedPlaylistSettings>? _generatedOpts;
     private readonly Octo.Services.Common.AcquisitionTracker? _acquisitions;
     private readonly LastFmScrobbleService? _lastFmScrobbles;
+    private readonly Octo.Services.Library.QualityUpgradeWorker? _qualityUpgrade;
 
     public AdminController(
         SettingsFileWriter settings,
@@ -109,8 +110,10 @@ public class AdminController : ControllerBase
         Octo.Services.Library.DuplicateScanWorker? duplicates = null,
         IOptionsMonitor<GeneratedPlaylistSettings>? generatedOpts = null,
         Octo.Services.Common.AcquisitionTracker? acquisitions = null,
-        LastFmScrobbleService? lastFmScrobbles = null)
+        LastFmScrobbleService? lastFmScrobbles = null,
+        Octo.Services.Library.QualityUpgradeWorker? qualityUpgrade = null)
     {
+        _qualityUpgrade = qualityUpgrade;
         _lastFmScrobbles = lastFmScrobbles;
         _acquisitions = acquisitions;
         _generatedOpts = generatedOpts;
@@ -783,6 +786,7 @@ public class AdminController : ControllerBase
                 ["DuplicatesEnabled"] = actions.DuplicatesEnabled,
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
+                ["UpgradePerWeek"] = actions.UpgradePerWeek,
                 ["NoticeMaxTracks"] = actions.NoticeMaxTracks,
                 ["RatingsScope"] = actions.RatingsScope.ToString(),
                 ["AllowedUsers"] = actions.AllowedUsers ?? [],
@@ -1149,6 +1153,12 @@ public class AdminController : ControllerBase
         _duplicates.RequestScan();
         return Accepted(new { ok = true, queued = true });
     }
+
+    /// <summary>The weekly upgrade's last run and next one. Times and an outcome only, no file or
+    /// person, so the admin request guard is enough, like the duplicate scan.</summary>
+    [HttpGet("quality-upgrade")]
+    public IActionResult GetQualityUpgrade() =>
+        _qualityUpgrade is null ? NotFound() : Ok(_qualityUpgrade.Status());
 
     /// <summary>
     /// Ask what file a Navidrome song id resolves to, and say which leg answered.
@@ -1523,6 +1533,7 @@ public class AdminController : ControllerBase
                 ["DuplicatesEnabled"] = actions.DuplicatesEnabled,
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
+                ["UpgradePerWeek"] = actions.UpgradePerWeek,
                 ["NoticeMaxTracks"] = actions.NoticeMaxTracks,
                 ["RatingsScope"] = actions.RatingsScope.ToString(),
                 ["AllowedUsers"] = JsonSerializer.SerializeToNode(actions.AllowedUsers ?? [])!,
@@ -1729,6 +1740,7 @@ public class AdminController : ControllerBase
             "LibraryActions:ReviewPlaylistName", "LibraryActions:NoticeMaxTracks",
             "LibraryActions:RatingsScope", "LibraryActions:DuplicatesEnabled",
             "LibraryActions:DuplicatesPlaylistName", "LibraryActions:DuplicatesScanHours",
+            "LibraryActions:UpgradePerWeek",
             "Soulseek:SubmitConfirmedFingerprints", "Soulseek:AcoustIdUserApiKey",
             "Genre:Enabled", "Genre:MaxGenres", "Genre:OnEmpty", "Genre:Fallback",
             "Genre:UnknownLabel", "Genre:Mappings", "Genre:Blocklist",

@@ -1819,6 +1819,10 @@
                 <input class="set-input" name="LibraryActions.MaxActionsPerCycle" type="number" min="1" max="200" data-number="true" aria-label="At most this many actions per check" />
               </div>
             </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Upgrade <span class="set-opt">songs a week</span></div><div class="set-info-d">Octo looks for a lossless copy of this many MP3 and other lossy songs a week, one at a time, spread across the week, and only while nothing else is downloading. It uses Better quality, so that action must be on, and a song is only replaced when the new file really is better. <strong>0 is off.</strong></div><div class="set-info-d" id="quality-upgrade-status"></div></div>
+              <input class="set-input" name="LibraryActions.UpgradePerWeek" type="number" min="0" max="500" data-number="true" aria-label="Songs to upgrade a week" />
+            </div>
           </form>
         </div>
 

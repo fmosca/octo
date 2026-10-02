@@ -62,6 +62,9 @@ public interface IDownloadService
     /// Checks if a song is currently being downloaded
     /// </summary>
     DownloadInfo? GetDownloadStatus(string songId);
+
+    /// <summary>A transfer is running or finishing. The library Review sweep waits for none to be.</summary>
+    bool HasActiveDownloads => false;
     
     /// <summary>
     /// Gets the local path for a song if it has been downloaded already

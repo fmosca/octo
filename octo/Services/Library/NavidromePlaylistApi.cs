@@ -67,6 +67,29 @@ public sealed class NavidromePlaylistApi
     }
 
     /// <summary>
+    /// One page of Navidrome's own song list, with how many rows it held, or null when it could not be
+    /// read. The native list rather than search3: only this one reports the real library path, and
+    /// the weekly upgrade remembers files by path (#70).
+    /// </summary>
+    public async Task<(IReadOnlyList<LibrarySongRow> Rows, int Count)?> ListSongsAsync(int start, int count,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var response = await SendAsync(jwt => Request(HttpMethod.Get,
+                $"{BaseUrl}/api/song?_start={start}&_end={start + count}&_sort=id&_order=ASC", jwt), ct);
+            if (response is not { IsSuccessStatusCode: true }) return null;
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(ct));
+            return QualityUpgradeWorker.ParseSongs(doc.RootElement);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Could not list songs: {M}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Remove tracks by POSITION. Positions are reassigned on every change, so callers re-read
     /// the list immediately before and send every position in one call.
     /// </summary>

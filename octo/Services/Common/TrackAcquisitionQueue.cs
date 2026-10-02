@@ -113,6 +113,9 @@ public sealed class TrackAcquisitionQueue
     private int _waitingPlays;
     internal int WaitingPlays => Volatile.Read(ref _waitingPlays);
 
+    /// <summary>Nothing queued or running. The weekly upgrade waits for this so it never queues ahead of a person.</summary>
+    public bool IsIdle => _inFlight.IsEmpty;
+
     private readonly ILogger<TrackAcquisitionQueue> _logger;
 
     public TrackAcquisitionQueue(ILogger<TrackAcquisitionQueue> logger) => _logger = logger;
