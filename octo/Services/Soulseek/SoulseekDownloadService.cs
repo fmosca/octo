@@ -553,6 +553,8 @@ public class SoulseekDownloadService : BaseDownloadService
                         Logger.LogWarning("Soulseek attempt {N}: {Path} disappeared while it was being identified; advancing without blaming {User}",
                             attemptIdx, localPath, hit.Username);
                         lastError = new Exception("the downloaded file disappeared while it was being identified");
+                        // Like the held-back copy: with the caller gone, no other peer is tried.
+                        if (callerGaveUp) break;
                         continue;
                     }
                     Logger.LogWarning(
@@ -606,6 +608,8 @@ public class SoulseekDownloadService : BaseDownloadService
                         Logger.LogWarning("Soulseek attempt {N}: {Path} is gone since it was checked; advancing",
                             attemptIdx, localPath);
                         lastError = new Exception("the downloaded file disappeared before it could be kept");
+                        // Like the held-back copy: with the caller gone, no other peer is tried.
+                        if (callerGaveUp) break;
                         continue;
                     }
                     localPath = foundAgain;
@@ -745,6 +749,11 @@ public class SoulseekDownloadService : BaseDownloadService
         if (who.Length == 0 || record.Length == 0) return null;
         if (PlaceholderAlbums.Contains(SpaceNormalize(SongIdentity.Plain(record)))) return null;
         if (SongIdentity.Key(record) == SongIdentity.Key(title) || SongIdentity.SameTitle(record, title).IsSame) return null;
+        // A title that is the artist's name, or a phrase of the album's, is in the filenames of the
+        // record's other tracks too ("Artist - 03 - Another Song"), so the strict reading would take
+        // any of them for the song.
+        if (SongIdentity.Key(title) == SongIdentity.Key(who) || SongIdentity.SameTitle(title, who).IsSame) return null;
+        if (LeafContainsTitlePhrase(SongIdentity.Plain(record), title ?? "")) return null;
         // A bracket finds nothing on Soulseek, the same reason SearchQueries drops one from a title.
         var words = Regex.Replace(record, @"\s*[\(\[\{][^\)\]\}]*[\)\]\}]", "").Trim();
         // SongQuery's Title is just the search words here; Text reads "artist album".

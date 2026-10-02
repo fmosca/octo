@@ -345,6 +345,11 @@ public class SoulseekMetadataService : IMusicMetadataService
     // wait, so most cover fetches timed out and the ones that won starved YouTube prewarm.
     private readonly SemaphoreSlim _coverArtPrewarmGate = new(6);
 
+    // The length pass that runs after a search has its own, smaller gate. On _prewarmGate its
+    // eight lookups took every permit, and a getSong right after the search waited out its two
+    // seconds and showed Deezer's length instead of the video's.
+    private readonly SemaphoreSlim _backgroundDurationGate = new(2);
+
     public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default, bool background = false)
     {
         var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
@@ -352,7 +357,8 @@ public class SoulseekMetadataService : IMusicMetadataService
             // The background pass runs after the client has the results, so a play may already
             // have pinned a video for this song. It keeps it, and the shim is spared the lookup.
             if (background && _idRegistry.Lookup(song.Id) is { YouTubeId.Length: > 0 }) return;
-            if (!await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
+            var gate = background ? _backgroundDurationGate : _prewarmGate;
+            if (!await gate.WaitAsync(PrewarmQueueWait, ct)) return;
             try
             {
                 // Fast metadata-only lookup (flat search, no URL solve). Pass the
@@ -383,7 +389,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                 }
             }
             catch { /* best-effort; keeps the existing duration on a miss */ }
-            finally { _prewarmGate.Release(); }
+            finally { gate.Release(); }
         });
         await Task.WhenAll(tasks);
     }

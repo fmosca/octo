@@ -98,6 +98,18 @@ public class SoulseekSearchProfileTests
     }
 
     [Fact]
+    public async Task ACallerWhoGivesUpWhileTheStartIsOnItsWayStillCancelsTheSlskdSearch()
+    {
+        using var cts = new CancellationTokenSource();
+        var slskd = new FakeSearchSlskd(endsAfter: null, onStartSent: cts.Cancel);
+        var client = Client(slskd);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.SearchAsync("Artist Song", Interactive, cts.Token));
+        await client.LastSearchCleanup;
+        Assert.Single(slskd.Posted);
+        Assert.Equal(new[] { "PUT", "DELETE" }, slskd.Calls.Where(c => c is "PUT" or "DELETE"));
+    }
+
+    [Fact]
     public async Task AStartRefusedWithTooManyRequestsIsRetriedOnce()
     {
         var slskd = new FakeSearchSlskd(endsAfter: 2, refuseFirstStart: true);
@@ -123,7 +135,7 @@ public class SoulseekSearchProfileTests
     // says Completed one look before they are, PUT cancels, DELETE only removes the record. The
     // clock moves half a second with every look at the state.
     private sealed class FakeSearchSlskd(int? endsAfter, bool ignoresCancel = false, bool refuseFirstStart = false,
-        Action<int>? onStatusRead = null) : HttpMessageHandler
+        Action<int>? onStatusRead = null, Action? onStartSent = null) : HttpMessageHandler
     {
         private const string Answers = """
             [{"username":"peer","uploadSpeed":1000000,"queueLength":0,"files":[
@@ -142,6 +154,13 @@ public class SoulseekSearchProfileTests
         {
             var path = request.RequestUri!.AbsolutePath;
             var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(ct);
+            if (onStartSent is not null && request.Method == HttpMethod.Post && path == "/api/v0/searches")
+            {
+                // slskd takes the search, and the answer is held until the caller gives up.
+                lock (_lock) Posted.Add(body!);
+                onStartSent();
+                await Task.Delay(Timeout.Infinite, ct);
+            }
             lock (_lock)
             {
                 if (path == "/api/v0/session")

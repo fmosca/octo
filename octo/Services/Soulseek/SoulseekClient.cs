@@ -191,12 +191,18 @@ public class SoulseekClient
     public async Task<List<SoulseekFileHit>> SearchAsync(string query, SearchProfile profile, CancellationToken ct = default)
     {
         var searchId = Guid.NewGuid().ToString();
-        if (!await StartSearchAsync(searchId, query, profile, ct)) return [];
-
         var began = Clock();
         var ended = false;
+        // Set before the start goes out: a caller who gives up while it is on its way leaves a
+        // search slskd may already have taken, and cancelling one it never made does no harm.
+        var started = true;
         try
         {
+            if (!await StartSearchAsync(searchId, query, profile, ct))
+            {
+                started = false;
+                return [];
+            }
             var status = await WaitForEndAsync(searchId, began.AddSeconds(profile.CeilingSeconds), ct);
             string reason;
             if (status is { Ended: true })
@@ -229,7 +235,7 @@ public class SoulseekClient
         finally
         {
             // In the background, so nobody waits on housekeeping.
-            LastSearchCleanup = Task.Run(() => CleanUpSearchAsync(searchId, ended));
+            if (started) LastSearchCleanup = Task.Run(() => CleanUpSearchAsync(searchId, ended));
         }
     }
 

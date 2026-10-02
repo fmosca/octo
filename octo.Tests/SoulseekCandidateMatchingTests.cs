@@ -309,6 +309,15 @@ public class SoulseekCandidateMatchingTests
     }
 
     [Fact]
+    public void NoAlbumQuery_WhenTheOtherTracksFilenamesWouldPassForTheSong()
+    {
+        // Every track on the record is "Talk Talk - NN - Name", so the title is in all of them.
+        Assert.Null(SoulseekDownloadService.AlbumQuery("Talk Talk", "Talk Talk", "The Party's Over", 200));
+        Assert.Null(SoulseekDownloadService.AlbumQuery("Wembley", "Queen", "Live at Wembley '86", 200));
+        Assert.NotNull(SoulseekDownloadService.AlbumQuery("Bohemian Rhapsody", "Queen", "Live at Wembley '86", 340));
+    }
+
+    [Fact]
     public void AShortTitleMustAppearAsWordsOfItsOwn()
     {
         Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle("anything at all.flac", "M.I.A."));
