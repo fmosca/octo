@@ -78,8 +78,6 @@ public class SoulseekCandidateMatchingTests
     {
         Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
             "Kendrick Lamar - DNA..flac", "DNA."));
-        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
-            "anything at all.flac", "M.I.A."));
     }
 
     // ---- title-only fallback strictness ---------------------------------------
@@ -290,11 +288,33 @@ public class SoulseekCandidateMatchingTests
         Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
             "Kendrick Lamar - DNA..flac", "DNA."));
         Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
-            "anything at all.flac", "M.I.A."));
-        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
             @"music\Massive Attack\Mezzanine (1998)\09 - Mezzanine.flac", "Mezzanine"));
         Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
             "10 - Group Four.flac", "Group Four"));
+    }
+
+    [Fact]
+    public void AnAlbumQueryIsAddedLastOnlyWhenTheAlbumSaysSomething()
+    {
+        var planned = SoulseekDownloadService.PlannedQueries("Teardrop", "Massive Attack", "Mezzanine", 330);
+        Assert.Equal(("Massive Attack Mezzanine", true), (planned[^1].Query.Text, planned[^1].Strict));
+        Assert.False(planned[0].Strict);
+        Assert.DoesNotContain(planned, p => p.Query.Text.Contains("flac", StringComparison.OrdinalIgnoreCase));
+        Assert.Null(SoulseekDownloadService.AlbumQuery("Teardrop", "Massive Attack", "Mezzanine", null));
+        Assert.Null(SoulseekDownloadService.AlbumQuery("Teardrop", "Massive Attack", "Teardrop", 330));
+        Assert.Null(SoulseekDownloadService.AlbumQuery("Hello", "Adele", "Hello - Single", 295));
+        Assert.Null(SoulseekDownloadService.AlbumQuery("Song", "Artist", "[Unknown Album]", 200));
+        Assert.Null(SoulseekDownloadService.AlbumQuery("Song", "Artist", "Single", 200));
+        Assert.Equal(planned.Count - 1, SoulseekDownloadService.PlannedQueries("Teardrop", "Massive Attack", "Mezzanine", null).Count);
+    }
+
+    [Fact]
+    public void AShortTitleMustAppearAsWordsOfItsOwn()
+    {
+        Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle("anything at all.flac", "M.I.A."));
+        Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle("Supper Club.flac", "Up"));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle("MIA.flac", "M.I.A."));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle("Peter Gabriel - 05 - Up.flac", "Up"));
     }
 
     // ---- quality ranking ------------------------------------------------------

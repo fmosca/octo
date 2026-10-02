@@ -320,11 +320,7 @@ public class SoulseekDownloadService : BaseDownloadService
     private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, Song song, bool suppressNotify,
         SearchProfile profile, CancellationToken cancellationToken)
     {
-        // The title alone is the last resort, and held to a stricter filename rule: with the
-        // artist gone from the query, scattered words are no evidence at all. A junk artist
-        // field (an uploader's name) is what it is for.
-        var queries = SearchQueries(routing.Title!, routing.Artist!)
-            .Select(q => (Query: q, Strict: q.Artist.Length == 0)).ToList();
+        var queries = PlannedQueries(routing.Title!, routing.Artist!, routing.Album, routing.Duration);
         var primaryQuery = queries[0].Query.Text;
         var trackKey = song.ExternalId ?? "";
         Track(t => t.Stage(ProviderName, trackKey, AcquisitionState.Searching, "Soulseek"));
@@ -715,6 +711,47 @@ public class SoulseekDownloadService : BaseDownloadService
     }
 
     /// <summary>
+    /// The searches to run, in order, and whether each is read strictly. Strict means the title must
+    /// appear as a phrase in the filename and the file must state a length within the window. The
+    /// title-only search needs that because the artist is gone. The album search needs it because it
+    /// lists the whole record, so every other track on it is an answer too.
+    /// </summary>
+    internal static IReadOnlyList<(SongQuery Query, bool Strict)> PlannedQueries(string title, string artist,
+        string? album, int? durationSeconds)
+    {
+        var planned = SearchQueries(title, artist).Select(q => (q, q.Artist.Length == 0)).ToList();
+        if (AlbumQuery(title, artist, album, durationSeconds) is { } byAlbum) planned.Add((byAlbum, true));
+        return planned;
+    }
+
+    /// <summary>Album names that say nothing about which record a song is on.</summary>
+    private static readonly HashSet<string> PlaceholderAlbums = new(StringComparer.Ordinal)
+    {
+        "unknown", "unknown album", "single", "singles", "non album", "non album single", "non album tracks",
+    };
+
+    /// <summary>
+    /// Artist and album, for a peer who files by folder and names tracks only by number and title, so
+    /// the artist and title search never reaches the file. Null when the album would add nothing: it
+    /// is empty, a placeholder, the title itself, or the length is unknown. Without a length the
+    /// strict reading cannot tell which track on the record is the one asked for. Never carries
+    /// "flac": slskd matches words in paths, and few paths say it.
+    /// </summary>
+    internal static SongQuery? AlbumQuery(string? title, string? artist, string? album, int? durationSeconds)
+    {
+        if (durationSeconds is not > 0) return null;
+        var who = (artist ?? "").Trim();
+        var record = Regex.Replace((album ?? "").Trim(), @"\s*-\s*(Single|EP)$", "", RegexOptions.IgnoreCase).Trim();
+        if (who.Length == 0 || record.Length == 0) return null;
+        if (PlaceholderAlbums.Contains(SpaceNormalize(SongIdentity.Plain(record)))) return null;
+        if (SongIdentity.Key(record) == SongIdentity.Key(title) || SongIdentity.SameTitle(record, title).IsSame) return null;
+        // A bracket finds nothing on Soulseek, the same reason SearchQueries drops one from a title.
+        var words = Regex.Replace(record, @"\s*[\(\[\{][^\)\]\}]*[\)\]\}]", "").Trim();
+        // SongQuery's Title is just the search words here; Text reads "artist album".
+        return words.Length == 0 ? null : new SongQuery(words, who);
+    }
+
+    /// <summary>
     /// Correct rips of the same recording drift by a second or two between masterings.
     /// A different recording does not.
     ///
@@ -745,7 +782,7 @@ public class SoulseekDownloadService : BaseDownloadService
     }
 
     private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title, int? expectedDuration,
-        bool titleOnlySearch = false)
+        bool strict = false)
     {
         var wanted = SoulseekClient.NormalizeExtension(_settings.PreferredExtension, "");
         return hits
@@ -756,8 +793,8 @@ public class SoulseekDownloadService : BaseDownloadService
             .Where(h => CandidateAllowed(h, _rejectedPeers, _verification.RemembersRejections))
             .Where(h => string.Equals(h.Extension, wanted, StringComparison.OrdinalIgnoreCase))
             .Where(h => h.Size >= _settings.MinFileSizeBytes)
-            .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title, requirePhrase: titleOnlySearch))
-            .Where(h => DurationPlausible(h.Length, expectedDuration, requireKnownLength: titleOnlySearch))
+            .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title, requirePhrase: strict))
+            .Where(h => DurationPlausible(h.Length, expectedDuration, requireKnownLength: strict))
             .Where(h => !AddsVersion(h.Filename, title))
             // An unnamed bracketed addition sorts last rather than being dropped: it may be a
             // different take ("Angel (Angel Dust)"), or only a peer's own label.
@@ -905,7 +942,12 @@ public class SoulseekDownloadService : BaseDownloadService
         // A stylized title ("$UICIDE") and a peer who spelled it out ("Suicide"), either way
         // round: each word may match as written or with its stylized characters read as letters.
         var tokens = TitleTokens(title);
-        if (tokens.Count == 0) return true;
+        // Every word of the title is under three letters ("Up", "M.I.A.", "I Am"), so the token rule
+        // has nothing to check, and this used to let any file through. Ask for the whole title instead,
+        // as words of their own in the filename, spaced or with the dots dropped.
+        if (tokens.Count == 0)
+            return LeafContainsTitlePhrase(leaf, title)
+                || LeafContainsTitlePhrase(Stylized(leaf), SongIdentity.FoldStylized(title));
         var looseLeaf = Stylized(leaf);
         return tokens.All(t => leaf.Contains(t) || looseLeaf.Contains(Stylized(t)));
     }

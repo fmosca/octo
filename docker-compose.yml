@@ -57,6 +57,7 @@ services:
       Soulseek__Username: ${SLSKD_USERNAME:-slskd}
       Soulseek__Password: ${SLSKD_PASSWORD:-slskd}
       Soulseek__SearchWaitSeconds: ${SLSKD_SEARCH_WAIT_SECONDS:-30}
+      Soulseek__UpgradeSearchWaitSeconds: ${SLSKD_UPGRADE_SEARCH_WAIT_SECONDS:-90}
       Soulseek__MinFileSizeBytes: ${SLSKD_MIN_FILE_SIZE_BYTES:-5242880}
       Soulseek__PreferredExtension: ${SLSKD_PREFERRED_EXTENSION:-flac}
       Soulseek__DownloadTimeoutSeconds: ${SLSKD_DOWNLOAD_TIMEOUT_SECONDS:-180}

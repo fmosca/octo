@@ -205,14 +205,16 @@ public sealed class LibraryActionExecutor
             };
             var externalId = _ids.Register(routing);
 
+            var plan = ReplacementPlan(request.Action);
             var replacement = await _acquisitions.Enqueue(
                 SoulseekMetadataService.ProviderName, externalId, isStar: true,
                 triggerAlbumDownload: false, forcePermanent: true,
-                sourceOverride: null, notifyOnFailure: false,
+                sourceOverride: plan.Source, notifyOnFailure: false,
                 // The person who asked for the replacement owns the new file the same way
                 // they would have owned a star for it.
                 requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy
-                    ? request.Username : null);
+                    ? request.Username : null,
+                upgradeSearch: plan.UpgradeSearch);
 
             var problem = Unacceptable(request.Action, replacement, original);
             if (problem is null && request.Action == LibraryAction.BetterQuality)
@@ -235,6 +237,15 @@ public sealed class LibraryActionExecutor
                 $"Could not find a replacement ({ex.Message}), so nothing changed.");
         }
     }
+
+    /// <summary>
+    /// Where a replacement may come from and how hard to look. Better quality is Soulseek only: the
+    /// YouTube fallback can only produce an MP3, which Unacceptable rejects as not lossless, so
+    /// falling back spent a whole download on a verdict known in advance. It also searches the slow
+    /// way, because nobody is waiting and the quick search is what found nothing (#70).
+    /// </summary>
+    internal static (DownloadSource? Source, bool UpgradeSearch) ReplacementPlan(LibraryAction action) =>
+        action == LibraryAction.BetterQuality ? (DownloadSource.Soulseek, true) : (null, false);
 
     /// <summary>Why a replacement is not good enough to keep, or null when it is.</summary>
     private static string? Unacceptable(LibraryAction action, string? path, ResolvedSongFile original)
