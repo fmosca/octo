@@ -17,6 +17,10 @@ public sealed class ReplacementHandoff
     /// without this handoff, because it joined one already in flight.</summary>
     public string? RevealedPath { get; internal set; }
 
+    /// <summary>Called with the new path right after the replacement moved in, so the library
+    /// action can record the swap before anything else that could fail runs.</summary>
+    public Action<string>? OnRevealed { get; init; }
+
     /// <summary>The original's folder and name with the new extension, or null when another
     /// file holds that name. With the same extension this is the original's own path, which
     /// Navidrome updates in place.</summary>

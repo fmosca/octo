@@ -268,6 +268,35 @@ public class LibraryActionJournalTests
         finally { try { File.Delete(quarantine); } catch { } }
     }
 
+    /// <summary>The replacement had already moved in when Octo stopped. Putting the original
+    /// back would leave both in the library (or be refused at a shared path), so the action
+    /// counts as done and the original stays in quarantine.</summary>
+    [Fact]
+    public void Reconcile_ReplacementAlreadyInPlace_IsAppliedWithoutARestore()
+    {
+        var quarantine = TempFile();
+        var revealed = TempFile();
+        try
+        {
+            var journal = new LibraryActionJournal();
+            journal.Record(Entry(LibraryAction.WrongVersion, "song-v", LibraryActionState.Pending)
+                with { SourcePath = "/music/gone.mp3", QuarantinePath = quarantine, RevealedPath = revealed });
+            var restoreCalled = false;
+
+            journal.Reconcile(_ => { restoreCalled = true; return true; });
+
+            Assert.False(restoreCalled);
+            Assert.True(File.Exists(quarantine));
+            Assert.True(journal.AlreadyApplied(LibraryAction.WrongVersion, "song-v", "1:2"));
+            Assert.Contains(revealed, Detail(journal));
+        }
+        finally
+        {
+            try { File.Delete(quarantine); } catch { }
+            try { File.Delete(revealed); } catch { }
+        }
+    }
+
     [Fact]
     public void Reconcile_InterruptedReplacement_ThatCannotBeRestored_SaysWhereTheOriginalIs()
     {

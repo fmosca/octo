@@ -500,11 +500,15 @@ public sealed class DownloadPlacementTests : IDisposable
     {
         var (service, original, staged, identity) = Replacement();
         Assert.Contains(SoulseekDownloadService.IncomingFolderName, staged);
+        string? announced = null;
         var handoff = new ReplacementHandoff { OriginalPath = original, Identity = identity,
-            BeforeReveal = _ => { File.Delete(original); return Task.FromResult<string?>(null); } };
+            BeforeReveal = _ => { File.Delete(original); return Task.FromResult<string?>(null); },
+            OnRevealed = path => announced = path };
         var placed = await service.Reveal(new Song { Artist = "Massive Attack", Title = "Teardrop" }, Requested("Massive Attack", "Teardrop"), staged, handoff);
         Assert.Equal(Path.Combine(_root, "Odd Folder", "03 teardrop old.flac"), placed.Path);
         Assert.Equal(placed.Path, handoff.RevealedPath);
+        // Told at once, so the library action can record the swap before anything else runs.
+        Assert.Equal(placed.Path, announced);
         Assert.False(File.Exists(staged));
         using var revealed = TagLib.File.Create(placed.Path);
         Assert.Equal("Teardrop", revealed.Tag.Title);

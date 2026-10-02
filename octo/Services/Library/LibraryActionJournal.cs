@@ -33,6 +33,10 @@ public sealed record LibraryActionEntry(
 {
     /// <summary>Whether Navidrome kept a replaced song as the same song (W8); null until checked.</summary>
     public bool? HistoryKept { get; init; }
+
+    /// <summary>Where a replacement moved in, recorded the moment it did. A restart after that
+    /// finds the swap done instead of putting the original back beside it.</summary>
+    public string? RevealedPath { get; init; }
 }
 
 /// <summary>
@@ -112,7 +116,7 @@ public sealed class LibraryActionJournal : IDisposable
     }
 
     public void Complete(string key, LibraryActionState state, string? detail = null,
-        string? quarantinePath = null, bool? historyKept = null)
+        string? quarantinePath = null, bool? historyKept = null, string? revealedPath = null)
     {
         if (!_byKey.TryGetValue(key, out var existing)) return;
         Record(existing with
@@ -121,6 +125,7 @@ public sealed class LibraryActionJournal : IDisposable
             Detail = detail ?? existing.Detail,
             QuarantinePath = quarantinePath ?? existing.QuarantinePath,
             HistoryKept = historyKept ?? existing.HistoryKept,
+            RevealedPath = revealedPath ?? existing.RevealedPath,
             AtUtc = DateTime.UtcNow,
         });
     }
@@ -200,6 +205,13 @@ public sealed class LibraryActionJournal : IDisposable
     private static (LibraryActionState State, string Detail) Resolve(LibraryActionEntry entry,
         string? quarantine, bool sourcePresent, Func<string, bool>? restoreOriginal)
     {
+        // The replacement had already taken the original's place: the action is done, and the
+        // original stays in quarantine until the retention sweep.
+        if (entry.Action != LibraryAction.Delete && entry.RevealedPath is { Length: > 0 } revealed && File.Exists(revealed))
+            return (LibraryActionState.Applied, quarantine is null
+                ? $"Reconciled after a restart: the replacement is in place at {revealed}."
+                : $"Reconciled after a restart: the replacement is in place at {revealed} and the original is in quarantine at {quarantine}.");
+
         if (quarantine is null)
         {
             return sourcePresent

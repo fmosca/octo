@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Octo.Models.Settings;
 using Octo.Services.Common;
@@ -43,6 +44,16 @@ public sealed class LibraryActionExecutor
     private readonly Octo.Services.Fingerprint.SpectrumAnalyzer? _spectrum;
     private readonly StarOnArrival? _stars;
     private int _reconciled;
+
+    // The songs a library action is working on right now, by the original's full path. The
+    // rating, playlist and weekly upgrade workers all call ApplyAsync, and two replacements of
+    // one song at once share one download: the second could quarantine or delete what the
+    // first had just put in place. A set rather than a lock per song, because nobody waits for
+    // it (the second action is skipped), so an entry can simply be removed when the action ends.
+    private readonly ConcurrentDictionary<string, byte> _busy = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    internal const string BusyText = "Another action on this song is still running, so this one was skipped.";
+    internal const string JoinedText = "Another download of this song was already running, so nothing changed.";
 
     internal TimeSpan HistoryPoll { get; set; } = TimeSpan.FromSeconds(15);
     internal int HistoryAttempts { get; set; } = 40;
@@ -148,6 +159,32 @@ public sealed class LibraryActionExecutor
             return new(LibraryActionState.Rehearsed, detail);
         }
 
+        // Taken before the Pending entry is written: a second action on the same file content
+        // has the same journal key and would overwrite the first one's entry.
+        var songKey = Path.GetFullPath(resolved.AbsolutePath);
+        if (!_busy.TryAdd(songKey, 0))
+        {
+            _journal.Record(Entry(request, resolved, LibraryActionState.Skipped, BusyText, dryRun: false) with
+            {
+                Key = LibraryActionJournal.MakeKey(request.Action, request.NavidromeId, $"busy:{DateTime.UtcNow.Ticks}"),
+            });
+            _logger.LogInformation("Library action {Action} by {User} skipped: another action on {Path} is still running",
+                request.Action, request.Username, resolved.AbsolutePath);
+            return new(LibraryActionState.Skipped, BusyText);
+        }
+        try
+        {
+            return await ApplyOnFileAsync(request, resolved, key, pending, ct);
+        }
+        finally
+        {
+            _busy.TryRemove(songKey, out _);
+        }
+    }
+
+    private async Task<LibraryActionOutcome> ApplyOnFileAsync(LibraryActionRequest request, ResolvedSongFile resolved,
+        string key, LibraryActionEntry pending, CancellationToken ct)
+    {
         // Read now, while Navidrome still knows the song here. Only the acting user's own
         // favourite can be read, with their own sign-in; anyone else's is out of reach.
         var carryStar = await WasStarredByRequesterAsync(request);
@@ -206,7 +243,11 @@ public sealed class LibraryActionExecutor
 
         // Read while the original is in place: Navidrome built this song's ids from these tags.
         var identity = KeptIdentityTags.Read(original.AbsolutePath, original.AlbumArtist);
+        // What the original looked like when the action started. A download takes minutes, and
+        // whatever is at that path by the end may no longer be the file this action was about.
+        var startedLastWrite = File.GetLastWriteTimeUtc(original.AbsolutePath);
         string? quarantinePath = null;
+        ReplacementHandoff? handoff = null;
 
         // Judges the new file and, only when it passes, moves the original out. Called by the
         // download just before the replacement moves in, or here for one that ran without the
@@ -217,19 +258,31 @@ public sealed class LibraryActionExecutor
             if (problem is null && request.Action == LibraryAction.BetterQuality)
                 problem = NotReallyLossless(await SpectrumOfAsync(candidate!));
             if (problem is not null) return problem;
+            var now = new FileInfo(original.AbsolutePath);
+            if (!now.Exists || now.Length != original.SizeBytes || now.LastWriteTimeUtc != startedLastWrite)
+                return "found the original changed while it was downloading";
             var moved = _quarantine.Move(original, musicRoot, request.Action, request.Username);
             if (!moved.Moved) return $"could not take the original's place ({moved.Error})";
             quarantinePath = moved.QuarantinePath;
             // On disk before the replacement moves in: a crash in between puts the original back.
             _journal.Complete(key, LibraryActionState.Pending, "Moved to quarantine; finishing.", quarantinePath);
             _journal.Flush();
+            // Only now that the original is out: a refused replacement leaves it with its
+            // mapping, and so with the record of who sent it.
+            await _library.ForgetMappingAsync(original.AbsolutePath);
             return null;
+        }
+
+        // Written the moment the replacement is in the original's place, so a restart after it
+        // finds the swap done rather than putting the original back beside it.
+        void Revealed(string path)
+        {
+            _journal.Complete(key, LibraryActionState.Pending, "Replacement placed; finishing.", quarantinePath, revealedPath: path);
+            _journal.Flush();
         }
 
         try
         {
-            // DownloadSongInternalAsync hands back a file it has a mapping for instead of fetching.
-            await _library.ForgetMappingAsync(original.AbsolutePath);
             var routing = new SoulseekRouting
             {
                 Kind = RoutingKind.Song, Artist = original.Artist, Title = original.Title,
@@ -239,7 +292,10 @@ public sealed class LibraryActionExecutor
             if (identity is null)
                 _logger.LogWarning("Library action {Action}: could not read the tags of {Path}, so Navidrome will treat its replacement as a new song",
                     request.Action, original.AbsolutePath);
-            var handoff = identity is null ? null : HandoffFor(original, identity, AdmitAsync);
+            handoff = identity is null ? null : HandoffFor(original, identity, AdmitAsync, Revealed);
+            // DownloadSongInternalAsync hands back a file it has a mapping for instead of
+            // fetching. The handoff skips that, so only a download without one needs this.
+            if (handoff is null) await _library.ForgetMappingAsync(original.AbsolutePath);
 
             var plan = ReplacementPlan(request.Action);
             var replacement = await _acquisitions.Enqueue(
@@ -249,8 +305,16 @@ public sealed class LibraryActionExecutor
                 requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy ? request.Username : null,
                 upgradeSearch: plan.UpgradeSearch, replacement: handoff);
 
+            // A handoff that was never used: this joined a download of the same song already in
+            // flight, whose file belongs to whoever started it. Judging it here could quarantine
+            // or delete a replacement that action had just put in place, so nothing is touched.
+            if (handoff is not null && handoff.RevealedPath is null)
+            {
+                LogRefused(request, original, "was another action's download");
+                return new(new(LibraryActionState.Failed, JoinedText), null, null);
+            }
             // Without the handoff the file is already in the library under its own name: judged now.
-            if (handoff?.RevealedPath is null && await AdmitAsync(replacement) is { } late)
+            if (handoff is null && await AdmitAsync(replacement) is { } late)
             {
                 LogRefused(request, original, late);
                 if (!string.IsNullOrEmpty(replacement)) TryDelete(replacement);
@@ -268,6 +332,15 @@ public sealed class LibraryActionExecutor
         }
         catch (Exception ex)
         {
+            if (handoff?.RevealedPath is { } revealed)
+            {
+                // The replacement already took the original's place and only the bookkeeping
+                // after it failed. Putting the original back now would undo a finished swap.
+                _logger.LogWarning("Library action {Action}: the replacement for '{Artist} - {Title}' is in place at {Path}, but what followed failed: {Message}",
+                    request.Action, original.Artist, original.Title, revealed, ex.Message);
+                if (!_settings.CurrentValue.KeepReplacedOriginals && quarantinePath is not null) TryDelete(quarantinePath);
+                return new(new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(revealed)}."), quarantinePath, revealed);
+            }
             if (quarantinePath is null)
                 return new(new(LibraryActionState.Failed, $"Could not find a replacement ({ex.Message}), so nothing changed."), null, null);
             // Out, and nothing moved in: back to its exact path, whose row Navidrome still has.
@@ -277,8 +350,8 @@ public sealed class LibraryActionExecutor
     }
 
     internal static ReplacementHandoff HandoffFor(ResolvedSongFile original, KeptIdentity identity,
-        Func<string, Task<string?>> admit) =>
-        new() { OriginalPath = original.AbsolutePath, Identity = identity, BeforeReveal = admit };
+        Func<string, Task<string?>> admit, Action<string>? revealed = null) =>
+        new() { OriginalPath = original.AbsolutePath, Identity = identity, BeforeReveal = admit, OnRevealed = revealed };
 
     private void LogRefused(LibraryActionRequest request, ResolvedSongFile original, string problem) =>
         _logger.LogInformation("Library action {Action}: the replacement for '{Artist} - {Title}' {Problem}; the original stays",

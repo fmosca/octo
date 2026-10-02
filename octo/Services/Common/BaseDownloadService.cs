@@ -1579,6 +1579,7 @@ public abstract class BaseDownloadService : IDownloadService
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             IOFile.Move(staged, target);
             handoff.RevealedPath = target;
+            handoff.OnRevealed?.Invoke(target);
             Logger.LogInformation("Placed the replacement where the original was: {Path}", target);
             return new(target, false);
         }
