@@ -558,4 +558,68 @@ public class SubsonicResponseBuilderTests
         var ns = doc.Root!.GetDefaultNamespace();
         Assert.Equal(["single"], doc.Root.Element(ns + "album")!.Elements(ns + "releaseTypes").Select(e => e.Value));
     }
+
+    // ---- The announced length must be the length of the audio --------------------------
+    // An outside song whose video runs five to eight minutes was announced as 180 s,
+    // because the only length on the Song is the download-verification one and nothing
+    // else was ever read. Third-party clients took 180 for a real three minutes, so the
+    // scrub bar ran past the end of the track.
+
+    private static SubsonicResponseBuilder BuilderWithRegistry(
+        Octo.Services.Soulseek.ExternalIdRegistry registry) =>
+        new(registry, Microsoft.Extensions.Options.Options.Create(
+            new Octo.Models.Settings.SubsonicSettings()));
+
+    private static string RegisterExternalSong(Octo.Services.Soulseek.ExternalIdRegistry registry,
+        string artist, string title) =>
+        registry.Register(new Octo.Services.Soulseek.SoulseekRouting
+        {
+            Kind = Octo.Services.Soulseek.RoutingKind.Song,
+            Artist = artist,
+            Title = title,
+        });
+
+    private static Song ExternalSongFor(string id, string artist, string title) => new()
+    {
+        Id = id, Title = title, Artist = artist,
+        IsLocal = false, ExternalProvider = "soulseek", ExternalId = id,
+    };
+
+    [Fact]
+    public void ExternalSong_WithoutAVerificationLength_AnnouncesTheRegistrysDisplayLength()
+    {
+        var registry = new Octo.Services.Soulseek.ExternalIdRegistry();
+        var id = RegisterExternalSong(registry, "Earth, Wind & Fire", "Boogie Wonderland");
+        Assert.True(registry.RememberLength(id, 288, Octo.Services.Soulseek.LengthSource.Deezer));
+
+        var row = BuilderWithRegistry(registry)
+            .ConvertSongToJson(ExternalSongFor(id, "Earth, Wind & Fire", "Boogie Wonderland"));
+
+        Assert.Equal(288, row["duration"]);
+    }
+
+    [Fact]
+    public void ExternalSong_WithAPlayedLength_PrefersTheSongOverTheRegistry()
+    {
+        var registry = new Octo.Services.Soulseek.ExternalIdRegistry();
+        var id = RegisterExternalSong(registry, "Oz Noy", "Come Dance With Me");
+        Assert.True(registry.RememberLength(id, 250, Octo.Services.Soulseek.LengthSource.Deezer));
+
+        var song = ExternalSongFor(id, "Oz Noy", "Come Dance With Me");
+        song.Duration = 455;
+
+        var row = BuilderWithRegistry(registry).ConvertSongToJson(song);
+
+        Assert.Equal(455, row["duration"]);
+    }
+
+    [Fact]
+    public void ExternalSong_WithNoKnownLength_KeepsThePlaceholder()
+    {
+        var row = _builder.ConvertSongToJson(ExternalSongFor("unknown-id", "Bill Laurance", "The Good Things"));
+
+        // The placeholder stays only where nothing at all is known: Octo's own app reads
+        // 180 as "no length", and there is no better guess for a third-party client.
+        Assert.Equal(180, row["duration"]);
+    }
 }

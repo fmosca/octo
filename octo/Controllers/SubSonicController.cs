@@ -1660,6 +1660,17 @@ public class SubsonicController : ControllerBase
             return _responseBuilder.CreateError(format, 70, "Song not found");
         }
 
+        // The length every client's scrub bar is drawn from comes out of here.
+        // GetSongAsync hands back the verification length, which is empty for a song
+        // nobody downloaded, so without this the row left as the 180 s placeholder while
+        // the YouTube audio ran five to eight minutes and the bar overran the end. Same
+        // pair of calls the native detail endpoint makes (TryServeNativeExternalSongAsync):
+        // the enrich is cached, and the video length comes from the shim's persistent
+        // metadata cache, so it is a disk hit for anything resolved before.
+        var detail = new List<Song> { song };
+        await _metadataService.EnrichExternalSongsAsync(detail);
+        await _metadataService.ResolveTopDurationsAsync(detail);
+
         return _responseBuilder.CreateSongResponse(format, song);
     }
 

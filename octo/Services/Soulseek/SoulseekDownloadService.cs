@@ -119,6 +119,11 @@ public class SoulseekDownloadService : BaseDownloadService
             if (!string.IsNullOrEmpty(videoId))
             {
                 routing.YouTubeId = videoId;
+
+                // The video just picked is the one that will play, so its length is the
+                // length the client should be shown. It used to be dropped, which is why
+                // a played radio track still answered getSong with the 180 s placeholder.
+                _idRegistry.RememberLength(externalId, hit?.Duration, LengthSource.Video);
             }
         }
         if (string.IsNullOrEmpty(videoId)) return null;

@@ -668,6 +668,23 @@ public partial class SubsonicResponseBuilder
         _ => "application/octet-stream",
     };
 
+    /// <summary>
+    /// The length a client is told a song runs. <see cref="Song.Duration"/> carries the
+    /// verification length, which is empty for anything nobody downloaded, so an outside
+    /// song that played from YouTube left here with the 180 s placeholder while the audio
+    /// ran five to eight minutes. The registry's display length — the length of the video
+    /// that actually plays, when a resolve stored one — is the next best thing, and 180 is
+    /// still the last resort. Octo's own app knows 180 means "unknown"; third-party
+    /// Subsonic clients read it as a real three minutes and draw a scrub bar that overruns
+    /// the end of the track.
+    /// </summary>
+    private int DurationToAnnounce(Song song) =>
+        song.Duration
+        ?? (song.IsLocal
+            ? null
+            : _idRegistry.Lookup(song.Id) is { } routing ? SongLength.Shown(routing).Seconds : null)
+        ?? 180;
+
     private Dictionary<string, object> ConvertSongFields(Song song)
     {
         // A song outside the library says so: isExternal is true, and it carries no
@@ -703,7 +720,7 @@ public partial class SubsonicResponseBuilder
         var bitRate  = song.IsLocal ? song.BitRate is > 0 ? song.BitRate.Value : 1411 : losslessExternal ? 950 : 128;
         var suffix   = song.IsLocal ? localSuffix : losslessExternal ? "flac" : "m4a";
         var contentType = song.IsLocal ? ContentTypeFor(localSuffix) : losslessExternal ? "audio/flac" : "audio/mp4";
-        var duration = song.Duration ?? 180;
+        var duration = DurationToAnnounce(song);
         var estSize  = (long)duration * bitRate * 125;
 
         // Resolve a real-looking album for placeholder songs. Last.fm's
