@@ -668,6 +668,8 @@ public class AdminController : ControllerBase
                 ["RecordRequestedBy"] = subsonic.RecordRequestedBy,
                 ["WaitForLosslessOnPlay"] = subsonic.WaitForLosslessOnPlay,
                 ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
+                ["DownloadOnPlay"] = subsonic.DownloadOnPlay,
+                ["LidarrAlbumOnPlay"] = subsonic.LidarrAlbumOnPlay,
                 // These two are rendered by the dashboard but were missing here, so their
                 // fields never pre-filled with the saved value.
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
@@ -1402,6 +1404,8 @@ public class AdminController : ControllerBase
                 ["RecordRequestedBy"] = subsonic.RecordRequestedBy,
                 ["WaitForLosslessOnPlay"] = subsonic.WaitForLosslessOnPlay,
                 ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
+                ["DownloadOnPlay"] = subsonic.DownloadOnPlay,
+                ["LidarrAlbumOnPlay"] = subsonic.LidarrAlbumOnPlay,
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
                 ["HeartDownloadSources"] = new JsonArray(
                     subsonic.EffectiveHeartDownloadSources()
