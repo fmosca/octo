@@ -6,7 +6,8 @@ using Octo.Services.Soulseek;
 
 namespace Octo.Services.Library;
 
-public sealed record LibraryActionRequest(LibraryAction Action, string NavidromeId, string Username);
+public sealed record LibraryActionRequest(LibraryAction Action, string NavidromeId, string Username,
+    Octo.Services.Subsonic.SubsonicCredential? Credential = null);
 
 public sealed record LibraryActionOutcome(LibraryActionState State, string? Detail)
 {
@@ -40,6 +41,7 @@ public sealed class LibraryActionExecutor
     private readonly ILogger<LibraryActionExecutor> _logger;
     private readonly NoticeQueue? _notices;
     private readonly Octo.Services.Fingerprint.SpectrumAnalyzer? _spectrum;
+    private readonly StarOnArrival? _stars;
     private int _reconciled;
 
     public LibraryActionExecutor(NavidromeSongPathResolver resolver, LibraryActionQuarantine quarantine,
@@ -49,10 +51,12 @@ public sealed class LibraryActionExecutor
         IOptionsMonitor<SubsonicSettings> subsonicSettings,
         ILogger<LibraryActionExecutor> logger,
         NoticeQueue? notices = null,
-        Octo.Services.Fingerprint.SpectrumAnalyzer? spectrum = null)
+        Octo.Services.Fingerprint.SpectrumAnalyzer? spectrum = null,
+        StarOnArrival? stars = null)
     {
         _notices = notices;
         _spectrum = spectrum;
+        _stars = stars;
         _resolver = resolver;
         _quarantine = quarantine;
         _journal = journal;
@@ -246,6 +250,14 @@ public sealed class LibraryActionExecutor
     /// </summary>
     internal static (DownloadSource? Source, bool UpgradeSearch) ReplacementPlan(LibraryAction action) =>
         action == LibraryAction.BetterQuality ? (DownloadSource.Soulseek, true) : (null, false);
+
+    /// <summary>Whether the person asking for a replacement had favourited the song. False when
+    /// nothing will replace it, when the request carries no sign-in (playlist actions never
+    /// do), or when Navidrome cannot say.</summary>
+    internal async Task<bool> WasStarredByRequesterAsync(LibraryActionRequest request) =>
+        request.Action is LibraryAction.WrongSong or LibraryAction.WrongVersion or LibraryAction.BetterQuality
+        && request.Credential is { } credential && _stars is not null
+        && await _stars.IsStarredAsync(credential, request.NavidromeId);
 
     /// <summary>Why a replacement is not good enough to keep, or null when it is.</summary>
     private static string? Unacceptable(LibraryAction action, string? path, ResolvedSongFile original)

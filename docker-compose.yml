@@ -28,6 +28,8 @@ services:
       Subsonic__DownloadAlbumOnStar: ${DOWNLOAD_ALBUM_ON_STAR:-true}
       # Name the user who starred a track on its history entry and notification.
       Subsonic__RecordRequestedBy: ${RECORD_REQUESTED_BY:-true}
+      # Favourite a starred song in Navidrome once it downloads, for whoever starred it.
+      Subsonic__StarDownloadsForRequester: ${STAR_DOWNLOADS_FOR_REQUESTER:-true}
       Subsonic__WaitForLosslessOnPlay: ${WAIT_FOR_LOSSLESS_ON_PLAY:-false}
       Subsonic__LosslessWaitTimeoutSeconds: ${LOSSLESS_WAIT_TIMEOUT_SECONDS:-0}
       Subsonic__DownloadOnPlay: ${DOWNLOAD_ON_PLAY:-false}

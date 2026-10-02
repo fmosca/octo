@@ -40,6 +40,11 @@ public sealed record AcquisitionSnapshot(
     int? Ahead = null,
     string? Note = null);
 
+/// <summary>How a row ended. LibraryId is set only for a song Navidrome showed; AlbumKeys are
+/// the hearted albums the song was fetched for.</summary>
+public sealed record AcquisitionEnd(string Key, string? Artist, string? Title, bool Done,
+    string? LibraryId, IReadOnlyList<string> AlbumKeys);
+
 /// <summary>
 /// Live progress of every hearted download, from the moment the star is accepted until a while
 /// after it ends, so a client can draw a ring on the button it was tapped on.
@@ -151,9 +156,13 @@ public sealed class AcquisitionTracker
         _time = time ?? TimeProvider.System;
     }
 
+    /// <summary>Told when a row ends, outside the lock. A listener that throws is logged and
+    /// skipped, so it can never cost anyone a song.</summary>
+    public event Action<AcquisitionEnd>? Ended;
+
     private DateTime Now => _time.GetUtcNow().UtcDateTime;
 
-    private static string KeyOf(string provider, string externalId) =>
+    internal static string KeyOf(string provider, string externalId) =>
         $"{provider.Trim().ToLowerInvariant()}:{externalId}";
 
     // ---------------------------------------------------------------------------------------
@@ -358,12 +367,18 @@ public sealed class AcquisitionTracker
     /// </summary>
     public void Fail(string provider, string externalId, string? error)
     {
-        Guard(nameof(Fail), () => Update(provider, externalId, entry =>
+        Guard(nameof(Fail), () =>
         {
-            entry.State = AcquisitionState.Failed;
-            entry.Progress = null;
-            entry.Error = UserSafe(error) ?? "The download failed.";
-        }));
+            AcquisitionEnd? ended = null;
+            Update(provider, externalId, entry =>
+            {
+                entry.State = AcquisitionState.Failed;
+                entry.Progress = null;
+                entry.Error = UserSafe(error) ?? "The download failed.";
+                ended = EndOf(KeyOf(provider, externalId), entry);
+            });
+            Raise(ended);
+        });
     }
 
     /// <summary>Fail every track of a hearted album that is still running.</summary>
@@ -522,6 +537,7 @@ public sealed class AcquisitionTracker
 
     private void Finish(string key, int run, string? libraryId)
     {
+        AcquisitionEnd ended;
         lock (_lock)
         {
             if (!_entries.TryGetValue(key, out var entry) || entry.Finished || entry.Run != run) return;
@@ -531,6 +547,23 @@ public sealed class AcquisitionTracker
             entry.Note = null;
             if (!string.IsNullOrWhiteSpace(libraryId)) entry.LibraryId = libraryId;
             entry.UpdatedAt = Now;
+            ended = EndOf(key, entry);
+        }
+        Raise(ended);
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private AcquisitionEnd EndOf(string key, Entry entry) => new(key, entry.Artist, entry.Title,
+        entry.State == AcquisitionState.Done, entry.State == AcquisitionState.Done ? entry.LibraryId : null,
+        _albums.Where(pair => pair.Value.TrackKeys.Contains(key)).Select(pair => pair.Key).ToList());
+
+    private void Raise(AcquisitionEnd? ended)
+    {
+        if (ended is null || Ended is not { } listeners) return;
+        foreach (var listener in listeners.GetInvocationList().Cast<Action<AcquisitionEnd>>())
+        {
+            try { listener(ended); }
+            catch (Exception ex) { _logger.LogDebug("Acquisition end listener failed: {Message}", ex.Message); }
         }
     }
 

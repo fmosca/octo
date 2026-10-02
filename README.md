@@ -259,6 +259,13 @@ starting a second one. Acquisitions Octo starts itself are unattributed, as are 
 written before this existed. Turning it off stops the username being captured at all rather
 than hiding it afterwards, so nothing downstream holds it; names already written stay.
 
+`STAR_DOWNLOADS_FOR_REQUESTER` (on by default) turns a star on a song or album Octo found for
+you into a Navidrome favourite once it downloads, for the person who starred it, so the star
+means "I like this" as it does everywhere else. An album star favourites the album. Octo's own
+apps are left out, because their star button means Add. The person's sign-in is held in memory
+with the download until the song arrives (a password is first turned into a token, so the
+password itself is never held), and a restart drops it.
+
 ### Why is Octo a refactor of [octo-radiostarr](https://github.com/winters27/octo-radiostarr)?
 
 The earlier project leaned on SquidWTF (a public TIDAL proxy) for streaming. In April 2026 Tidal hardened their API and broke every TIDAL proxy at once. Rather than patch around it, Octo was rebuilt on two sources that don't depend on a single fragile vendor API: YouTube via yt-dlp, and Soulseek via slskd. The old repo is archived; new development happens here.
@@ -597,7 +604,7 @@ Around 30 to 50% of Soulseek peer requests get rejected ("overwhelmed", queue fu
 
 Starring an album runs the same process once per track, in sequence.
 
-> **Hearting is "fetch", not "favorite".** Navidrome has never seen Octo's IDs for music you don't own yet, so there is nothing on its side to mark as starred. Once the files land and Navidrome rescans, they become ordinary library tracks: present, but not favorited. Star them again in your app if you want them flagged.
+> **Hearting is "fetch", then "favorite".** Navidrome has never seen Octo's IDs for music you don't own yet, so there is nothing on its side to mark as starred when you heart it. Once the files land and Navidrome shows them, Octo favourites them for whoever hearted them, unless the heart came from Octo's own apps (their heart means Add) or `STAR_DOWNLOADS_FOR_REQUESTER` is off.
 
 ### Cover art aggregator
 

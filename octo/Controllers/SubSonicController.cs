@@ -77,6 +77,7 @@ public class SubsonicController : ControllerBase
     private readonly RequestIdentity _requestIdentity;
     private readonly RecentScrobbles _recentScrobbles;
     private readonly CredentialCheck _credentialCheck;
+    private readonly StarOnArrival? _starOnArrival;
 
     public SubsonicController(
         IOptionsMonitor<SubsonicSettings> subsonicSettings,
@@ -120,8 +121,10 @@ public class SubsonicController : ControllerBase
         SearchSongOrderCache? searchSongOrders = null,
         LastFmScrobbleService? lastFmScrobbles = null,
         RequestIdentity? requestIdentity = null,
-        RecentScrobbles? recentScrobbles = null, CredentialCheck? credentialCheck = null)
+        RecentScrobbles? recentScrobbles = null, CredentialCheck? credentialCheck = null,
+        StarOnArrival? starOnArrival = null)
     {
+        _starOnArrival = starOnArrival;
         _recentScrobbles = recentScrobbles ?? new RecentScrobbles();
         _lastFmScrobbles = lastFmScrobbles;
         _requestIdentity = requestIdentity
@@ -2366,7 +2369,8 @@ public class SubsonicController : ControllerBase
     #endregion
 
     /// <summary>
-    /// Stars (favorites) an item. For playlists and external songs, triggers download.
+    /// Stars (favorites) an item. For playlists, triggers download. For external songs and
+    /// albums, triggers a download and, outside Octo's own apps, favourites it once it arrives.
     /// </summary>
     [HttpGet, HttpPost]
     [Route("rest/star")]
@@ -2462,6 +2466,9 @@ public class SubsonicController : ControllerBase
             // as Navidrome names it), not RequesterFor: it decides who may see the row, and it
             // is never written anywhere.
             var who = await SignedInUserAsync(parameters);
+            // Held before the download is queued, so one that finishes at once still finds it.
+            if (FavouriteCredential(parameters) is { } credential)
+                _starOnArrival!.HoldAlbum(albumProviderName, albumCandidate, credential, who);
             _acquisitionTracker?.BeginAlbum(albumProviderName, albumCandidate, who);
             _heartAcquisitions.QueueAlbum(albumProviderName, albumCandidate, RequesterFor(who));
 
@@ -2491,6 +2498,9 @@ public class SubsonicController : ControllerBase
             // Keyed by what the pipeline knows, labelled with the id the client starred so the
             // app can find its row. Named from the routing, which is already in memory.
             var who = await SignedInUserAsync(parameters);
+            // Held before the download is queued, so one that finishes at once still finds it.
+            if (FavouriteCredential(parameters) is { } credential)
+                _starOnArrival!.HoldSong(provider!, externalId!, credential, who);
             var routing = _idRegistry.Lookup(externalId!);
             _acquisitionTracker?.Begin(provider!, externalId!, itemId, who,
                 routing?.Artist, routing?.Title, routing?.Album);
@@ -3752,6 +3762,15 @@ public class SubsonicController : ControllerBase
     /// </summary>
     private string? RequesterFor(string? username) =>
         _subsonicSettings.RecordRequestedBy && !string.IsNullOrWhiteSpace(username) ? username : null;
+
+    /// <summary>
+    /// The sign-in to favourite a starred outside song or album with once it arrives (#71), or
+    /// null. Octo's own apps send star for Add, which asks for a copy and not a favourite.
+    /// </summary>
+    private SubsonicCredential? FavouriteCredential(IReadOnlyDictionary<string, string> parameters) =>
+        _starOnArrival is not null && _subsonicSettings.StarDownloadsForRequester
+        && !StarOnArrival.IsOctoApp(parameters.GetValueOrDefault("c"))
+            ? SubsonicCredential.From(parameters) : null;
 
     /// <summary>No Range, or a Range from byte 0, starts a track. A HEAD plays nothing; the
     /// route does not take HEAD today, and this keeps it that way if it ever does.</summary>

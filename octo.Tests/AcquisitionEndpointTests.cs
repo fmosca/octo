@@ -59,7 +59,11 @@ public sealed class AcquisitionEndpointTests
     private sealed class AcquisitionWebFactory : WebApplicationFactory<Program>
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "octo-acq-web-" + Guid.NewGuid());
+        private readonly IReadOnlyDictionary<string, string?> _settings;
         public FakeNavidrome Navidrome { get; } = new();
+
+        public AcquisitionWebFactory(IReadOnlyDictionary<string, string?>? settings = null) =>
+            _settings = settings ?? new Dictionary<string, string?>();
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -72,7 +76,7 @@ public sealed class AcquisitionEndpointTests
                     ["Soulseek:BaseUrl"] = "http://127.0.0.1:1",
                     ["YouTube:ShimUrl"] = "http://127.0.0.1:1",
                     ["Library:DownloadPath"] = _directory,
-                }));
+                }).AddInMemoryCollection(_settings));
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<IHostedService>();
@@ -90,8 +94,8 @@ public sealed class AcquisitionEndpointTests
         }
     }
 
-    private static string Auth(string user, string token = "good") =>
-        $"u={user}&t={token}&s=salt&v=1.16.1&c=octo-android";
+    private static string Auth(string user, string token = "good", string client = "octo-android") =>
+        $"u={user}&t={token}&s=salt&v=1.16.1&c={client}";
 
     private static void Seed(AcquisitionTracker tracker)
     {
@@ -182,6 +186,51 @@ public sealed class AcquisitionEndpointTests
         Assert.Equal("Massive Attack", row.GetProperty("artist").GetString());
         Assert.Equal("Teardrop", row.GetProperty("title").GetString());
         Assert.Empty(factory.Tracker.ForUser("bob"));
+    }
+
+    private static string RegisterTeardrop(AcquisitionWebFactory factory) =>
+        factory.Services.GetRequiredService<Octo.Services.Soulseek.ExternalIdRegistry>()
+            .Register(new Octo.Services.Soulseek.SoulseekRouting
+            {
+                Kind = Octo.Services.Soulseek.RoutingKind.Song,
+                Artist = "Massive Attack", Title = "Teardrop", Album = "Mezzanine", Duration = 330,
+            });
+
+    private static async Task<int> HeldAfterStar(AcquisitionWebFactory factory, string client)
+    {
+        using var http = factory.CreateClient();
+        var id = RegisterTeardrop(factory);
+
+        using var doc = JsonDocument.Parse(await http.GetStringAsync($"/rest/star.view?{Auth("alice", client: client)}&f=json&id={id}"));
+
+        Assert.Equal("ok", doc.RootElement.GetProperty("subsonic-response").GetProperty("status").GetString());
+        // The download is asked for either way; only the favourite depends on who starred it.
+        Assert.Single(factory.Tracker.ForUser("alice"));
+        return factory.Services.GetRequiredService<StarOnArrival>().Held;
+    }
+
+    [Fact]
+    public async Task StarFromTheOctoApp_HoldsNoSignIn()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        Assert.Equal(0, await HeldAfterStar(factory, "Octo"));
+    }
+
+    [Fact]
+    public async Task StarFromAnotherClient_HoldsTheSignIn()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        Assert.Equal(1, await HeldAfterStar(factory, "Symfonium"));
+    }
+
+    [Fact]
+    public async Task StarWithTheSettingOff_HoldsNothing()
+    {
+        await using var factory = new AcquisitionWebFactory(new Dictionary<string, string?>
+        {
+            ["Subsonic:StarDownloadsForRequester"] = "false",
+        });
+        Assert.Equal(0, await HeldAfterStar(factory, "Symfonium"));
     }
 
     [Fact]

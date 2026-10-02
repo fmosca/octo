@@ -69,9 +69,7 @@ public sealed class LibraryActionRatingWorker : BackgroundService
             // StopHost, so one unhandled exception here would take Octo down.
             try
             {
-                var outcome = await _executor.ApplyAsync(
-                    new LibraryActionRequest(request.Action, request.NavidromeId, request.Username),
-                    stoppingToken);
+                var outcome = await _executor.ApplyAsync(ToActionRequest(request), stoppingToken);
 
                 _logger.LogInformation("Library action {Action} from a rating by {User}: {State} - {Detail}",
                     request.Action, request.Username, outcome.State, outcome.Detail);
@@ -90,6 +88,13 @@ public sealed class LibraryActionRatingWorker : BackgroundService
             }
         }
     }
+
+    /// <summary>The executor's request, with the rater's own sign-in, so a replaced song keeps
+    /// the favourite they gave it.</summary>
+    internal static LibraryActionRequest ToActionRequest(RatingActionRequest request) =>
+        new(request.Action, request.NavidromeId, request.Username,
+            SubsonicCredential.From(new Dictionary<string, string>
+            { ["u"] = request.AuthUser, ["t"] = request.AuthToken, ["s"] = request.AuthSalt }));
 
     /// <summary>
     /// Put the rating back to 0.

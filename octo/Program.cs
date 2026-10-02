@@ -309,6 +309,8 @@ builder.Services.AddHostedService<Octo.Services.Common.AcquisitionWorker>();
 // the dashboard. In memory only; it watches the pipeline and never steers it.
 builder.Services.AddSingleton(sp => new Octo.Services.Common.AcquisitionTracker(
     sp.GetRequiredService<ILogger<Octo.Services.Common.AcquisitionTracker>>(), sp));
+// Favourites a starred outside song for whoever starred it once Navidrome shows it (#71).
+builder.Services.AddSingleton<Octo.Services.Common.StarOnArrival>();
 
 // Long enough for an already-downloaded file to finish being tagged and registered, and
 // no longer: sizing this for the transfer itself would tax every restart for a benefit
@@ -419,6 +421,10 @@ var app = builder.Build();
 // Resolved here so it snapshots the values this process actually started with, before the
 // dashboard or first-run automation can change anything.
 app.Services.GetRequiredService<Octo.Services.Admin.RestartTracker>();
+
+// Built now rather than on the first Subsonic request, so it is already listening when the
+// first download finishes.
+app.Services.GetRequiredService<Octo.Services.Common.StarOnArrival>();
 
 // The first list cover loads the fonts and finds the system's fallbacks, which takes a second
 // or two; done here in the background so no client waits for it.

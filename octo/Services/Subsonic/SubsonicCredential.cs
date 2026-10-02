@@ -67,5 +67,28 @@ public sealed class SubsonicCredential
         return parameters;
     }
 
+    /// <summary>
+    /// The same sign-in with its password swapped for a token, for holding: s is 12 random hex
+    /// characters and t the lowercase hex MD5 of the password and s, which Navidrome takes as
+    /// u with t and s. A password sent as "enc:" and hex is decoded first. The token still signs
+    /// in as the person, but it is not their password. Without p, this credential as it is.
+    /// </summary>
+    public SubsonicCredential WithoutPassword()
+    {
+        if (_values.GetValueOrDefault("p") is not { } password) return this;
+        if (password.StartsWith("enc:", StringComparison.Ordinal))
+        {
+            // Not hex after all: the token is then made from what was sent, and Navidrome,
+            // which would have refused that password too, refuses the token.
+            try { password = Encoding.UTF8.GetString(Convert.FromHexString(password[4..])); }
+            catch (FormatException) { }
+        }
+        var salt = Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant();
+        var token = Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(password + salt))).ToLowerInvariant();
+        var values = new Dictionary<string, string>(StringComparer.Ordinal) { ["t"] = token, ["s"] = salt };
+        if (User is { } user) values["u"] = user;
+        return new SubsonicCredential(values, Version, Client);
+    }
+
     public override string ToString() => $"SubsonicCredential({User ?? "API key"})";
 }

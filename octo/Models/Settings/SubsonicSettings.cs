@@ -298,6 +298,14 @@ public class SubsonicSettings
     public bool RecordRequestedBy { get; set; } = true;
 
     /// <summary>
+    /// Favourite a starred outside song or album in Navidrome once it downloads, for the person
+    /// who starred it (default: true). Environment variable: STAR_DOWNLOADS_FOR_REQUESTER
+    /// Octo's own apps are left out: their star is the Add button. The person's sign-in is held
+    /// in memory until the song arrives, and a restart drops it.
+    /// </summary>
+    public bool StarDownloadsForRequester { get; set; } = true;
+
+    /// <summary>
     /// In Permanent mode, block the first play until the lossless copy has been fetched
     /// (default: false).
     /// Environment variable: WAIT_FOR_LOSSLESS_ON_PLAY
