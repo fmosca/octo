@@ -88,6 +88,40 @@ public sealed class ExternalPlaybackTests
         }
     }
 
+    [Theory]
+    [InlineData(null, 1)]
+    [InlineData("bytes=0-", 1)]
+    [InlineData("bytes=4096-", 0)]
+    public async Task StreamingAnOutsideSongQueuesItsDownloadOnlyFromTheFirstByte(string? range, int waiting)
+    {
+        var downloads = new Mock<IDownloadService>();
+        downloads.Setup(s => s.GetDirectStreamAsync("soulseek", "track-id", It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => new DirectStreamInfo { AudioStream = new MemoryStream([1, 2, 3]),
+                ContentType = "audio/mp4", ContentLength = 3, StatusCode = 200 });
+        var library = new Mock<ILocalLibraryService>();
+        library.Setup(s => s.ParseSongId("external-track")).Returns((true, "soulseek", "track-id"));
+        await using var factory = CreateFactory(downloads, library, waitForLossless: false, downloadOnPlay: true);
+        using var client = factory.CreateClient();
+        using var message = new HttpRequestMessage(HttpMethod.Get,
+            "/rest/stream?id=external-track&f=json&u=alice&t=good&s=salt&v=1.16.1&c=test");
+        if (range is not null) message.Headers.TryAddWithoutValidation("Range", range);
+
+        using var response = await client.SendAsync(message);
+
+        response.EnsureSuccessStatusCode();
+        Assert.Equal(waiting, factory.Services.GetRequiredService<TrackAcquisitionQueue>().WaitingPlays);
+    }
+
+    [Theory]
+    [InlineData("GET", null, true)]
+    [InlineData("GET", "", true)]
+    [InlineData("GET", "bytes=0-", true)]
+    [InlineData("GET", "bytes=0-1", true)]
+    [InlineData("GET", "bytes=10-20", false)]
+    [InlineData("HEAD", null, false)]
+    public void OnlyARequestFromTheFirstByteIsAPlay(string method, string? range, bool play) =>
+        Assert.Equal(play, Octo.Controllers.SubsonicController.IsFirstByteRequest(method, range));
+
     /// <summary>Navidrome accepting every sign-in: these tests are about what plays, not who.</summary>
     private sealed class PingOk : HttpMessageHandler
     {
@@ -102,7 +136,8 @@ public sealed class ExternalPlaybackTests
     private static WebApplicationFactory<Program> CreateFactory(
         Mock<IDownloadService> downloads,
         Mock<ILocalLibraryService> library,
-        bool waitForLossless)
+        bool waitForLossless,
+        bool downloadOnPlay = false)
     {
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -114,6 +149,7 @@ public sealed class ExternalPlaybackTests
                         ["Subsonic:StorageMode"] = "Cache",
                         ["Subsonic:DownloadSource"] = "Soulseek",
                         ["Subsonic:WaitForLosslessOnPlay"] = waitForLossless.ToString(),
+                        ["Subsonic:DownloadOnPlay"] = downloadOnPlay.ToString(),
                         ["Library:DownloadPath"] = Path.GetTempPath(),
                     }));
                 builder.ConfigureServices(services =>

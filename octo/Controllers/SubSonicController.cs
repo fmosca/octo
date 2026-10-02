@@ -1482,7 +1482,15 @@ public class SubsonicController : ControllerBase
             // acquisition unless DownloadOnPlay or LidarrAlbumOnPlay are on: owned ids
             // already went to Navidrome above, and missing ids stream from YouTube below.
             // Hearts are the normal permanent-copy gesture.
-            _heartAcquisitions.QueuePlay(provider!, externalId!, RequesterFor(await SignedInUserAsync(parameters)));
+            // Only a request from the first byte is a play. Clients ask again with a later
+            // Range on every seek and while buffering. A transcoded request (format,
+            // maxBitRate) is still a play and counts.
+            if (IsFirstByteRequest(Request.Method, Request.Headers.Range.ToString()))
+            {
+                var who = await SignedInUserAsync(parameters);
+                _heartAcquisitions.QueuePlay(provider!, externalId!, RequesterFor(who),
+                    clientId: id, owner: who);
+            }
             if (_subsonicSettings.WaitForLosslessOnPlay)
             {
                 var acquisition = _acquisitions.Enqueue(provider!, externalId!, isStar: false,
@@ -3744,6 +3752,13 @@ public class SubsonicController : ControllerBase
     /// </summary>
     private string? RequesterFor(string? username) =>
         _subsonicSettings.RecordRequestedBy && !string.IsNullOrWhiteSpace(username) ? username : null;
+
+    /// <summary>No Range, or a Range from byte 0, starts a track. A HEAD plays nothing; the
+    /// route does not take HEAD today, and this keeps it that way if it ever does.</summary>
+    internal static bool IsFirstByteRequest(string method, string? range) =>
+        !HttpMethods.IsHead(method)
+        && (string.IsNullOrWhiteSpace(range)
+            || range.TrimStart().StartsWith("bytes=0-", StringComparison.OrdinalIgnoreCase));
 
     private string NativeUsername(IReadOnlyDictionary<string, string> parameters)
     {

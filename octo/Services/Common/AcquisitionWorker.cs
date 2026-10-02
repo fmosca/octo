@@ -71,14 +71,19 @@ public sealed class AcquisitionWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Acquisition failed for {Provider}:{Id}",
-                    request.Provider, request.ExternalId);
+                // Radio asks for every track it plays, so a play's copy failing is routine. A star, or a
+                // play a heart joined, is someone's explicit ask.
+                if (request.IsStar || request.HeartJoined)
+                    _logger.LogError(ex, "Acquisition failed for {Provider}:{Id}", request.Provider, request.ExternalId);
+                else
+                    _logger.LogWarning("Play acquisition failed for {Provider}:{Id}: {Message}",
+                        request.Provider, request.ExternalId, ex.Message);
                 // Stars only: a shed play-triggered acquisition is a hint, a failed
                 // star is the user's explicit ask going unmet. This is the one place
                 // a terminal failure surfaces exactly once per gesture (album-walk
                 // per-track failures are caught inside the walk and aggregate into
                 // its summary instead).
-                if (request.IsStar && request.NotifyOnFailure) NotifyFailed(request, ex);
+                if (request.NotifiesOnFailure) NotifyFailed(request, ex);
                 // Release before completing the task: an ordered heart fallback may
                 // immediately enqueue the same track for its next source.
                 _queue.Release(request);

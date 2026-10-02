@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Octo.Models.Settings;
 using Octo.Services;
@@ -273,17 +274,27 @@ public class HeartAcquisitionCoordinatorTests
         lidarr.Verify(x => x.TryAcquireAlbumAsync("soulseek", "album-id", true, It.IsAny<string?>()), Times.Once);
     }
 
-    private static SubsonicSettings PlaySettings(bool downloadOnPlay, bool lidarrAlbumOnPlay) => new()
+    private static SubsonicSettings PlaySettings(bool downloadOnPlay, bool lidarrAlbumOnPlay,
+        params HeartDownloadStep[] steps) => new()
     {
         DownloadOnPlay = downloadOnPlay,
         LidarrAlbumOnPlay = lidarrAlbumOnPlay,
-        HeartDownloadSources =
-        [
-            new HeartDownloadStep { Source = HeartDownloadSource.Lidarr, SongEnabled = true, AlbumEnabled = true },
-            new HeartDownloadStep { Source = HeartDownloadSource.YouTube, SongEnabled = true, AlbumEnabled = true },
-            new HeartDownloadStep { Source = HeartDownloadSource.Soulseek, SongEnabled = false, AlbumEnabled = false },
-        ],
+        HeartDownloadSources = steps.Length > 0
+            ? [.. steps]
+            :
+            [
+                new HeartDownloadStep { Source = HeartDownloadSource.Lidarr, SongEnabled = true, AlbumEnabled = true },
+                new HeartDownloadStep { Source = HeartDownloadSource.YouTube, SongEnabled = true, AlbumEnabled = true },
+                new HeartDownloadStep { Source = HeartDownloadSource.Soulseek, SongEnabled = false, AlbumEnabled = false },
+            ],
     };
+
+    private HeartAcquisitionCoordinator Coordinator(SubsonicSettings s, TrackAcquisitionQueue q,
+        ILidarrHeartAcquisitionService? lidarr = null, AcquisitionTracker? tracker = null) =>
+        new(TestOptions.Monitor(s), q, new Mock<IDownloadService>().Object,
+            lidarr ?? new Mock<ILidarrHeartAcquisitionService>().Object, CoordinatorLogger, tracker);
+
+    private static TrackAcquisitionQueue NewQueue() => new(new Mock<ILogger<TrackAcquisitionQueue>>().Object);
 
     private static async Task<AcquisitionRequest?> NextQueued(TrackAcquisitionQueue queue)
     {
@@ -328,6 +339,7 @@ public class HeartAcquisitionCoordinatorTests
         Assert.False(request.IsStar);
         Assert.True(request.ForcePermanent);
         Assert.Equal(DownloadSource.YouTube, request.SourceOverride);
+        Assert.Equal(new[] { "felix" }, request.RequestedBy);
         lidarr.VerifyNoOtherCalls();
     }
 
@@ -346,5 +358,128 @@ public class HeartAcquisitionCoordinatorTests
 
         Assert.Null(await NextQueued(queue));
         lidarr.Verify(x => x.TryAcquireTrackAsync("soulseek", "track-id", false, It.IsAny<string?>()), Times.Once);
+    }
+
+    [Fact]
+    public void DownloadOnPlayLeavesTheTrackToWaitForLosslessOnPlay()
+    {
+        var settings = PlaySettings(true, false);
+        settings.WaitForLosslessOnPlay = true;
+        var queue = NewQueue();
+        Coordinator(settings, queue).QueuePlay("soulseek", "track-id");
+        Assert.Equal(0, queue.WaitingPlays);
+    }
+
+    [Theory]
+    [InlineData(false, DownloadSource.Soulseek)]
+    [InlineData(true, DownloadSource.SoulseekThenYouTube)]
+    public async Task SoulseekFirstPlaysFallBackToYouTubeOnlyWhenItIsOn(bool youTube, DownloadSource expected)
+    {
+        var queue = NewQueue();
+        Coordinator(PlaySettings(true, false,
+            new HeartDownloadStep { Source = HeartDownloadSource.Soulseek, SongEnabled = true, AlbumEnabled = false },
+            new HeartDownloadStep { Source = HeartDownloadSource.YouTube, SongEnabled = youTube, AlbumEnabled = false }), queue)
+            .QueuePlay("soulseek", "track-id");
+        Assert.Equal(expected, (await NextQueued(queue))!.SourceOverride);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LidarrAlbumOnPlayTriesAgainAfterAHandOffThatDidNotTake(bool throws)
+    {
+        var lidarr = new Mock<ILidarrHeartAcquisitionService>();
+        var calls = lidarr.SetupSequence(x => x.TryAcquireTrackAsync("soulseek", "track-id", false, It.IsAny<string?>()));
+        if (throws) calls.ThrowsAsync(new HttpRequestException("down")).ReturnsAsync(true);
+        else calls.ReturnsAsync(false).ReturnsAsync(true);
+        var coordinator = Coordinator(PlaySettings(false, true), NewQueue(), lidarr.Object);
+
+        for (var i = 0; i < 3; i++) coordinator.QueuePlay("soulseek", "track-id");
+
+        lidarr.Verify(x => x.TryAcquireTrackAsync("soulseek", "track-id", false, It.IsAny<string?>()), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task OnlyOnePlayedSongWaitsAndASkippedOneCanBeAskedForAgain()
+    {
+        var queue = NewQueue();
+        var coordinator = Coordinator(PlaySettings(true, false), queue);
+        coordinator.QueuePlay("soulseek", "first");
+        coordinator.QueuePlay("soulseek", "second");
+        Assert.Equal(1, queue.WaitingPlays);
+        Assert.Equal("first", (await NextQueued(queue))!.ExternalId);
+
+        coordinator.QueuePlay("soulseek", "second");
+        Assert.Equal("second", (await NextQueued(queue))!.ExternalId);
+    }
+
+    [Fact]
+    public async Task AHeartGoesBeforeAWaitingPlayAndUpgradesOneItJoins()
+    {
+        var queue = NewQueue();
+        Coordinator(PlaySettings(true, false), queue).QueuePlay("soulseek", "played");
+        _ = queue.Enqueue("soulseek", "hearted", isStar: true, triggerAlbumDownload: false, forcePermanent: true);
+        Assert.Equal("hearted", (await NextQueued(queue))!.ExternalId);
+
+        _ = queue.Enqueue("soulseek", "played", isStar: true, triggerAlbumDownload: false,
+            forcePermanent: true, notifyOnFailure: true, requestedBy: "felix");
+        var joined = (await NextQueued(queue))!;
+        Assert.True(joined.HeartJoined);
+        Assert.True(joined.NotifiesOnFailure);
+        Assert.Contains("felix", joined.RequestedBy);
+    }
+
+    [Fact]
+    public async Task APlayedDownloadHasARowThatFailsWithIt()
+    {
+        var queue = NewQueue();
+        var tracker = new AcquisitionTracker(NullLogger<AcquisitionTracker>.Instance);
+        var coordinator = Coordinator(PlaySettings(true, false), queue, tracker: tracker);
+        coordinator.QueuePlay("soulseek", "track-id", clientId: "ext-1", owner: "felix");
+        coordinator.QueuePlay("soulseek", "skipped", clientId: "ext-2", owner: "felix");
+        Assert.Equal(AcquisitionState.Queued, Assert.Single(tracker.ForUser("felix")).State);
+
+        var request = (await NextQueued(queue))!;
+        queue.Release(request);
+        request.Completion.TrySetException(new Exception("no peers"));
+        for (var i = 0; i < 200 && tracker.ForUser("felix")[0].State != AcquisitionState.Failed; i++)
+            await Task.Delay(10);
+        Assert.Equal(AcquisitionState.Failed, tracker.ForUser("felix")[0].State);
+    }
+
+    [Fact]
+    public async Task ADroppedPlayNeverStrandsAHeart()
+    {
+        // The heart for B arrives at the worst moment: while the play for B is being dropped.
+        TrackAcquisitionQueue queue = null!;
+        Task<string>? heart = null;
+        queue = new TrackAcquisitionQueue(new OnSkippedPlay(() =>
+            heart = queue.Enqueue("soulseek", "B", isStar: true, triggerAlbumDownload: false, forcePermanent: true)));
+        Assert.NotNull(queue.TryEnqueuePlay("soulseek", "A", DownloadSource.YouTube, null));
+
+        Assert.Null(queue.TryEnqueuePlay("soulseek", "B", DownloadSource.YouTube, null));
+        Assert.NotNull(heart);
+
+        // The heart has its own request, queued and taken first, not a released play's.
+        var next = (await NextQueued(queue))!;
+        if (next.ExternalId == "B")
+        {
+            queue.Release(next);
+            next.Completion.TrySetResult("/music/b.flac");
+        }
+        Assert.Equal("/music/b.flac", await heart.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(next.IsStar);
+    }
+
+    /// <summary>Runs <paramref name="onSkip"/> when the queue logs that it skipped a play.</summary>
+    private sealed class OnSkippedPlay(Action onSkip) : ILogger<TrackAcquisitionQueue>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (formatter(state, exception).StartsWith("Skipped play acquisition", StringComparison.Ordinal)) onSkip();
+        }
     }
 }

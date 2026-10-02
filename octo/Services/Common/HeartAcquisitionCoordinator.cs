@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Octo.Models.Settings;
 using Octo.Services.Lidarr;
+using Octo.Services.Soulseek;
 
 namespace Octo.Services.Common;
 
@@ -20,11 +21,12 @@ public sealed class HeartAcquisitionCoordinator
     /// <summary>Optional so a coordinator built without one still routes. The chain is the only
     /// place that knows which failure is the last, so it is the one that reports it.</summary>
     private readonly AcquisitionTracker? _tracker;
+    private readonly ExternalIdRegistry? _idRegistry;
 
     public HeartAcquisitionCoordinator(IOptionsMonitor<SubsonicSettings> settings,
         TrackAcquisitionQueue directQueue, IDownloadService directDownloads,
         ILidarrHeartAcquisitionService lidarr, ILogger<HeartAcquisitionCoordinator> logger,
-        AcquisitionTracker? tracker = null)
+        AcquisitionTracker? tracker = null, ExternalIdRegistry? idRegistry = null)
     {
         _settings = settings;
         _directQueue = directQueue;
@@ -32,6 +34,7 @@ public sealed class HeartAcquisitionCoordinator
         _lidarr = lidarr;
         _logger = logger;
         _tracker = tracker;
+        _idRegistry = idRegistry;
     }
 
     public void QueueTrack(string provider, string externalId, string? requestedBy = null)
@@ -39,19 +42,60 @@ public sealed class HeartAcquisitionCoordinator
         _ = AcquireTrackAsync(provider, externalId, requestedBy);
     }
 
-    // Track ids already handed to Lidarr on play. Each hand-off is an AlbumSearch against
-    // every indexer, and clients request /rest/stream again on every seek.
+    // Track ids handed to Lidarr on play, so a replay does not search every indexer again.
+    // Cleared when full rather than aged: forgetting costs at most one more search.
+    private const int LidarrPlayMemory = 10_000;
     private readonly ConcurrentDictionary<string, byte> _lidarrPlays = new();
 
-    public void QueuePlay(string provider, string externalId, string? requestedBy = null)
+    /// <summary>A client started an external track from its first byte.</summary>
+    public void QueuePlay(string provider, string externalId, string? requestedBy = null,
+        string? clientId = null, string? owner = null)
     {
         var settings = _settings.CurrentValue;
         // WaitForLosslessOnPlay acquires the track itself, from its own source.
         if (settings.DownloadOnPlay && !settings.WaitForLosslessOnPlay && PlaySource() is DownloadSource source)
-            _ = _directQueue.Enqueue(provider, externalId, isStar: false, triggerAlbumDownload: false,
-                forcePermanent: true, sourceOverride: source, notifyOnFailure: false, requestedBy: requestedBy);
-        if (settings.LidarrAlbumOnPlay && _lidarrPlays.TryAdd($"{provider}:{externalId}", 0))
-            _ = _lidarr.TryAcquireTrackAsync(provider, externalId, notifyFailure: false, requestedBy);
+            QueuePlayDownload(provider, externalId, source, requestedBy, clientId, owner);
+        if (!settings.LidarrAlbumOnPlay) return;
+        var key = $"{provider}:{externalId}";
+        if (_lidarrPlays.Count >= LidarrPlayMemory) _lidarrPlays.Clear();
+        if (_lidarrPlays.TryAdd(key, 0)) _ = HandPlayToLidarrAsync(key, provider, externalId, requestedBy);
+    }
+
+    private void QueuePlayDownload(string provider, string externalId, DownloadSource source,
+        string? requestedBy, string? clientId, string? owner)
+    {
+        var request = _directQueue.TryEnqueuePlay(provider, externalId, source, requestedBy, onQueued: () =>
+        {
+            // Same row a heart gets, opened before the worker can report its first stage.
+            var routing = _idRegistry?.Lookup(externalId);
+            _tracker?.Begin(provider, externalId, clientId, owner, routing?.Artist, routing?.Title, routing?.Album);
+            _tracker?.Stage(provider, externalId, AcquisitionState.Queued,
+                source == DownloadSource.YouTube ? "YouTube" : "Soulseek");
+        });
+        if (request is null) return;
+        _ = request.Completion.Task.ContinueWith(task =>
+        {
+            var reason = task.Exception?.GetBaseException().Message;
+            _logger.LogDebug("Play download failed for {Provider}:{Id}: {Message}", provider, externalId, reason);
+            // A heart that joined owns the row, and may still be trying its next source.
+            if (!request.IsStar && !request.HeartJoined) _tracker?.Fail(provider, externalId, reason);
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+    }
+
+    private async Task HandPlayToLidarrAsync(string key, string provider, string externalId, string? requestedBy)
+    {
+        try
+        {
+            if (await _lidarr.TryAcquireTrackAsync(provider, externalId, notifyFailure: false, requestedBy)) return;
+            _logger.LogDebug("Lidarr took no album for played track {Provider}:{Id}", provider, externalId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("Lidarr hand-off failed for played track {Provider}:{Id}: {Message}",
+                provider, externalId, ex.Message);
+        }
+        // Not handed off, so the next play of this track tries again.
+        _lidarrPlays.TryRemove(key, out _);
     }
 
     public void QueueAlbum(string provider, string albumExternalId, string? requestedBy = null)

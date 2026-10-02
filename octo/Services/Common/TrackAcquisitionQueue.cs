@@ -18,6 +18,18 @@ public sealed class AcquisitionRequest
     public DownloadSource? SourceOverride { get; init; }
     public bool NotifyOnFailure { get; init; } = true;
 
+    // Set when a heart joins a request a play started. From then on the heart owns the
+    // outcome: a failure is reported the way a star's is, and the play leaves the row alone.
+    private volatile bool _heartNotifies;
+    private volatile bool _heartJoined;
+    public bool HeartJoined => _heartJoined;
+    public bool NotifiesOnFailure => (IsStar && NotifyOnFailure) || _heartNotifies;
+    internal void JoinHeart(bool notifyOnFailure)
+    {
+        if (notifyOnFailure) _heartNotifies = true;
+        _heartJoined = true;
+    }
+
     private readonly ConcurrentDictionary<string, byte> _requestedBy =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -86,6 +98,10 @@ public sealed class TrackAcquisitionQueue
     // would be too late: Feishin re-requests /rest/stream on seek, so duplicates are routine.
     private readonly ConcurrentDictionary<string, AcquisitionRequest> _inFlight = new();
 
+    // Requests in the plays channel that the worker has not taken yet.
+    private int _waitingPlays;
+    internal int WaitingPlays => Volatile.Read(ref _waitingPlays);
+
     private readonly ILogger<TrackAcquisitionQueue> _logger;
 
     public TrackAcquisitionQueue(ILogger<TrackAcquisitionQueue> logger) => _logger = logger;
@@ -119,12 +135,17 @@ public sealed class TrackAcquisitionQueue
             // and record this caller on the request that is actually going to run, so the
             // file is attributed to everyone who asked and not just to whoever was first.
             existing.AddRequester(requestedBy);
+            // A heart for a track a play already asked for. The source cannot change any more, but
+            // the failure is now someone's explicit ask, and the heart chain still owns its fallback.
+            if (isStar && !existing.IsStar) existing.JoinHeart(notifyOnFailure);
             return existing.Completion.Task;
         }
 
+        if (!isStar) Interlocked.Increment(ref _waitingPlays);
         var channel = isStar ? _stars : _plays;
         if (!channel.Writer.TryWrite(request))
         {
+            if (!isStar) Interlocked.Decrement(ref _waitingPlays);
             // Full. Say so out loud: silently shedding work is how "why didn't that
             // download?" becomes unanswerable.
             _logger.LogWarning(
@@ -142,6 +163,59 @@ public sealed class TrackAcquisitionQueue
     }
 
     /// <summary>
+    /// Queue a copy of a played track unless another played track is still waiting. Radio
+    /// asks for every track it plays, and a backlog of those is work nobody wants by the
+    /// time it runs. A dropped play leaves no claim behind, so the next play asks again.
+    /// Returns null when dropped, otherwise the request carrying this play (new, or one
+    /// already queued or running). <paramref name="onQueued"/> runs only for a new request,
+    /// before the worker can see it.
+    /// </summary>
+    internal AcquisitionRequest? TryEnqueuePlay(string provider, string externalId,
+        DownloadSource sourceOverride, string? requestedBy, Action? onQueued = null)
+    {
+        var request = new AcquisitionRequest
+        {
+            Provider = provider, ExternalId = externalId, IsStar = false,
+            TriggerAlbumDownload = false, ForcePermanent = true,
+            SourceOverride = sourceOverride, NotifyOnFailure = false,
+        };
+        request.AddRequester(requestedBy);
+        // Already wanted: ride along, whatever is waiting.
+        if (_inFlight.TryGetValue(request.Key, out var known))
+        {
+            known.AddRequester(requestedBy);
+            return known;
+        }
+        // The waiting slot is taken BEFORE the key is claimed. Claiming first and letting go on a
+        // full slot would leave a heart that joined in between waiting on a request nobody runs:
+        // Release does not complete it.
+        if (Interlocked.CompareExchange(ref _waitingPlays, 1, 0) != 0)
+        {
+            _logger.LogDebug("Skipped play acquisition for {Provider}:{Id}: another played track is still waiting",
+                provider, externalId);
+            return null;
+        }
+        var existing = _inFlight.GetOrAdd(request.Key, request);
+        if (!ReferenceEquals(existing, request))
+        {
+            Interlocked.Decrement(ref _waitingPlays);
+            existing.AddRequester(requestedBy);
+            return existing;
+        }
+        onQueued?.Invoke();
+        if (!_plays.Writer.TryWrite(request))
+        {
+            Interlocked.Decrement(ref _waitingPlays);
+            _logger.LogWarning("Acquisition queue full (play); dropped {Provider}:{Id}", provider, externalId);
+            Release(request);
+            request.Completion.TrySetException(new InvalidOperationException("Acquisition queue is full; try again shortly."));
+            return request;
+        }
+        _logger.LogInformation("Queued play acquisition for {Provider}:{Id}", provider, externalId);
+        return request;
+    }
+
+    /// <summary>
     /// Take the next request, preferring stars. Returns null when both channels complete.
     /// </summary>
     internal async Task<AcquisitionRequest?> DequeueAsync(CancellationToken ct)
@@ -149,7 +223,7 @@ public sealed class TrackAcquisitionQueue
         while (!ct.IsCancellationRequested)
         {
             if (_stars.Reader.TryRead(out var star)) return star;
-            if (_plays.Reader.TryRead(out var play)) return play;
+            if (_plays.Reader.TryRead(out var play)) { Interlocked.Decrement(ref _waitingPlays); return play; }
 
             var starWait = _stars.Reader.WaitToReadAsync(ct).AsTask();
             var playWait = _plays.Reader.WaitToReadAsync(ct).AsTask();
