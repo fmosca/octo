@@ -1486,8 +1486,14 @@ public class SubsonicController : ControllerBase
             var direct = await TryDirectStreamAsync(provider!, externalId!, id);
             if (direct is not null) return direct;
 
-            _logger.LogWarning("Direct stream not available for {Id}", id);
-            return _responseBuilder.CreateError(format, 70, "No playable source found for this track");
+            _logger.LogWarning("No playable external source for {Id}", id);
+            // Subsonic's contract is that /stream returns a real status code — a
+            // 200 with an error document is what wedged Arpeggi's queue advance:
+            // the XML body is "success" that isn't audio, so the player never
+            // fires end-of-item and marches the progress bar past the end.
+            // A 4xx is a real error and clients handle it as such.
+            Response.StatusCode = 404;
+            return new EmptyResult();
         }
         catch (OperationCanceledException)
         {
@@ -1584,6 +1590,20 @@ public class SubsonicController : ControllerBase
         Response.StatusCode = directStream.StatusCode;
         Response.Headers["Content-Type"] = directStream.ContentType;
         Response.Headers["Accept-Ranges"] = "bytes";
+
+        // A suffix range past EOF (bytes=-N where N > size, or an open
+        // ended-range after every byte is consumed) is the one case where the
+        // contract demands a real 416 rather than bytes: Arpeggi probes with
+        // `Range: bytes=-2` to ask "does this resource support ranges?" and a
+        // 200 that answers with an error document instead of audio is exactly
+        // the shape that wedged queue advance and crashed Amperfy.
+        if (directStream.StatusCode == 416)
+        {
+            Response.Headers["Content-Range"] = directStream.ContentRange
+                ?? $"bytes */{directStream.ContentLength ?? 0}";
+            return new EmptyResult();
+        }
+
         if (directStream.ContentLength.HasValue)
         {
             Response.Headers["Content-Length"] = directStream.ContentLength.Value.ToString();

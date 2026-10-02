@@ -30,6 +30,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Optional
@@ -63,6 +64,12 @@ _AUDIO_FORMAT = os.environ.get(
     "YTDLP_AUDIO_FORMAT",
     "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
 )
+
+# ffmpeg binary used to remux googlevideo's DASH fragments into a plain MP4
+# with a head moov (see the remux note in stream()). The image installs
+# ffmpeg for exactly this; the env override exists for hosts where the
+# player lives somewhere else.
+_FFMPEG = shutil.which("ffmpeg") or os.environ.get("FFMPEG_PATH", "/usr/bin/ffmpeg")
 
 # User-Agent sent to googlevideo when proxying bytes. Empty (the default) keeps
 # requests' own python-requests/x.y, i.e. existing behaviour. Signed URLs from
@@ -704,6 +711,8 @@ def stream():
     if not url:
         return jsonify(error="no_audio_url"), 502
 
+    # The shim's /stream contract to Octo:
+    #
     # Forward the caller's Range header to googlevideo, which supports byte
     # ranges natively. iOS Subsonic clients (Arpeggi, Narjo) probe with
     # `Range: bytes=0-1` first and refuse to play if the server can't satisfy
@@ -721,9 +730,10 @@ def stream():
     # translate upstream's 206 back to a plain 200 below so this stays
     # invisible to clients that did not request a range themselves.
     upstream_headers = {}
-    incoming_range = request.headers.get("Range")
-    synthesized_range = not incoming_range
-    upstream_headers["Range"] = incoming_range if incoming_range else "bytes=0-"
+    # Always fetch the whole file upstream. A forwarded Range would return a
+    # truncated DASH fragment that ffmpeg cannot remux (no init segment) and
+    # the caller's range gets satisfied by slicing the remuxed body instead.
+    upstream_headers["Range"] = "bytes=0-"
     if _UPSTREAM_UA:
         upstream_headers["User-Agent"] = _UPSTREAM_UA
 
@@ -769,46 +779,84 @@ def stream():
         log.warning("stream upstream %s for %s", code, video_id)
         return jsonify(error="upstream_failed"), 502
 
-    @stream_with_context
-    def generator():
-        first = True
-        try:
-            for chunk in upstream.iter_content(chunk_size=64 * 1024):
-                if chunk:
-                    if first:
-                        log.info("stream %s ttfb_ms=%.0f status=%d",
-                                 video_id, (time.monotonic() - t_enter) * 1000.0,
-                                 upstream.status_code)
-                        first = False
-                    yield chunk
-        finally:
-            try:
-                upstream.close()
-            except Exception:
-                pass
+    # The bytes googlevideo serves are DASH segments: ftyp+sidx at the head,
+    # then moof/mdat fragment pairs, with the moov index at the very end. A
+    # player that starts at a mid-file byte offset has no moov to index the
+    # fragments and ffprobe refuses the bytes outright ("moov atom not
+    # found"), which is what wedged Arpeggi's queue advance and crashed
+    # Amperfy's AAC parser; even a from-zero play leaves no faststart index.
+    # Remux through ffmpeg (audio copied, not re-encoded) into a plain MP4
+    # with +faststart so the moov sits at the head where a range probe can
+    # reach it, and every mid-file range decodes standalone. Runs on the
+    # buffered upstream response, so the resolve/cache ladder above already
+    # ran once and this is a single deterministic pass.
+    # The MP4 muxer needs a seekable output to honor +faststart (it moves the
+    # moov after the fact), so remux into a temp file rather than a pipe,
+    # then read the finished file into the buffer the response slices from.
+    with tempfile.TemporaryDirectory(prefix="remux-") as tmpdir:
+        out_path = os.path.join(tmpdir, "out.mp4")
+        remux = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", "-",
+             "-c:a", "copy", "-f", "mp4", "-movflags", "+faststart", out_path],
+            input=b"".join(upstream.iter_content(chunk_size=64 * 1024)),
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        upstream.close()
+        if remux.returncode != 0 or not os.path.exists(out_path):
+            log.warning("stream %s remux failed rc=%d stderr=%r",
+                        video_id, remux.returncode,
+                        remux.stderr[-400:].decode("utf-8", "replace"))
+            return jsonify(error="remux_failed"), 502
+        with open(out_path, "rb") as f:
+            body = f.read()
 
-    # Reflect upstream's status (200 for full body, 206 for partial). Forward
-    # the metadata that AVPlayer / Subsonic clients need to seek correctly.
-    #
-    # A synthesized Range (see above) makes upstream answer 206 to a request
-    # the caller never made as partial. Report 200 to the caller instead and
-    # drop Content-Range: upstream's Content-Length already equals the full
-    # size here since the synthesized range always starts at byte 0.
-    response_status = upstream.status_code
+    total = len(body)
+
+    # Honor the caller's Range against the remuxed body. Every byte we hold
+    # is valid MP4 and the moov is at the head, mid-file ranges decode.
+    range_hdr = request.headers.get("Range")
+    resp_start = 0
+    if range_hdr:
+        spec = range_hdr.split("=", 1)[1] if "=" in range_hdr else ""
+        first = spec.split(",", 1)[0].strip() if spec else ""
+        start_str = first.split("-", 1)[0]
+        # bytes=N- open-ended and bytes=N-M both start at N; a pure suffix
+        # (-N) or an unsatisfiable spec falls back to the whole body.
+        if start_str.isdigit():
+            resp_start = min(int(start_str), total)
+
+    body = body[resp_start:]
+    available = len(body)
+    response_status = 206 if range_hdr else 200
+
+    def generator():
+        ttfb = (time.monotonic() - t_enter) * 1000.0
+        log.info("stream %s ttfb_ms=%.0f bytes=%d remuxed=yes",
+                 video_id, ttfb, available)
+        # Chunked iteration keeps the yield path flat-memory (the remuxed
+        # body is already resident as `body`, so carving it is free).
+        for i in range(0, available, 64 * 1024):
+            yield body[i:i + 64 * 1024]
+
+    # Content-Length is the sliced length actually sent, and Content-Range
+    # reflects the requested range against the remuxed total — the caller
+    # asked for bytes and must get honest bounds for a valid 206. A caller
+    # that sent no Range gets a plain 200 with the full body.
     headers = {
-        "Content-Type": upstream.headers.get("Content-Type", "audio/mp4"),
+        "Content-Type": "audio/mp4",
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-store",
+        "Content-Length": str(available),
     }
-    skip_headers = {"Content-Range"} if synthesized_range and upstream.status_code == 206 else set()
-    if synthesized_range and upstream.status_code == 206:
-        response_status = 200
-    for h in ("Content-Length", "Content-Range"):
-        if h in skip_headers:
-            continue
-        v = upstream.headers.get(h)
-        if v is not None:
-            headers[h] = v
+    if response_status == 206:
+        rng = request.headers.get("Range", "")
+        spec = rng.split("=", 1)[1] if "=" in rng else ""
+        first = spec.split(",", 1)[0] if spec else ""
+        start_str = first.split("-", 1)[0] if first else ""
+        start = int(start_str) if start_str.isdigit() else 0
+        # The remuxed body always represents the full file, so a requested
+        # end byte is honored only up to the last byte we have.
+        headers["Content-Range"] = f"bytes {start}-{total - 1}/{total}"
     return Response(generator(), headers=headers, status=response_status)
 
 
