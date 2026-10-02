@@ -1668,8 +1668,8 @@ public class SubsonicController : ControllerBase
         // the enrich is cached, and the video length comes from the shim's persistent
         // metadata cache, so it is a disk hit for anything resolved before.
         var detail = new List<Song> { song };
-        await _metadataService.EnrichExternalSongsAsync(detail);
-        await _metadataService.ResolveTopDurationsAsync(detail);
+        await _metadataService.EnrichExternalSongsAsync(detail, HttpContext.RequestAborted);
+        await _metadataService.ResolveTopDurationsAsync(detail, HttpContext.RequestAborted, interactive: true);
 
         return _responseBuilder.CreateSongResponse(format, song);
     }

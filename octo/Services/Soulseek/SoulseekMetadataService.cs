@@ -345,11 +345,16 @@ public class SoulseekMetadataService : IMusicMetadataService
     // wait, so most cover fetches timed out and the ones that won starved YouTube prewarm.
     private readonly SemaphoreSlim _coverArtPrewarmGate = new(6);
 
-    public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+    public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default,
+        bool interactive = false)
     {
         var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
         {
-            if (!await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
+            // A client waiting on this must not lose the race against the background prewarms:
+            // a dropped resolve leaves the 180 s placeholder the client is about to draw its
+            // scrub bar from. Interactive callers go straight through — the shim's own gate
+            // keeps a reserve for interactive work, so this cannot starve a play.
+            if (!interactive && !await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
             try
             {
                 // Fast metadata-only lookup (flat search, no URL solve). Pass the
@@ -372,7 +377,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                 }
             }
             catch { /* best-effort; keeps the existing duration on a miss */ }
-            finally { _prewarmGate.Release(); }
+            finally { if (!interactive) _prewarmGate.Release(); }
         });
         await Task.WhenAll(tasks);
     }

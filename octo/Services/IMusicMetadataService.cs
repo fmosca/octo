@@ -50,7 +50,13 @@ public interface IMusicMetadataService
     /// result so the shown length matches the audio that plays. Bounded + cached;
     /// also stores the videoId so playback reuses the same video.
     /// </summary>
-    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+    /// <param name="interactive">
+    /// True when a client is waiting on this (opening a track). It then skips the background
+    /// prewarm gate, which drops a resolve that cannot get a permit inside its bounded wait —
+    /// and a dropped resolve leaves the 180 s placeholder the client is about to draw its
+    /// scrub bar from. The shim's own gate reserves capacity for interactive work.
+    /// </param>
+    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default, bool interactive = false)
         => Task.CompletedTask;
 
     /// <summary>
