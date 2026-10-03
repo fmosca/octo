@@ -3953,11 +3953,12 @@ function renderLossy() {
     list.innerHTML = `
       <div class="config-table">
         <div class="config-row config-row-head lossy-row">
-          <span></span><span>Song</span><span>Album</span><span>Format</span><span>Status</span>
+          <span><input type="checkbox" class="pick" id="lossy-pick-all" aria-label="Select every song shown" /></span>
+          <span>Song</span><span>Album</span><span>Format</span><span>Status</span>
         </div>
         ${shown.map(row => `
-          <label class="config-row lossy-row">
-            <span><input type="checkbox" data-lossy-id="${esc(row.id)}" ${lossy.picked.has(row.id) ? 'checked' : ''}
+          <label class="config-row lossy-row${lossy.picked.has(row.id) ? ' picked' : ''}">
+            <span><input type="checkbox" class="pick" data-lossy-id="${esc(row.id)}" ${lossy.picked.has(row.id) ? 'checked' : ''}
               ${isOpenJob(row.job) ? 'disabled' : ''} aria-label="Pick ${esc(row.title)}" /></span>
             <span class="key">${esc(row.title)}<span class="lossy-sub">${esc(row.artist)}${row.fromYouTube ? ' · from YouTube' : ''}</span></span>
             <span class="value">${esc(row.album ?? '')}</span>
@@ -3974,6 +3975,20 @@ function renderLossy() {
   // A song that started meanwhile is no longer something to pick.
   for (const row of lossy.rows) if (isOpenJob(row.job)) lossy.picked.delete(row.id);
   const n = lossy.picked.size;
+
+  // Select all means every song the filters show, drawn or not, that is not already running.
+  const pickable = visible.filter(row => !isOpenJob(row.job));
+  const pickedShown = pickable.filter(row => lossy.picked.has(row.id)).length;
+  const all = document.getElementById('lossy-pick-all');
+  if (all) {
+    all.checked = pickable.length > 0 && pickedShown === pickable.length;
+    all.indeterminate = pickedShown > 0 && pickedShown < pickable.length;
+    all.disabled = pickable.length === 0;
+  }
+  const selectAll = document.getElementById('lossy-all');
+  selectAll.textContent = pickable.length ? `Select all ${pickable.length}` : 'Select all';
+  selectAll.hidden = pickable.length === 0 || pickedShown === pickable.length;
+  document.getElementById('lossy-none').hidden = n === 0;
   document.getElementById('lossy-count').textContent = n ? `${n} ${n === 1 ? 'song' : 'songs'} picked` : 'Nothing picked';
   const go = document.getElementById('lossy-go');
   go.textContent = n ? `Find higher quality for ${n} ${n === 1 ? 'song' : 'songs'}` : 'Find higher quality';
@@ -3983,6 +3998,14 @@ function renderLossy() {
 }
 
 document.getElementById('lossy-list')?.addEventListener('change', event => {
+  if (event.target.id === 'lossy-pick-all') {
+    const pickable = lossyVisible().filter(row => !isOpenJob(row.job));
+    for (const row of pickable) {
+      if (event.target.checked) lossy.picked.add(row.id); else lossy.picked.delete(row.id);
+    }
+    renderLossy();
+    return;
+  }
   const box = event.target.closest('[data-lossy-id]');
   if (!box) return;
   if (box.checked) lossy.picked.add(box.dataset.lossyId); else lossy.picked.delete(box.dataset.lossyId);

@@ -1717,18 +1717,16 @@
             <div class="lossy-filters">
               <input class="set-input" id="lossy-q" type="search" placeholder="Title, artist or album" aria-label="Filter songs" />
               <select class="set-input" id="lossy-format" aria-label="Format"><option value="">Every format</option></select>
-              <label class="lossy-check"><input type="checkbox" id="lossy-youtube" /><span>Only songs Octo got from YouTube</span></label>
-              <label class="lossy-check"><input type="checkbox" id="lossy-hide-tried" /><span>Hide songs tried in the last 4 weeks</span></label>
+              <label class="lossy-check"><input type="checkbox" class="pick" id="lossy-youtube" /><span>Only songs Octo got from YouTube</span></label>
+              <label class="lossy-check"><input type="checkbox" class="pick" id="lossy-hide-tried" /><span>Hide songs tried in the last 4 weeks</span></label>
               <button class="btn btn-ghost" type="button" id="lossy-refresh"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Refresh</span></button>
             </div>
             <div id="lossy-list"></div>
             <div class="cover-bar" id="lossy-bar">
               <span class="cover-count" id="lossy-count">Nothing picked</span>
-              <span class="cover-hint">
-                <button type="button" class="link-btn" id="lossy-all">Select all shown</button>
-                <span aria-hidden="true">·</span>
-                <button type="button" class="link-btn" id="lossy-none">Clear</button>
-              </span>
+              <span class="cover-hint"></span>
+              <button class="btn btn-ghost" type="button" id="lossy-all">Select all</button>
+              <button class="btn btn-ghost" type="button" id="lossy-none" hidden>Clear</button>
               <button class="btn btn-ghost" type="button" id="lossy-cancel">Cancel queued</button>
               <button class="btn btn-ghost" type="button" id="lossy-clear">Clear finished</button>
               <button class="btn btn-primary" type="button" id="lossy-go" disabled>Find higher quality</button>
