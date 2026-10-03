@@ -510,6 +510,23 @@ public abstract class BaseDownloadService : IDownloadService
             }
             Track(t => t.Describe(externalProvider, externalId, song.Artist, song.Title, song.Album));
 
+            // Never a second copy of a song already in the library; a lossy one is queued for a
+            // higher quality copy instead. Not for a replacement or a Better quality search, which
+            // exist to download a song that is already there.
+            if (!isCache && replacement is null && !upgradeSearch && SubsonicSettings.SkipOwnedSongs
+                && OptionalService<Octo.Services.Library.LibraryOwnership>() is { } ownership
+                && await ownership.FindAsync(song.Artist, song.Title, song.Duration, song.Album, cancellationToken) is { } owned)
+            {
+                var decision = Octo.Services.Library.LibraryOwnership.Decide(owned,
+                    SourceCanBeLossless(sourceOverride), UpgradeAllowed(requestedBy));
+                if (decision == Octo.Services.Library.OwnedDecision.KeepAndUpgrade) QueueUpgradeFor(owned, song, requestedBy!);
+                Logger.LogInformation("'{Artist} - {Title}' is already in your library ({Suffix}) at {Path}; not downloading another copy{Upgrade}",
+                    song.Artist, song.Title, owned.Suffix, owned.AbsolutePath,
+                    decision == Octo.Services.Library.OwnedDecision.KeepAndUpgrade ? ", looking for a higher quality one instead" : "");
+                Track(t => t.Imported(externalProvider, externalId, song.Artist, song.Title, owned.AbsolutePath));
+                return owned.AbsolutePath;
+            }
+
             var downloadInfo = new DownloadInfo
             {
                 SongId = songId,
@@ -768,7 +785,38 @@ public abstract class BaseDownloadService : IDownloadService
             tracksToDownload.Select(s => (s.ExternalId!, (string?)s.Artist, (string?)s.Title, (string?)album.Title))));
 
         // Per-track notifications are muted below; these feed one summary instead.
-        int succeeded = 0, lossless = 0, failed = 0;
+        int succeeded = 0, lossless = 0, failed = 0, kept = 0, upgrading = 0;
+
+        // Songs already in the library stay as they are, and a lossy one is queued for a higher
+        // quality copy instead of downloaded again. Only what is missing is looked for, by folder
+        // or song by song.
+        if (SubsonicSettings.SkipOwnedSongs && OptionalService<Octo.Services.Library.LibraryOwnership>() is { } ownership)
+        {
+            var owned = new ConcurrentDictionary<string, Octo.Services.Library.OwnedCopy>(StringComparer.Ordinal);
+            await Parallel.ForEachAsync(tracksToDownload, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (track, ct) =>
+            {
+                if (await ownership.FindAsync(track.Artist, track.Title, track.Duration, track.Album ?? album.Title, ct) is { } copy)
+                    owned[track.ExternalId!] = copy;
+            });
+            var canBeLossless = SourceCanBeLossless(sourceOverride);
+            var mayUpgrade = UpgradeAllowed(requestedBy);
+            foreach (var track in tracksToDownload.Where(t => owned.ContainsKey(t.ExternalId!)))
+            {
+                var copy = owned[track.ExternalId!];
+                if (Octo.Services.Library.LibraryOwnership.Decide(copy, canBeLossless, mayUpgrade)
+                    == Octo.Services.Library.OwnedDecision.KeepAndUpgrade)
+                {
+                    QueueUpgradeFor(copy, track, requestedBy!);
+                    upgrading++;
+                }
+                else kept++;
+                Track(t => t.Imported(ProviderName, track.ExternalId!, track.Artist, track.Title, copy.AbsolutePath));
+            }
+            tracksToDownload = tracksToDownload.Where(t => !owned.ContainsKey(t.ExternalId!)).ToList();
+            if (owned.Count > 0)
+                Logger.LogInformation("Album '{Album}': {Kept} songs already yours, {Upgrading} queued for a higher quality copy, {Left} to download",
+                    album.Title, kept, upgrading, tracksToDownload.Count);
+        }
 
         // Every track of the walk shares the release the first one settled on, and the walk
         // measures each track so the album gain can be written once it ends.
@@ -862,7 +910,7 @@ public abstract class BaseDownloadService : IDownloadService
 
         if (MetadataSettingsValue.ReplayGain) WriteAlbumGain(albumContext, album.Title);
 
-        var summary = BuildAlbumSummary(album, succeeded, lossless, failed);
+        var summary = BuildAlbumSummary(album, succeeded, lossless, failed, kept, upgrading);
         // Hide an intermediate failure while another source remains, but still report
         // success when an earlier priority step completes the album acquisition.
         if ((!suppressSummary || failed == 0) && summary is not null) Notifications.Notify(summary);
@@ -932,8 +980,8 @@ public abstract class BaseDownloadService : IDownloadService
     /// track whose star triggered the walk got its own DownloadCompleted.
     /// </summary>
     internal static Octo.Services.Notifications.NotificationEvent? BuildAlbumSummary(
-        Album album, int succeeded, int lossless, int failed)
-        => succeeded + failed == 0 ? null : new Octo.Services.Notifications.NotificationEvent
+        Album album, int succeeded, int lossless, int failed, int kept = 0, int upgrading = 0)
+        => succeeded + failed + kept + upgrading == 0 ? null : new Octo.Services.Notifications.NotificationEvent
         {
             Type = Octo.Services.Notifications.NotificationEventType.AlbumCompleted,
             Artist = album.Artist,
@@ -942,7 +990,26 @@ public abstract class BaseDownloadService : IDownloadService
             TrackCount = succeeded,
             LosslessCount = lossless,
             FailedCount = failed,
+            KeptCount = kept,
+            UpgradingCount = upgrading,
         };
+
+    /// <summary>Whether this download's source can deliver a lossless copy at all.</summary>
+    private bool SourceCanBeLossless(DownloadSource? sourceOverride) =>
+        (sourceOverride ?? SubsonicSettings.DownloadSource) is DownloadSource.Soulseek or DownloadSource.SoulseekThenYouTube;
+
+    /// <summary>Whether Better quality may run for the person who asked: every gate of the action.</summary>
+    private bool UpgradeAllowed(IReadOnlyList<string>? requestedBy) =>
+        requestedBy is { Count: > 0 } askers
+        && OptionalService<Octo.Services.Library.UpgradeQueue>() is not null
+        && OptionalService<IOptionsMonitor<LibraryActionSettings>>()?.CurrentValue is { } actions
+        && actions.Enabled && !actions.DryRun && actions.IsAllowed(askers[0])
+        && actions.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled);
+
+    private void QueueUpgradeFor(Octo.Services.Library.OwnedCopy owned, Song song, IReadOnlyList<string> requestedBy) =>
+        OptionalService<Octo.Services.Library.UpgradeQueue>()?.Add(
+            [new Octo.Services.Library.UpgradeAsk(owned.NavidromeId!, song.Title, song.Artist, song.Album, owned.Suffix)],
+            requestedBy[0], "heart");
     
     #endregion
     

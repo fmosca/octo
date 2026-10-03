@@ -257,6 +257,8 @@ builder.Services.AddSingleton(sp => new Octo.Services.Library.UpgradeQueue(
     System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "upgrades.json"),
     sp.GetRequiredService<ILogger<Octo.Services.Library.UpgradeQueue>>()));
 builder.Services.AddSingleton<Octo.Services.Library.UpgradeWorker>();
+// Whether a song is already in the library, so nothing downloads a second copy.
+builder.Services.AddSingleton<Octo.Services.Library.LibraryOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.UpgradeWorker>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.QualityUpgradeWorker>());
 // The library Review sweep (#72): asks about music that was already there, a few songs an hour,

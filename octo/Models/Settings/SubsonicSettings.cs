@@ -306,6 +306,15 @@ public class SubsonicSettings
     public bool StarDownloadsForRequester { get; set; } = true;
 
     /// <summary>
+    /// Never download a song already in the library (default: true). A heart, an album walk or a
+    /// play of a song you have keeps your copy; a lossy copy is queued for a higher quality one
+    /// when a lossless source is in the chain and Better quality may run. The same song means the
+    /// same artist and title in one version, and a length within 8 seconds or the same album.
+    /// Environment variable: SKIP_OWNED_SONGS
+    /// </summary>
+    public bool SkipOwnedSongs { get; set; } = true;
+
+    /// <summary>
     /// In Permanent mode, block the first play until the lossless copy has been fetched
     /// (default: false).
     /// Environment variable: WAIT_FOR_LOSSLESS_ON_PLAY
