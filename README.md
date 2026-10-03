@@ -285,9 +285,11 @@ starting a second one. Acquisitions Octo starts itself are unattributed, as are 
 written before this existed. Turning it off stops the username being captured at all rather
 than hiding it afterwards, so nothing downstream holds it; names already written stay.
 
-`STAR_DOWNLOADS_FOR_REQUESTER` (on by default) means a star on a song or album Octo found for
-you also marks it as a favourite: once it downloads, Octo favourites it in Navidrome for the
-person who starred it. An album star favourites the album. Octo's own apps are left out,
+A heart on a song you already have is a favourite in Navidrome, straight away, and downloads
+nothing. A heart on a song you do not have only downloads it; heart it again once it is in your
+library to make it a favourite. `STAR_DOWNLOADS_FOR_REQUESTER` (off by default) makes Octo also
+favourite a download when it lands, for the person who hearted it; an album heart then
+favourites the album. Octo's own apps are left out,
 because their star button means Add. The person's sign-in is held in memory
 with the download until the song arrives (a password is first turned into a token, so the
 password itself is never held), and a restart drops it.
@@ -669,7 +671,7 @@ The dashboard's **Better quality** page lists every song in your library that is
 
 Copies come from Soulseek, from Lidarr, or from both: **Library actions → Where to look for a higher quality copy** (`LIBRARY_ACTIONS_UPGRADE_SOURCE`). Automatic, the default, asks Soulseek first and Lidarr for what Soulseek cannot find, using whichever is set up, and asks Lidarr alone while Soulseek is offline. Lidarr only fetches whole albums, so Octo borrows the album: it copies out the one song, which then goes through the same checks and the same in-place swap as a Soulseek copy, deletes the other files that search brought in, and puts the album's monitoring back as it was. A song whose file Lidarr itself manages is left to Lidarr, which upgrades it in place when its quality profile asks for lossless.
 
-> **Hearting is "fetch", then "favorite".** Navidrome has never seen Octo's IDs for music you don't own yet, so there is nothing on its side to mark as starred when you heart it. Once the files land and Navidrome shows them, Octo favourites them for whoever hearted them, unless the heart came from Octo's own apps (their heart means Add) or `STAR_DOWNLOADS_FOR_REQUESTER` is off. A heart on a song you already have, even on the copy Octo found outside your library, is only that favourite: Octo checks your library first, favourites your own copy straight away, and downloads nothing (an MP3 is queued for Better quality).
+> **A heart is "fetch" for a song you do not have, and "favourite" for one you do.** Octo checks your library first. A song you already have, even the copy Octo found outside your library, becomes your favourite in Navidrome straight away and downloads nothing (an MP3 is queued for Better quality). A song you do not have is downloaded and nothing more: once it is in your library, heart it there to make it a favourite. `STAR_DOWNLOADS_FOR_REQUESTER` makes Octo favourite downloads when they land instead. Octo's own apps are left out of both, since their heart means Add.
 
 ### Cover art aggregator
 

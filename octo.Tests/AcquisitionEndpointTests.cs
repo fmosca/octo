@@ -248,13 +248,14 @@ public sealed class AcquisitionEndpointTests
     }
 
     [Fact]
-    public async Task StarWithTheSettingOff_HoldsNothing()
+    public async Task StarWithDownloadFavouritesOff_StillHoldsTheSignIn()
     {
+        // The song may turn out to be in the library already, and that heart is always a favourite.
         await using var factory = new AcquisitionWebFactory(new Dictionary<string, string?>
         {
             ["Subsonic:StarDownloadsForRequester"] = "false",
         });
-        Assert.Equal(0, await HeldAfterStar(factory, "Symfonium"));
+        Assert.Equal(1, await HeldAfterStar(factory, "Symfonium"));
     }
 
     [Fact]

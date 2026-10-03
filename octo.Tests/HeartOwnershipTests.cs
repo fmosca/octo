@@ -115,7 +115,7 @@ public sealed class HeartOwnershipTests : IDisposable
         var hearts = new HeartOwnership(ownership, _metadata.Object, subsonic, NullLogger<HeartOwnership>.Instance,
             _upgrades, TestOptions.Monitor(actions ?? new LibraryActionSettings()), sources);
         return new HeartAcquisitionCoordinator(subsonic, _queue, _downloads.Object, _lidarr.Object,
-            NullLogger<HeartAcquisitionCoordinator>.Instance, _tracker, soulseek: soulseek, owned: hearts);
+            NullLogger<HeartAcquisitionCoordinator>.Instance, _tracker, soulseek: soulseek, owned: hearts, stars: _stars);
     }
 
     private static SubsonicCredential Alice() => SubsonicCredential.From(new Dictionary<string, string>
@@ -180,6 +180,28 @@ public sealed class HeartOwnershipTests : IDisposable
         _queue.Release(download);
         download.Completion.TrySetResult(Path.Combine(_root, "teardrop.flac"));
         await chain.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>The heart was the download: it is not a favourite when the song lands, unless
+    /// StarDownloadsForRequester asks for that (off by default).</summary>
+    [Fact]
+    public async Task AHeartOnASongYouDoNotHave_IsNotAFavouriteWhenItLands()
+    {
+        Heart();
+
+        var chain = Coordinator().AcquireTrackAsync("deezer", "teardrop", "alice");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var download = await _queue.DequeueAsync(timeout.Token);
+        // What the download does once the file is placed.
+        _tracker.Imported("deezer", "teardrop", "Massive Attack", "Teardrop", Path.Combine(_root, "teardrop.flac"));
+        _queue.Release(download!);
+        download!.Completion.TrySetResult(Path.Combine(_root, "teardrop.flac"));
+        await chain.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await LastFmScrobbleServiceTests.Until(() => _tracker.All().Single(row => row.ExternalId == "teardrop").State == AcquisitionState.Done);
+        await Task.Delay(100);
+        Assert.Empty(Stars());
+        Assert.Equal(0, _stars.Held);
     }
 
     [Fact]

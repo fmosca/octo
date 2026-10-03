@@ -298,12 +298,15 @@ public class SubsonicSettings
     public bool RecordRequestedBy { get; set; } = true;
 
     /// <summary>
-    /// Favourite a starred outside song or album in Navidrome once it downloads, for the person
-    /// who starred it (default: true). Environment variable: STAR_DOWNLOADS_FOR_REQUESTER
+    /// Also favourite a hearted outside song or album in Navidrome once it downloads, for the
+    /// person who hearted it (default: false). Off, a heart on a song you do not have only
+    /// downloads it; heart it again once it is in the library to make it a favourite. A heart on
+    /// a song you already have is always a favourite, whatever this says.
+    /// Environment variable: STAR_DOWNLOADS_FOR_REQUESTER
     /// Octo's own apps are left out: their star is the Add button. The person's sign-in is held
     /// in memory until the song arrives, and a restart drops it.
     /// </summary>
-    public bool StarDownloadsForRequester { get; set; } = true;
+    public bool StarDownloadsForRequester { get; set; } = false;
 
     /// <summary>
     /// Never download a song already in the library (default: true). A heart, an album walk or a

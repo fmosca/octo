@@ -9,8 +9,9 @@ using Octo.Services.Subsonic;
 namespace Octo.Tests;
 
 /// <summary>
-/// #71: a star from another app on a song Octo found becomes a Navidrome favourite once the song
-/// lands, for the person who starred it, signed as them, and only once.
+/// #71: with StarDownloadsForRequester on (off by default), a star from another app on a song
+/// Octo found becomes a Navidrome favourite once the song lands, for the person who starred it,
+/// signed as them, and only once. A song already owned is favourited whatever it says.
 /// </summary>
 public sealed class StarOnArrivalTests
 {
@@ -21,7 +22,8 @@ public sealed class StarOnArrivalTests
     }
 
     private readonly ConcurrentQueue<(string Endpoint, Dictionary<string, string> Parameters)> _calls = new();
-    private readonly TestOptionsMonitor<SubsonicSettings> _settings = TestOptions.Monitor(new SubsonicSettings());
+    private readonly TestOptionsMonitor<SubsonicSettings> _settings =
+        TestOptions.Monitor(new SubsonicSettings { StarDownloadsForRequester = true });
     private bool _alreadyStarred;
 
     private static AcquisitionTracker Tracker(bool canLook = true)
@@ -181,6 +183,47 @@ public sealed class StarOnArrivalTests
 
         await LastFmScrobbleServiceTests.Until(() => stars.Held == 0);
         await Task.Delay(100);
+        Assert.Empty(_calls);
+    }
+
+    [Fact]
+    public async Task TheDefaultIsThatADownloadIsNotFavourited()
+    {
+        Assert.False(new SubsonicSettings().StarDownloadsForRequester);
+        var tracker = Tracker();
+        _settings.Set(new SubsonicSettings());
+        using var stars = Stars(tracker);
+        tracker.Begin("soulseek", "abc", "abc", "alice");
+        stars.HoldSong("soulseek", "abc", Credential("alice"), "alice");
+
+        tracker.Imported("soulseek", "abc", "A", "Song", "/music/song.flac");
+
+        await LastFmScrobbleServiceTests.Until(() => stars.Held == 0);
+        await Task.Delay(100);
+        Assert.Empty(_calls);
+    }
+
+    [Fact]
+    public async Task ASongAlreadyOwnedIsFavouritedWithTheSettingOff()
+    {
+        var tracker = Tracker();
+        _settings.Set(new SubsonicSettings { StarDownloadsForRequester = false });
+        using var stars = Stars(tracker);
+        tracker.Begin("soulseek", "abc", "abc", "alice");
+        stars.HoldSong("soulseek", "abc", Credential("alice"), "alice");
+
+        Assert.True(stars.FavouriteOwned("soulseek", "abc", "nd-owned", "A", "Song", "/music/song.flac"));
+
+        await LastFmScrobbleServiceTests.Until(() => Calls("rest/star").Count == 1);
+        Assert.Equal("nd-owned", Calls("rest/star").Single()["id"]);
+        Assert.Equal(0, stars.Held);
+    }
+
+    [Fact]
+    public void AnOwnedSongFromOctosOwnAppsIsNotFavourited()
+    {
+        using var stars = Stars(Tracker());
+        Assert.False(stars.FavouriteOwned("soulseek", "abc", "nd-owned", "A", "Song", "/music/song.flac"));
         Assert.Empty(_calls);
     }
 

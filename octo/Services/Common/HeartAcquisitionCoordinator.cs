@@ -30,6 +30,7 @@ public sealed class HeartAcquisitionCoordinator
     /// <summary>Optional: without it every heart goes down the chain, and the download itself
     /// notices a song that is already there, as before.</summary>
     private readonly Octo.Services.Library.HeartOwnership? _owned;
+    private readonly StarOnArrival? _stars;
 
     // Plays waiting for Soulseek, one per song however often it is played meanwhile.
     private readonly ConcurrentDictionary<string, byte> _heldPlays = new();
@@ -39,9 +40,10 @@ public sealed class HeartAcquisitionCoordinator
         ILidarrHeartAcquisitionService lidarr, ILogger<HeartAcquisitionCoordinator> logger,
         AcquisitionTracker? tracker = null, ExternalIdRegistry? idRegistry = null,
         ISoulseekLink? soulseek = null, SoulseekHoldStore? holds = null,
-        Octo.Services.Library.HeartOwnership? owned = null)
+        Octo.Services.Library.HeartOwnership? owned = null, StarOnArrival? stars = null)
     {
         _owned = owned;
+        _stars = stars;
         _settings = settings;
         _directQueue = directQueue;
         _directDownloads = directDownloads;
@@ -309,6 +311,9 @@ public sealed class HeartAcquisitionCoordinator
     {
         if (_owned is null || await _owned.FindSongAsync(provider, externalId) is not { } found) return false;
         var upgrading = _owned.QueueUpgradeIfWanted(found.Copy, found.Song, requestedBy);
+        // Before the row closes, so the close never reads as a download that landed.
+        _stars?.FavouriteOwned(provider, externalId, found.Copy.NavidromeId,
+            found.Song.Artist ?? "", found.Song.Title ?? "", found.Copy.AbsolutePath);
         _logger.LogInformation("Hearted '{Artist} - {Title}' is already in the library ({Suffix}); favouriting it instead of downloading{Upgrade}",
             found.Song.Artist, found.Song.Title, found.Copy.Suffix, upgrading ? ", and looking for a higher quality copy" : "");
         Settle(provider, externalId, found.Copy);
@@ -322,6 +327,8 @@ public sealed class HeartAcquisitionCoordinator
     {
         if (_owned is null || await _owned.FindWholeAlbumAsync(provider, albumExternalId) is not { } whole) return false;
         var tracked = whole.Songs.Where(pair => !string.IsNullOrEmpty(pair.Song.ExternalId)).ToList();
+        if (whole.Songs.Select(pair => pair.Copy.NavidromeId).FirstOrDefault(id => id is not null) is { } anySong)
+            _stars?.FavouriteOwnedAlbum(provider, albumExternalId, anySong);
         _tracker?.Announce(provider, albumExternalId, null,
             tracked.Select(pair => (pair.Song.ExternalId!, (string?)pair.Song.Artist, (string?)pair.Song.Title, (string?)whole.Album.Title)));
         var upgrading = 0;

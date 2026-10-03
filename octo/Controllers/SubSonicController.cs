@@ -3835,12 +3835,13 @@ public class SubsonicController : ControllerBase
         _subsonicSettings.RecordRequestedBy && !string.IsNullOrWhiteSpace(username) ? username : null;
 
     /// <summary>
-    /// The sign-in to favourite a starred outside song or album with once it arrives (#71), or
-    /// null. Octo's own apps send star for Add, which asks for a copy and not a favourite.
+    /// The sign-in to favourite a hearted outside song or album with, or null. Held for every
+    /// heart from another app, not only while downloads are favourited: a song that turns out to
+    /// be in the library already is always that person's favourite. Octo's own apps send star for
+    /// Add, which asks for a copy and not a favourite.
     /// </summary>
     private SubsonicCredential? FavouriteCredential(IReadOnlyDictionary<string, string> parameters) =>
-        _starOnArrival is not null && _subsonicSettings.StarDownloadsForRequester
-        && !StarOnArrival.IsOctoApp(parameters.GetValueOrDefault("c"))
+        _starOnArrival is not null && !StarOnArrival.IsOctoApp(parameters.GetValueOrDefault("c"))
             ? SubsonicCredential.From(parameters) : null;
 
     /// <summary>No Range, or a Range from byte 0, starts a track. A HEAD plays nothing; the

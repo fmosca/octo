@@ -116,6 +116,39 @@ public sealed class StarOnArrival : IDisposable
         }
     }
 
+    /// <summary>
+    /// A heart on a song already in the library: favourite the library's copy now for whoever
+    /// hearted it, whatever StarDownloadsForRequester says, since that setting is only about
+    /// downloads. By its Navidrome id, or found by its path when only that is known. False when
+    /// nobody's sign-in was held (Octo's own apps, whose heart means Add).
+    /// </summary>
+    public bool FavouriteOwned(string provider, string externalId, string? libraryId, string artist, string title, string path)
+    {
+        List<Hold> songs;
+        lock (_lock) songs = Take(_songs, hold => hold.Key == AcquisitionTracker.KeyOf(provider, externalId));
+        if (songs.Count == 0) return false;
+        foreach (var hold in songs)
+        {
+            if (libraryId is not null)
+                using (ExecutionContext.SuppressFlow())
+                    _ = Task.Run(() => StarSongAsync(hold.Credential, hold.Who, libraryId));
+            else StarWhenVisible(hold.Credential, hold.Who, artist, title, path);
+        }
+        return true;
+    }
+
+    /// <summary>A heart on an album already whole in the library: favourite the album now, found
+    /// through one of its songs, whatever StarDownloadsForRequester says.</summary>
+    public bool FavouriteOwnedAlbum(string provider, string albumId, string libraryIdOfASong)
+    {
+        List<Hold> albums;
+        lock (_lock) albums = Take(_albums, hold => hold.Key == AcquisitionTracker.KeyOf(provider, albumId));
+        if (albums.Count == 0) return false;
+        using (ExecutionContext.SuppressFlow())
+            _ = Task.Run(() => PlaceAsync(libraryIdOfASong, [], albums));
+        return true;
+    }
+
     /// <summary>Whether this person has favourited a song. False when Navidrome cannot say.</summary>
     public async Task<bool> IsStarredAsync(SubsonicCredential credential, string navidromeId)
     {
