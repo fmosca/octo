@@ -485,6 +485,10 @@ public class SoulseekClient
                 int? queueLength = resp.TryGetProperty("queueLength", out var qlEl) && qlEl.ValueKind == JsonValueKind.Number
                     ? qlEl.GetInt32()
                     : null;
+                bool? freeSlot = resp.TryGetProperty("hasFreeUploadSlot", out var fsEl)
+                    && fsEl.ValueKind is JsonValueKind.True or JsonValueKind.False
+                    ? fsEl.GetBoolean()
+                    : null;
 
                 foreach (var file in filesEl.EnumerateArray())
                 {
@@ -519,7 +523,8 @@ public class SoulseekClient
                         Length = length,
                         Extension = NormalizeExtension(ext, filename),
                         UploadSpeed = uploadSpeed,
-                        QueueLength = queueLength
+                        QueueLength = queueLength,
+                        HasFreeUploadSlot = freeSlot,
                     });
                 }
             }
@@ -904,6 +909,10 @@ public class SoulseekFileHit
     public string Extension { get; set; } = "";
     public int? UploadSpeed { get; set; }
     public int? QueueLength { get; set; }
+
+    /// <summary>The peer can start sending now rather than queueing us. Per response, like
+    /// QueueLength, so every file one peer offers carries the same value.</summary>
+    public bool? HasFreeUploadSlot { get; set; }
 }
 
 /// <summary>

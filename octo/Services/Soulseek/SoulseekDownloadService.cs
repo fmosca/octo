@@ -458,6 +458,129 @@ public class SoulseekDownloadService : BaseDownloadService
         }
     }
 
+    // The batches an album walk queued, by the walk's prepared track ids, so the walk's end can let
+    // go of what it did not use.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Username, string JobDir)> _albumBatches = new();
+
+    /// <summary>
+    /// One search for the whole album, and the one peer folder that covers most of it queued in one
+    /// batch into one job folder. Each covered track then takes its file without a search. Nothing
+    /// is prepared (the walk is song by song, as before) when album folders are off, the source has
+    /// no Soulseek in it, slskd is not logged in, there are fewer than three tracks, too few lengths
+    /// are known, no folder covers half the album, or slskd takes no batches.
+    /// </summary>
+    protected override async Task<IReadOnlyCollection<string>> PrepareAlbumAsync(Album album, IReadOnlyList<Song> tracks,
+        DownloadSource? source, CancellationToken cancellationToken)
+    {
+        var none = Array.Empty<string>();
+        var settings = CurrentSoulseekSettings;
+        if (!settings.AlbumFolders || tracks.Count < 3) return none;
+        if ((source ?? SubsonicSettings.DownloadSource) is not (DownloadSource.Soulseek or DownloadSource.SoulseekThenYouTube))
+            return none;
+        if (OptionalService<ISoulseekLink>() is { } link
+            && (await link.ReadAsync(fresh: false, cancellationToken))?.Link == SoulseekLinkState.NotLoggedIn)
+            return none;
+        if (AlbumSearchText(album.Artist, album.Title) is not { } text) return none;
+
+        var wanted = tracks
+            .Where(t => !string.IsNullOrEmpty(t.ExternalId) && !string.IsNullOrWhiteSpace(t.Title))
+            .Select(t => new AlbumTrack(t.ExternalId!, t.Title!, t.Duration, t.Track))
+            .ToList();
+        try
+        {
+            Logger.LogInformation("Soulseek album search: '{Query}' for {Count} tracks", text, wanted.Count);
+            var hits = await _slskd.SearchAsync(text, SearchProfile.Album(_settings), cancellationToken);
+            var wantedExt = SoulseekClient.NormalizeExtension(_settings.PreferredExtension, "");
+            var choice = AlbumFolderPicker.Choose(hits, wanted, hit =>
+                CandidateAllowed(hit, _rejectedPeers, _verification.RemembersRejections)
+                && string.Equals(hit.Extension, wantedExt, StringComparison.OrdinalIgnoreCase)
+                && hit.Size >= _settings.MinFileSizeBytes);
+            if (choice is null)
+            {
+                Logger.LogInformation("Album '{Album}': no one folder covers enough of it; searching song by song", album.Title);
+                return none;
+            }
+
+            var jobDir = NewJobDir();
+            var batch = await _slskd.EnqueueBatchAsync(choice.Username,
+                choice.Files.Select(pair => (pair.File.Filename, pair.File.Size)).ToList(), jobDir, cancellationToken);
+            if (!batch.Supported) return none;
+
+            var queued = DateTime.UtcNow;
+            var prepared = new List<string>();
+            foreach (var (track, file) in choice.Files)
+            {
+                if (!batch.TransferIds.TryGetValue(file.Filename, out var transferId)) continue;
+                _prepared[track.ExternalId] = new PreparedTransfer(file, jobDir, transferId, queued);
+                _albumBatches[track.ExternalId] = (choice.Username, jobDir);
+                prepared.Add(track.ExternalId);
+            }
+            Logger.LogInformation("Album '{Album}': {Taken} of {Total} tracks from {User}'s folder '{Folder}' in one batch",
+                album.Title, prepared.Count, wanted.Count, choice.Username, choice.Folder);
+            return prepared;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning("Album '{Album}': the album search failed ({Message}); searching song by song", album.Title, ex.Message);
+            return none;
+        }
+    }
+
+    /// <summary>Drops every song still waiting on one album batch and cancels its transfers.</summary>
+    private async Task AbandonAlbumBatchAsync(string jobDir)
+    {
+        var waiting = _prepared.Where(pair => pair.Value.JobDir == jobDir).Select(pair => pair.Key).ToList();
+        if (waiting.Count == 0) return;
+        Logger.LogInformation("The album folder's peer did not send; {Count} more songs search on their own", waiting.Count);
+        foreach (var id in waiting)
+        {
+            if (!_prepared.TryRemove(id, out var dropped)) continue;
+            try { await _slskd.CancelTransferAsync(dropped.Hit.Username, dropped.Hit.Filename, dropped.TransferId); }
+            catch (Exception ex) { Logger.LogDebug("Could not cancel {File}: {M}", dropped.Hit.Filename, ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// The walk is over: cancel in slskd every prepared transfer no track took, so a folder that did
+    /// not work out stops downloading files nobody will use, and remove the walk's job folder once
+    /// it is empty.
+    /// </summary>
+    protected override async Task FinishAlbumAsync(IReadOnlyCollection<string> prepared)
+    {
+        var folders = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in prepared)
+        {
+            if (_albumBatches.TryRemove(id, out var batch)) folders.Add(batch.JobDir);
+            if (!_prepared.TryRemove(id, out var unused)) continue;
+            try { await _slskd.CancelTransferAsync(unused.Hit.Username, unused.Hit.Filename, unused.TransferId); }
+            catch (Exception ex) { Logger.LogDebug("Could not cancel an unused album file {File}: {M}", unused.Hit.Filename, ex.Message); }
+        }
+        foreach (var jobDir in folders)
+        foreach (var root in await JobRootsAsync(CancellationToken.None))
+        {
+            var folder = Path.Combine(root, jobDir);
+            try
+            {
+                if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
+            }
+            catch (Exception ex) { Logger.LogDebug("Could not remove album job folder {Folder}: {M}", folder, ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// The words of an album search: the artist and the album, with " - Single" or " - EP" and any
+    /// bracket taken off, as a song's album search does. Null for a placeholder album name.
+    /// </summary>
+    internal static string? AlbumSearchText(string? artist, string? albumTitle)
+    {
+        var who = (artist ?? "").Trim();
+        var record = Regex.Replace((albumTitle ?? "").Trim(), @"\s*-\s*(Single|EP)$", "", RegexOptions.IgnoreCase).Trim();
+        if (who.Length == 0 || record.Length == 0) return null;
+        if (PlaceholderAlbums.Contains(SpaceNormalize(SongIdentity.Plain(record)))) return null;
+        var words = Regex.Replace(record, @"\s*[\(\[\{][^\)\]\}]*[\)\]\}]", "").Trim();
+        return words.Length == 0 ? null : $"{who} {words}";
+    }
+
     // Lossless FLAC via Soulseek/slskd: walk the top-N peers in quality order,
     // first successful transfer wins.
     private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, Song song, bool suppressNotify,
@@ -473,6 +596,8 @@ public class SoulseekDownloadService : BaseDownloadService
         // album. That file is tried first, without a search; the search runs only if it fails.
         _prepared.TryRemove(trackKey, out var prepared);
         var searched = prepared is null;
+        // Whether the album folder's file for this song arrived at all, whatever the checks said.
+        var preparedArrived = false;
         var ranked = prepared is null ? await SearchRankedAsync(null) : [prepared.Hit];
 
         async Task<List<SoulseekFileHit>> SearchRankedAsync(SoulseekFileHit? passOver)
@@ -548,10 +673,13 @@ public class SoulseekDownloadService : BaseDownloadService
             song.TranscodedFrom = transcodedFrom;
             return path;
         }
+        // Every peer tried, across the album folder's copy and the search after it.
+        var tried = 0;
         while (true)
         {
             foreach (var (hit, attemptIdx) in ranked.Select((h, i) => (h, i + 1)))
             {
+                tried++;
                 Logger.LogInformation("Soulseek attempt {N}/{Total}: {User} -> {File} (queue={Q}, speed={S})",
                     attemptIdx, ranked.Count, hit.Username, hit.Filename, hit.QueueLength, hit.UploadSpeed);
 
@@ -680,6 +808,7 @@ public class SoulseekDownloadService : BaseDownloadService
                     localPath = FindOutsideJob(jobDir, hit, callerGaveUp, excluded);
                 else if (batched && localPath is not null)
                     Concurrency?.Prove();
+                if (fromAlbum && localPath is not null) preparedArrived = true;
                 if (!string.IsNullOrEmpty(localPath) && reserve is not null && SamePath(reserve.Path, localPath))
                 {
                     // The resolver matches on leaf name and size, so a peer offering the same rip as
@@ -841,6 +970,9 @@ public class SoulseekDownloadService : BaseDownloadService
 
             // The album folder's copy did not work out: now search for this song like any other.
             if (searched || cancellationToken.IsCancellationRequested) break;
+            // A peer that never sent this file will not send the rest either: let the walk's other
+            // songs search now instead of each waiting out the same silence.
+            if (!preparedArrived) await AbandonAlbumBatchAsync(prepared!.JobDir);
             searched = true;
             ranked = await SearchRankedAsync(prepared!.Hit);
             if (ranked.Count == 0) break;
@@ -865,7 +997,7 @@ public class SoulseekDownloadService : BaseDownloadService
         }
 
         throw new Exception(
-            $"All {ranked.Count} Soulseek peer attempts failed for '{routing.Artist} - {routing.Title}'. Last error: {lastError?.Message}. "
+            $"All {tried} Soulseek peer attempts failed for '{routing.Artist} - {routing.Title}'. Last error: {lastError?.Message}. "
             + $"If slskd shows these transfers as Completed, slskd's downloads directory is not the directory Octo watches ({DownloadPath}); "
             + "set SLSKD_DOWNLOADS_DIR=/music on the slskd container (see issue #17).");
     }

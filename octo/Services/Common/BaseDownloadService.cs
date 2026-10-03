@@ -93,6 +93,12 @@ public abstract class BaseDownloadService : IDownloadService
     /// build a service without one, which is one at a time, as before.</summary>
     protected DownloadConcurrency? Concurrency => _serviceProvider.GetService<DownloadConcurrency>();
 
+    /// <summary>The Soulseek settings as they are now, for switches a subclass reads live.</summary>
+    protected SoulseekSettings CurrentSoulseekSettings => SoulseekSettingsValue;
+
+    /// <summary>For a subclass that needs an optional service without changing this constructor.</summary>
+    protected T? OptionalService<T>() where T : class => _serviceProvider.GetService<T>();
+
     /// <summary>
     /// Tell the live progress list where a download has got to. It only watches, so it is
     /// resolved per use through the provider like the settings above, and whatever it throws
@@ -768,7 +774,8 @@ public abstract class BaseDownloadService : IDownloadService
         // measures each track so the album gain can be written once it ends.
         var albumContext = new AlbumTagContext(albumExternalId, album.Title, album.Artist);
 
-        foreach (var track in tracksToDownload)
+        // One track of the walk. Counters are shared by both lanes below, so they move atomically.
+        async Task OneTrackAsync(Song track)
         {
             try
             {
@@ -779,7 +786,7 @@ public abstract class BaseDownloadService : IDownloadService
                 {
                     Logger.LogDebug("Track {TrackId} already downloaded, skipping", track.ExternalId);
                     Track(t => t.Imported(ProviderName, track.ExternalId!, track.Artist, track.Title, existingPath));
-                    continue;
+                    return;
                 }
 
                 // Check if download is already in progress or recently completed
@@ -789,15 +796,15 @@ public abstract class BaseDownloadService : IDownloadService
                     if (activeDownload.Status == DownloadStatus.InProgress)
                     {
                         Logger.LogDebug("Track {TrackId} download already in progress, skipping", track.ExternalId);
-                        continue;
+                        return;
                     }
-                    
+
                     if (activeDownload.Status == DownloadStatus.Completed)
                     {
                         Logger.LogDebug("Track {TrackId} already downloaded in this session, skipping", track.ExternalId);
                         Track(t => t.Imported(ProviderName, track.ExternalId!, track.Artist, track.Title,
                             activeDownload.LocalPath));
-                        continue;
+                        return;
                     }
                 }
 
@@ -807,8 +814,8 @@ public abstract class BaseDownloadService : IDownloadService
                     cancellationToken, forcePermanent: true, suppressNotify: true,
                     sourceOverride: sourceOverride, requestedBy: requestedBy,
                     albumContext: albumContext);
-                succeeded++;
-                if (path.EndsWith(".flac", StringComparison.OrdinalIgnoreCase)) lossless++;
+                Interlocked.Increment(ref succeeded);
+                if (path.EndsWith(".flac", StringComparison.OrdinalIgnoreCase)) Interlocked.Increment(ref lossless);
 
                 // Force a rescan per track so the album fills in progressively in the
                 // client instead of appearing all at once at the end. The per-download
@@ -819,11 +826,36 @@ public abstract class BaseDownloadService : IDownloadService
             catch (Exception ex)
             {
                 Logger.LogWarning(ex, "Failed to download track {TrackId} '{Title}'", track.ExternalId, track.Title);
-                failed++;
+                Interlocked.Increment(ref failed);
                 // Same rule as the summary: a source with another after it stays quiet, and
                 // the next walk picks the track up again.
                 if (!suppressSummary) Track(t => t.Fail(ProviderName, track.ExternalId ?? "", ex.Message));
             }
+        }
+
+        // Tracks whose file came from one peer's folder of the album, already queued in one batch,
+        // go one at a time in album order: that peer sends them back to back, so waiting on several
+        // at once would only sit in its queue and run out each wait's quiet window. The rest are
+        // searched song by song, side by side when downloads may run in parallel; the transfer gate
+        // keeps the total to the setting. With nothing prepared and one at a time, this is the walk
+        // as it always was.
+        var prepared = await PrepareAlbumAsync(album, tracksToDownload, sourceOverride, cancellationToken);
+        try
+        {
+            var fromFolder = tracksToDownload.Where(t => prepared.Contains(t.ExternalId!)).ToList();
+            var bySearch = tracksToDownload.Where(t => !prepared.Contains(t.ExternalId!)).ToList();
+            var folderLane = Task.Run(async () =>
+            {
+                foreach (var track in fromFolder) await OneTrackAsync(track);
+            });
+            var searchLane = Parallel.ForEachAsync(bySearch,
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Concurrency?.Current ?? 1) },
+                async (track, _) => await OneTrackAsync(track));
+            await Task.WhenAll(folderLane, searchLane);
+        }
+        finally
+        {
+            await FinishAlbumAsync(prepared);
         }
 
         Logger.LogInformation("Completed background download for album '{AlbumTitle}'", album.Title);
@@ -836,6 +868,19 @@ public abstract class BaseDownloadService : IDownloadService
         if ((!suppressSummary || failed == 0) && summary is not null) Notifications.Notify(summary);
         return failed == 0;
     }
+
+    /// <summary>
+    /// Queue what an album walk can take from one place in one go, before the walk starts, and
+    /// say which tracks that covers. Each of those tracks still goes through its own download,
+    /// which takes the queued file first. The base takes nothing, so the walk is song by song.
+    /// </summary>
+    protected virtual Task<IReadOnlyCollection<string>> PrepareAlbumAsync(Album album, IReadOnlyList<Song> tracks,
+        DownloadSource? source, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyCollection<string>>(Array.Empty<string>());
+
+    /// <summary>Called when the walk ends, however it ends: let go of whatever was prepared and
+    /// not used.</summary>
+    protected virtual Task FinishAlbumAsync(IReadOnlyCollection<string> prepared) => Task.CompletedTask;
 
     /// <summary>
     /// The album gain and peak, written into every file the walk measured, once the walk ends.

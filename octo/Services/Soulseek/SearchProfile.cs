@@ -21,4 +21,10 @@ public sealed record SearchProfile(string Name, int CeilingSeconds, int SearchTi
     /// is the one that already came back without a lossless copy.</summary>
     public static SearchProfile Upgrade(SoulseekSettings s) =>
         new("upgrade", s.EffectiveUpgradeSearchWaitSeconds, 30_000, 500, 2_000);
+
+    /// <summary>An album heart's one search for the whole record. Each peer answers with many
+    /// files, so the file limit is wide; nobody is waiting on one song, so it may look a little
+    /// longer than a star does.</summary>
+    public static SearchProfile Album(SoulseekSettings s) =>
+        new("album", Math.Max(s.SearchWaitSeconds, 45), 20_000, 500, 3_000);
 }
