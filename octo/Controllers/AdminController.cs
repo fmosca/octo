@@ -70,6 +70,7 @@ public class AdminController : ControllerBase
     private readonly LastFmScrobbleService? _lastFmScrobbles;
     private readonly Octo.Services.Library.QualityUpgradeWorker? _qualityUpgrade;
     private readonly Octo.Services.Library.LibraryReviewSweepWorker? _reviewSweep;
+    private readonly Octo.Services.Soulseek.ISoulseekLink? _soulseekLink;
 
     public AdminController(
         SettingsFileWriter settings,
@@ -113,8 +114,10 @@ public class AdminController : ControllerBase
         Octo.Services.Common.AcquisitionTracker? acquisitions = null,
         LastFmScrobbleService? lastFmScrobbles = null,
         Octo.Services.Library.QualityUpgradeWorker? qualityUpgrade = null,
-        Octo.Services.Library.LibraryReviewSweepWorker? reviewSweep = null)
+        Octo.Services.Library.LibraryReviewSweepWorker? reviewSweep = null,
+        Octo.Services.Soulseek.ISoulseekLink? soulseekLink = null)
     {
+        _soulseekLink = soulseekLink;
         _reviewSweep = reviewSweep;
         _qualityUpgrade = qualityUpgrade;
         _lastFmScrobbles = lastFmScrobbles;
@@ -725,6 +728,7 @@ public class AdminController : ControllerBase
                 ["AcoustIdTimeoutSeconds"] = soulseek.AcoustIdTimeoutSeconds,
                 ["DetectTranscodes"] = soulseek.DetectTranscodes,
                 ["TranscodeCheckTimeoutSeconds"] = soulseek.TranscodeCheckTimeoutSeconds,
+                ["OutageHoldHours"] = soulseek.OutageHoldHours,
                 ["SubmitConfirmedFingerprints"] = soulseek.SubmitConfirmedFingerprints,
                 ["AcoustIdUserApiKey"] = soulseek.AcoustIdUserApiKey ?? "",
             },
@@ -1507,6 +1511,7 @@ public class AdminController : ControllerBase
                 ["AcoustIdTimeoutSeconds"] = soulseek.AcoustIdTimeoutSeconds,
                 ["DetectTranscodes"] = soulseek.DetectTranscodes,
                 ["TranscodeCheckTimeoutSeconds"] = soulseek.TranscodeCheckTimeoutSeconds,
+                ["OutageHoldHours"] = soulseek.OutageHoldHours,
                 ["SubmitConfirmedFingerprints"] = soulseek.SubmitConfirmedFingerprints,
                 ["AcoustIdUserApiKey"] = soulseek.AcoustIdUserApiKey ?? "",
             },
@@ -1769,6 +1774,7 @@ public class AdminController : ControllerBase
             "Soulseek:RejectedPeerTtlDays", "Soulseek:FingerprintSeconds",
             "Soulseek:FingerprintTimeoutSeconds", "Soulseek:AcoustIdTimeoutSeconds",
             "Soulseek:DetectTranscodes", "Soulseek:TranscodeCheckTimeoutSeconds",
+            "Soulseek:OutageHoldHours",
             "Genre:BackfillMaxConsecutiveFailures", "Genre:BackfillExtensions",
             "LibraryActions:Enabled", "LibraryActions:PlaylistsEnabled",
             "LibraryActions:RatingsEnabled", "LibraryActions:PlaylistPrefix",
@@ -1943,8 +1949,16 @@ public class AdminController : ControllerBase
     {
         try
         {
-            var ok = await _slskd.IsReachableAsync(ct);
-            return new ServiceProbe(ok, ok ? "reachable" : "unreachable / auth failed");
+            if (_soulseekLink is null)
+            {
+                var ok = await _slskd.IsReachableAsync(ct);
+                return new ServiceProbe(ok, ok ? "reachable" : "unreachable / auth failed");
+            }
+            // slskd answering is not slskd able to search: it can be up and out of Soulseek.
+            var reading = await _soulseekLink.ReadAsync(fresh: true, ct);
+            var (up, warning, detail) = Octo.Services.Soulseek.SoulseekLink.Describe(reading,
+                _soulseekOpts.CurrentValue.EffectiveOutageHoldHours);
+            return new ServiceProbe(up, detail, Warning: warning);
         }
         catch (Exception ex) { return new ServiceProbe(false, ex.Message); }
     }

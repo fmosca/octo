@@ -3325,7 +3325,7 @@ function heartSourceReachable() {
   const enabled = steps.filter(step => step.SongEnabled || step.AlbumEnabled).map(step => step.Source);
   if (!enabled.length) return { ok: false, detail: 'No heart source is switched on, so a heart downloads nothing.' };
   const reachable = enabled.filter(source => {
-    if (source === 'Soulseek') return services.slskd?.ok;
+    if (source === 'Soulseek') return services.slskd?.ok && !services.slskd?.warning;
     if (source === 'YouTube') return services.ytDlpShim?.ok;
     if (source === 'Lidarr') return services.lidarr?.ok && services.lidarr?.configured !== false && !services.lidarr?.warning;
     return false;

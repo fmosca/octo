@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Octo.Models.Settings;
 using Octo.Services.Common;
+using Octo.Services.Soulseek;
 using Octo.Services.Subsonic;
 
 namespace Octo.Services.Library;
@@ -89,7 +90,8 @@ public sealed class QualityUpgradeWorker : BackgroundService
 
     public QualityUpgradeWorker(QualityUpgradeStore store, LibraryActionExecutor executor,
         IAcquisitionActivity activity, NavidromePlaylistApi navidrome, NavidromeIdentityService identity,
-        IOptionsMonitor<LibraryActionSettings> settings, ILogger<QualityUpgradeWorker> logger)
+        IOptionsMonitor<LibraryActionSettings> settings, ILogger<QualityUpgradeWorker> logger,
+        ISoulseekLink? soulseek = null)
     {
         _store = store;
         _settings = settings;
@@ -98,6 +100,8 @@ public sealed class QualityUpgradeWorker : BackgroundService
         HasAdminIdentity = () => identity.HasAdminIdentity;
         Apply = (request, ct) => executor.ApplyAsync(request, ct);
         ListSongs = ct => WalkAsync(navidrome, ct);
+        SoulseekOffline = async ct => soulseek is not null
+            && (await soulseek.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
     }
 
     // Seams, the same way SoulseekClient exposes Clock and PollInterval.
@@ -106,8 +110,9 @@ public sealed class QualityUpgradeWorker : BackgroundService
     internal Func<bool> HasAdminIdentity { get; set; }
     internal Func<LibraryActionRequest, CancellationToken, Task<LibraryActionOutcome>> Apply { get; set; }
     internal Func<CancellationToken, Task<(IReadOnlyList<LibrarySongRow> Songs, bool Complete)>> ListSongs { get; set; }
+    internal Func<CancellationToken, Task<bool>> SoulseekOffline { get; set; }
 
-    internal enum Tick { Off, NotDue, Busy, Unreachable, NothingToDo, Ran }
+    internal enum Tick { Off, NotDue, Busy, Offline, Unreachable, NothingToDo, Ran }
 
     public static TimeSpan? Interval(int perWeek) =>
         perWeek <= 0 ? null : TimeSpan.FromTicks(TimeSpan.FromDays(7).Ticks / Math.Clamp(perWeek, 1, 500));
@@ -158,6 +163,9 @@ public sealed class QualityUpgradeWorker : BackgroundService
         if (state.LastRunUtc is { } last && now - last < Interval(settings.EffectiveUpgradePerWeek)!.Value) return Tick.NotDue;
         // Never queue ahead of a person: a heart, star or play in flight means try again next minute.
         if (!AcquisitionsIdle()) return Tick.Busy;
+        // An upgrade during a Soulseek outage finds nothing and would not look at that song again
+        // for four weeks. Not stamped, so the run happens once slskd is back.
+        if (await SoulseekOffline(ct)) return Tick.Offline;
 
         var (songs, complete) = await ListSongs(ct);
         if (!complete && songs.Count == 0)

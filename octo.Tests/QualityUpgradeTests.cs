@@ -119,6 +119,23 @@ public class QualityUpgradeTests
     }
 
     [Fact]
+    public async Task DuringASoulseekOutage_NoSongIsTriedAndTheRunIsNotSpent()
+    {
+        var store = new QualityUpgradeStore();
+        var (w, calls) = Worker(store: store);
+        w.SoulseekOffline = _ => Task.FromResult(true);
+
+        Assert.Equal(QualityUpgradeWorker.Tick.Offline, await w.TickAsync(default));
+        Assert.Equal(0, calls.Apply);
+        Assert.Null(store.Snapshot().LastRunUtc);
+
+        // Back online, the same tick runs as normal.
+        w.SoulseekOffline = _ => Task.FromResult(false);
+        Assert.Equal(QualityUpgradeWorker.Tick.Ran, await w.TickAsync(default));
+        Assert.Equal(1, calls.Apply);
+    }
+
+    [Fact]
     public async Task WhenNavidromeCannotListTheLibrary_TheWeeksRunIsNotSpent()
     {
         var store = new QualityUpgradeStore();

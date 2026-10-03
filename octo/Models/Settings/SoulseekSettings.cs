@@ -174,6 +174,16 @@ public class SoulseekSettings
     public int TranscodeCheckTimeoutSeconds { get; set; } = 20;
 
     /// <summary>
+    /// How long a Soulseek-first download waits while slskd is not logged in to the Soulseek
+    /// network, before it goes to the next source. slskd answering is not slskd being able to
+    /// search: during Soulseek's maintenance on 2026-10-03 it answered for three hours while
+    /// every search failed, and a hearted album landed as YouTube MP3s. Six hours covers a
+    /// normal maintenance window. 0 turns the wait off. Read live, no restart needed.
+    /// Environment variable: SLSKD_OUTAGE_HOLD_HOURS
+    /// </summary>
+    public int OutageHoldHours { get; set; } = 6;
+
+    /// <summary>
     /// Send AcoustID the fingerprints a person confirmed with Keep, so the next person who
     /// downloads that recording gets Confirmed instead of Inconclusive (#47). Only a fingerprint
     /// whose MusicBrainz recording is unambiguous, only after a human kept it, and never one
@@ -200,6 +210,9 @@ public class SoulseekSettings
     public int EffectiveAcoustIdTimeoutSeconds => Math.Clamp(AcoustIdTimeoutSeconds, 2, 120);
     public int EffectiveTranscodeCheckTimeoutSeconds => Math.Clamp(TranscodeCheckTimeoutSeconds, 5, 300);
     public int EffectiveUpgradeSearchWaitSeconds => Math.Clamp(UpgradeSearchWaitSeconds, 30, 300);
+
+    /// <summary>Two days at most: past that the next source is the better answer.</summary>
+    public int EffectiveOutageHoldHours => Math.Clamp(OutageHoldHours, 0, 48);
 
     /// <summary>
     /// Below 50 an AcoustID score is noise and acting on it manufactures false rejections;

@@ -1439,6 +1439,14 @@
                 <input class="set-input" id="f-slskd-timeout" name="Soulseek.DownloadTimeoutSeconds" type="number" min="30" data-restart="true" data-restart-label="Soulseek per-peer timeout" aria-label="Seconds a download may send nothing before the next peer" />
               </div>
             </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Wait for Soulseek <span class="set-opt">hours</span></div>
+                <div class="set-info-d">When slskd is up but not logged in to Soulseek, hearts wait this long for it before using the next source. 0 means don't wait.</div>
+                <div class="set-info-more">Soulseek's own server goes down for maintenance now and then, for two to four hours. Without a wait, everything hearted in that time lands as a YouTube MP3. Waiting hearts are kept across a restart.</div>
+              </div>
+              <input class="set-input" id="f-slskd-outage-hold" name="Soulseek.OutageHoldHours" type="number" min="0" max="48" aria-label="Hours to wait for Soulseek" />
+            </div>
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Smallest file <span class="set-opt">bytes</span> / file type</div>

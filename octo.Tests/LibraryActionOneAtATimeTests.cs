@@ -49,12 +49,17 @@ public sealed class LibraryActionOneAtATimeTests : IDisposable
 
     private string Revealed => Path.Combine(_root, FileName + ".flac");
 
-    private LibraryActionExecutor Executor(bool keepOriginals = false)
+    private LibraryActionExecutor Executor(bool keepOriginals = false,
+        Octo.Services.Soulseek.ISoulseekLink? soulseekLink = null)
     {
         var settings = TestOptions.Monitor(new LibraryActionSettings
         {
             Enabled = true, DryRun = false, AllowedUsers = ["alice"], KeepReplacedOriginals = keepOriginals,
-            Actions = [new() { Action = LibraryAction.WrongVersion, Enabled = true }],
+            Actions =
+            [
+                new() { Action = LibraryAction.WrongVersion, Enabled = true },
+                new() { Action = LibraryAction.BetterQuality, Enabled = true },
+            ],
         });
         var factory = new ReviewFixtures.OneClientFactory(new Navidrome(this));
         var subsonic = TestOptions.Monitor(new SubsonicSettings
@@ -70,7 +75,8 @@ public sealed class LibraryActionOneAtATimeTests : IDisposable
         return new LibraryActionExecutor(resolver,
             new LibraryActionQuarantine(settings, NullLogger<LibraryActionQuarantine>.Instance),
             _journal, _library.Object, _ids, new RejectedPeerRegistry(), _queue, settings,
-            TestOptions.Monitor(new SoulseekSettings()), subsonic, NullLogger<LibraryActionExecutor>.Instance)
+            TestOptions.Monitor(new SoulseekSettings()), subsonic, NullLogger<LibraryActionExecutor>.Instance,
+            soulseekLink: soulseekLink)
         {
             HistoryPoll = TimeSpan.FromMilliseconds(1),
             HistoryAttempts = 1,
@@ -96,6 +102,33 @@ public sealed class LibraryActionOneAtATimeTests : IDisposable
     }
 
     private static LibraryActionRequest WrongVersion() => new(LibraryAction.WrongVersion, "nd-1", "alice");
+
+    private sealed class OfflineLink : Octo.Services.Soulseek.ISoulseekLink
+    {
+        public Task<Octo.Services.Soulseek.SoulseekServerReading?> ReadAsync(bool fresh, CancellationToken ct) =>
+            Task.FromResult<Octo.Services.Soulseek.SoulseekServerReading?>(
+                new(Octo.Services.Soulseek.SoulseekLinkState.NotLoggedIn, "Disconnecting", null, null));
+        public TimeSpan HoldLimit => TimeSpan.FromHours(6);
+        public DateTime UtcNow => DateTime.UtcNow;
+        public Task<bool> WaitForLoginAsync(DateTime deadlineUtc, CancellationToken ct) => Task.FromResult(false);
+    }
+
+    [Fact]
+    public async Task BetterQualityDuringASoulseekOutage_TouchesNothingAndStaysAsked()
+    {
+        var executor = Executor(soulseekLink: new OfflineLink());
+
+        var outcome = await executor.ApplyAsync(new(LibraryAction.BetterQuality, "nd-1", "alice"));
+
+        Assert.Equal(LibraryActionState.Failed, outcome.State);
+        Assert.Equal(LibraryActionCodes.SoulseekOffline, outcome.Code);
+        Assert.Equal(Octo.Services.Soulseek.SoulseekLink.OfflineText, outcome.Detail);
+        Assert.False(outcome.Consumed);
+        Assert.True(_queue.IsIdle);
+        Assert.True(File.Exists(_original));
+        Assert.Equal(_originalSize, new FileInfo(_original).Length);
+        Assert.Empty(_journal.Recent(10));
+    }
 
     private async Task<AcquisitionRequest> NextDownload()
     {

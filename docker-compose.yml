@@ -77,6 +77,9 @@ services:
       Soulseek__FingerprintSeconds: ${SLSKD_FINGERPRINT_SECONDS:-120}
       Soulseek__FingerprintTimeoutSeconds: ${SLSKD_FINGERPRINT_TIMEOUT_SECONDS:-30}
       Soulseek__AcoustIdTimeoutSeconds: ${SLSKD_ACOUSTID_TIMEOUT_SECONDS:-10}
+      # Hours a heart waits while slskd is up but not logged in to Soulseek (server
+      # maintenance), before it uses the next source. 0 means do not wait.
+      Soulseek__OutageHoldHours: ${SLSKD_OUTAGE_HOLD_HOURS:-6}
       # Send AcoustID the fingerprints you confirmed with Keep, so the next person gets a
       # confident match. Needs your personal AcoustID key (acoustid.org, after signing in).
       Soulseek__SubmitConfirmedFingerprints: ${ACOUSTID_SUBMIT:-false}

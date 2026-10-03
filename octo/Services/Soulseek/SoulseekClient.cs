@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -120,6 +121,68 @@ public class SoulseekClient
             return false;
         }
     }
+
+    /// <summary>
+    /// slskd's own word on the Soulseek network, from the same /api/v0/application call that
+    /// proves slskd is up. During Soulseek's maintenance on 2026-10-03 slskd answered every call
+    /// while sitting in "Disconnecting", and every search failed with "must be connected and
+    /// logged in". Null when slskd did not answer.
+    /// </summary>
+    public async Task<SoulseekServerReading?> ReadServerAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/application", null, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            return ParseServerReading(await resp.Content.ReadAsStringAsync(ct));
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("slskd state not readable at {Base}: {Msg}", Base, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads server.isConnected and server.isLoggedIn, exactly what slskd checks before it will
+    /// start a search, rather than the state words. A shape without them is Unknown, which never
+    /// holds anything back. address and ipEndPoint are left out while disconnected, so nothing
+    /// here depends on them.
+    /// </summary>
+    internal static SoulseekServerReading ParseServerReading(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!TryGetPropertyIgnoreCase(root, "server", out var server) || server.ValueKind != JsonValueKind.Object)
+                return new(SoulseekLinkState.Unknown, null, null, null);
+            var connected = Flag(server, "isConnected");
+            var loggedIn = Flag(server, "isLoggedIn");
+            var link = connected is null || loggedIn is null ? SoulseekLinkState.Unknown
+                : connected.Value && loggedIn.Value ? SoulseekLinkState.LoggedIn
+                : SoulseekLinkState.NotLoggedIn;
+            var state = TryGetPropertyIgnoreCase(server, "state", out var s) && s.ValueKind == JsonValueKind.String
+                ? s.GetString() : null;
+            var username = TryGetPropertyIgnoreCase(root, "user", out var user)
+                && TryGetPropertyIgnoreCase(user, "username", out var u) && u.ValueKind == JsonValueKind.String
+                ? u.GetString() : null;
+            DateTime? next = TryGetPropertyIgnoreCase(root, "connectionWatchdog", out var dog)
+                && TryGetPropertyIgnoreCase(dog, "nextAttemptAt", out var n) && n.ValueKind == JsonValueKind.String
+                && DateTime.TryParse(n.GetString(), CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+                ? at : null;
+            return new(link, state, username, next);
+        }
+        catch (JsonException)
+        {
+            return new(SoulseekLinkState.Unknown, null, null, null);
+        }
+    }
+
+    private static bool? Flag(JsonElement element, string name) =>
+        TryGetPropertyIgnoreCase(element, name, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? v.GetBoolean() : null;
 
     /// <summary>
     /// Reads slskd's resolved downloads directory from /api/v0/options. Purely a

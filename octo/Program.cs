@@ -115,6 +115,13 @@ builder.Services.AddHostedService<LastFmRadioRefreshWorker>();
 
 // Soulseek (FLAC source) + YouTube (instant-preview stream source).
 builder.Services.AddSingleton<SoulseekClient>();
+// slskd's Soulseek login, read live, for the dashboard and for downloads that wait out an outage.
+builder.Services.AddSingleton<SoulseekLink>();
+builder.Services.AddSingleton<ISoulseekLink>(sp => sp.GetRequiredService<SoulseekLink>());
+// Hearts waiting for Soulseek, on disk beside the other state files so a restart keeps them.
+builder.Services.AddSingleton(sp => new Octo.Services.Common.SoulseekHoldStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "soulseek-holds.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Common.SoulseekHoldStore>>()));
 builder.Services.AddSingleton<YouTubeResolver>();
 
 // Two named HTTP clients for the yt-dlp shim:
@@ -304,6 +311,7 @@ builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
 builder.Services.AddSingleton<LidarrClient>();
 builder.Services.AddSingleton<ILidarrHeartAcquisitionService, LidarrHeartAcquisitionService>();
 builder.Services.AddSingleton<HeartAcquisitionCoordinator>();
+builder.Services.AddHostedService<Octo.Services.Common.SoulseekHoldResumer>();
 
 // Discovery results are built once per query and shared. Clients fire several search
 // calls for one typed query, and they all resolve to the same routing objects, so without

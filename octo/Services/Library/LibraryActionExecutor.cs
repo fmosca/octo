@@ -10,7 +10,11 @@ namespace Octo.Services.Library;
 public sealed record LibraryActionRequest(LibraryAction Action, string NavidromeId, string Username,
     Octo.Services.Subsonic.SubsonicCredential? Credential = null);
 
-public sealed record LibraryActionOutcome(LibraryActionState State, string? Detail)
+/// <summary>
+/// Code says WHY, for callers that act on the reason: the upgrade queue waits for Soulseek on one
+/// and reports "no FLAC found" on the other. Detail stays the words for people.
+/// </summary>
+public sealed record LibraryActionOutcome(LibraryActionState State, string? Detail, string? Code = null)
 {
     /// <summary>
     /// Whether the request has been consumed. Anything else leaves the track in the playlist
@@ -18,6 +22,15 @@ public sealed record LibraryActionOutcome(LibraryActionState State, string? Deta
     /// operator fixes whatever blocked it.
     /// </summary>
     public bool Consumed => State is LibraryActionState.Applied or LibraryActionState.Skipped;
+}
+
+public static class LibraryActionCodes
+{
+    /// <summary>slskd is not logged in to Soulseek, so a replacement could only fail.</summary>
+    public const string SoulseekOffline = "soulseekOffline";
+
+    /// <summary>The search found no copy good enough to replace the song with.</summary>
+    public const string NoReplacement = "noReplacement";
 }
 
 /// <summary>
@@ -43,6 +56,7 @@ public sealed class LibraryActionExecutor
     private readonly NoticeQueue? _notices;
     private readonly Octo.Services.Fingerprint.SpectrumAnalyzer? _spectrum;
     private readonly StarOnArrival? _stars;
+    private readonly ISoulseekLink? _soulseekLink;
     private int _reconciled;
 
     // The songs a library action is working on right now, by the original's full path. The
@@ -72,8 +86,10 @@ public sealed class LibraryActionExecutor
         ILogger<LibraryActionExecutor> logger,
         NoticeQueue? notices = null,
         Octo.Services.Fingerprint.SpectrumAnalyzer? spectrum = null,
-        StarOnArrival? stars = null)
+        StarOnArrival? stars = null,
+        ISoulseekLink? soulseekLink = null)
     {
+        _soulseekLink = soulseekLink;
         _notices = notices;
         _spectrum = spectrum;
         _stars = stars;
@@ -158,6 +174,13 @@ public sealed class LibraryActionExecutor
             // a stable list rather than a rehearsal that quietly emptied the playlist.
             return new(LibraryActionState.Rehearsed, detail);
         }
+
+        // Better quality during a Soulseek outage could only fail, and before this it was journaled
+        // as "no FLAC found" every sweep. Not consumed, so the request stays and runs once slskd is
+        // back. Nothing is written and no file is touched.
+        if (request.Action == LibraryAction.BetterQuality && _soulseekLink is not null
+            && (await _soulseekLink.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn)
+            return new(LibraryActionState.Failed, SoulseekLink.OfflineText, LibraryActionCodes.SoulseekOffline);
 
         // Taken before the Pending entry is written: a second action on the same file content
         // has the same journal key and would overwrite the first one's entry.
@@ -341,8 +364,11 @@ public sealed class LibraryActionExecutor
                 if (!_settings.CurrentValue.KeepReplacedOriginals && quarantinePath is not null) TryDelete(quarantinePath);
                 return new(new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(revealed)}."), quarantinePath, revealed);
             }
+            // A search that found nothing usable throws FileNotFoundException, passed through the
+            // queue unchanged, and the upgrade queue reports exactly that case as "no FLAC found".
             if (quarantinePath is null)
-                return new(new(LibraryActionState.Failed, $"Could not find a replacement ({ex.Message}), so nothing changed."), null, null);
+                return new(new(LibraryActionState.Failed, $"Could not find a replacement ({ex.Message}), so nothing changed.",
+                    ex is FileNotFoundException ? LibraryActionCodes.NoReplacement : null), null, null);
             // Out, and nothing moved in: back to its exact path, whose row Navidrome still has.
             return new(RestoreOriginal(quarantinePath, $"Could not finish the replacement ({ex.Message}), so nothing changed."),
                 quarantinePath, null);
