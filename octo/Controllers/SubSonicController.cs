@@ -73,6 +73,8 @@ public class SubsonicController : ControllerBase
     private readonly AcquisitionTracker? _acquisitionTracker;
     private readonly Octo.Services.Lyrics.LyricsChoiceService? _lyricsChoices;
     private readonly Octo.Services.Library.LibraryActionExecutor? _libraryActions;
+    private readonly Octo.Services.Library.UpgradeQueue? _upgradeQueue;
+    private readonly DownloadConcurrency? _downloadConcurrency;
     private readonly SearchSongOrderCache _searchSongOrders;
     private readonly RequestIdentity _requestIdentity;
     private readonly RecentScrobbles _recentScrobbles;
@@ -122,8 +124,12 @@ public class SubsonicController : ControllerBase
         LastFmScrobbleService? lastFmScrobbles = null,
         RequestIdentity? requestIdentity = null,
         RecentScrobbles? recentScrobbles = null, CredentialCheck? credentialCheck = null,
-        StarOnArrival? starOnArrival = null)
+        StarOnArrival? starOnArrival = null,
+        Octo.Services.Library.UpgradeQueue? upgradeQueue = null,
+        DownloadConcurrency? downloadConcurrency = null)
     {
+        _upgradeQueue = upgradeQueue;
+        _downloadConcurrency = downloadConcurrency;
         _starOnArrival = starOnArrival;
         _recentScrobbles = recentScrobbles ?? new RecentScrobbles();
         _lastFmScrobbles = lastFmScrobbles;
@@ -2593,7 +2599,30 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         if (await CheckCallerAsync(parameters) is { } refused) return refused;
         return _responseBuilder.CreateLibraryActionsResponse(_libraryActionSettings.CurrentValue,
-            parameters.GetValueOrDefault("u"));
+            parameters.GetValueOrDefault("u"), _downloadConcurrency?.Current ?? 1);
+    }
+
+    /// <summary>
+    /// octoLibraryActions v2: the caller's upgrade jobs and how each is going, read by the apps while
+    /// an upgrade they asked for is running. Always JSON; credentials checked like getLibraryActions.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getUpgrades")]
+    [Route("rest/getUpgrades.view")]
+    public async Task<IActionResult> GetUpgrades()
+    {
+        var parameters = await ExtractAllParameters();
+        if (await CheckCallerAsync(parameters) is { } refused) return refused;
+        var username = parameters.GetValueOrDefault("u");
+        var jobs = string.IsNullOrWhiteSpace(username) || _upgradeQueue is null
+            ? []
+            : _upgradeQueue.Snapshot(username);
+        var progress = (_acquisitionTracker?.All() ?? [])
+            .GroupBy(row => $"{row.Provider}:{row.ExternalId}")
+            .ToDictionary(group => group.Key, group => group.First().Progress);
+        return _responseBuilder.CreateUpgradesResponse(jobs.Select(job =>
+            (job, job.AcquisitionKey is { } key && job.State == Octo.Services.Library.UpgradeStates.Working
+                ? progress.GetValueOrDefault(key) : null)));
     }
 
     /// <summary>
@@ -2617,8 +2646,10 @@ public class SubsonicController : ControllerBase
         var action = parameters.GetValueOrDefault("action", "").Trim();
         if (id.Length == 0 || action.Length == 0)
             return _responseBuilder.CreateError(format, 10, "Required parameter is missing: id and action");
+        if (action.Equals(SubsonicResponseBuilder.UpgradeAction, StringComparison.OrdinalIgnoreCase))
+            return QueueUpgrade(id, parameters.GetValueOrDefault("u"));
         if (!action.Equals(SubsonicResponseBuilder.RemoveAction, StringComparison.OrdinalIgnoreCase))
-            return _responseBuilder.CreateError(format, 0, $"Unknown action \"{action}\"; this server knows remove");
+            return _responseBuilder.CreateError(format, 0, $"Unknown action \"{action}\"; this server knows remove and upgrade");
 
         // The name the ping just checked. An API key alone names nobody here, so it cannot be on
         // the allowlist, and the executor is not asked at all.
@@ -2638,6 +2669,31 @@ public class SubsonicController : ControllerBase
         _logger.LogInformation("Library action Delete for {Id} by {User} from the app: {State} - {Detail}",
             id, username, outcome.State, outcome.Detail);
         return _responseBuilder.CreateLibraryActionResponse(id, outcome);
+    }
+
+    /// <summary>
+    /// octoLibraryActions v2: queue a higher quality copy of one song, and answer at once. The same
+    /// gates as the Better quality playlist, read now so the app hears a reason straight away; the
+    /// executor checks them all again when the job runs. A job is listed in getUpgrades before this
+    /// answers "queued".
+    /// </summary>
+    private IActionResult QueueUpgrade(string id, string? username)
+    {
+        const string action = SubsonicResponseBuilder.UpgradeAction;
+        var settings = _libraryActionSettings.CurrentValue;
+        string? refusal =
+            string.IsNullOrWhiteSpace(username) ? "Sign in with a username to upgrade songs; an API key alone does not say who is asking."
+            : _libraryActions is null || _upgradeQueue is null || !settings.Enabled ? "Library actions are off."
+            : !settings.IsAllowed(username) ? $"{username} is not on the library actions allowed list."
+            : !settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled) ? "Better quality is not switched on."
+            : settings.DryRun ? "Library actions only rehearse while dry run is on, so nothing would change."
+            : null;
+        if (refusal is not null) return _responseBuilder.CreateLibraryActionResponse(id, "skipped", refusal, action);
+
+        var (jobs, full) = _upgradeQueue!.Add([new Octo.Services.Library.UpgradeAsk(id)], username!, "app");
+        if (jobs.Count == 0) return _responseBuilder.CreateLibraryActionResponse(id, "skipped", full, action);
+        _logger.LogInformation("Higher quality for {Id} asked by {User} from the app: {State}", id, username, jobs[0].State);
+        return _responseBuilder.CreateLibraryActionResponse(id, "queued", "Looking for a higher quality copy.", action);
     }
 
     /// <summary>

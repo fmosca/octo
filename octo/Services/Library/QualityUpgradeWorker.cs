@@ -8,7 +8,7 @@ using Octo.Services.Subsonic;
 namespace Octo.Services.Library;
 
 public sealed record LibrarySongRow(string Id, string Path, string? LibraryPath, long Size, string Suffix,
-    int BitRate, string Title, string Artist, int? Duration);
+    int BitRate, string Title, string Artist, int? Duration, string? Album = null);
 
 public sealed record QualityUpgradeAttempt(DateTime AtUtc, string Outcome, string? Detail);
 
@@ -87,12 +87,14 @@ public sealed class QualityUpgradeWorker : BackgroundService
     private readonly IOptionsMonitor<LibraryActionSettings> _settings;
     private readonly ILogger<QualityUpgradeWorker> _logger;
     private DateTime? _lastUnreachableWarning;
+    private readonly UpgradeQueue? _upgrades;
 
     public QualityUpgradeWorker(QualityUpgradeStore store, LibraryActionExecutor executor,
         IAcquisitionActivity activity, NavidromePlaylistApi navidrome, NavidromeIdentityService identity,
         IOptionsMonitor<LibraryActionSettings> settings, ILogger<QualityUpgradeWorker> logger,
-        ISoulseekLink? soulseek = null)
+        ISoulseekLink? soulseek = null, UpgradeQueue? upgrades = null)
     {
+        _upgrades = upgrades;
         _store = store;
         _settings = settings;
         _logger = logger;
@@ -163,6 +165,8 @@ public sealed class QualityUpgradeWorker : BackgroundService
         if (state.LastRunUtc is { } last && now - last < Interval(settings.EffectiveUpgradePerWeek)!.Value) return Tick.NotDue;
         // Never queue ahead of a person: a heart, star or play in flight means try again next minute.
         if (!AcquisitionsIdle()) return Tick.Busy;
+        // Songs someone asked to upgrade go first, and the weekly run never competes with them.
+        if (_upgrades?.OpenCount > 0) return Tick.Busy;
         // An upgrade during a Soulseek outage finds nothing and would not look at that song again
         // for four weeks. Not stamped, so the run happens once slskd is back.
         if (await SoulseekOffline(ct)) return Tick.Offline;
@@ -207,6 +211,9 @@ public sealed class QualityUpgradeWorker : BackgroundService
         });
         return Tick.Ran;
     }
+
+    /// <summary>What the weekly run has tried, by file, for the Better quality page.</summary>
+    internal QualityUpgradeState Tried() => _store.Snapshot();
 
     public QualityUpgradeStatus Status()
     {
@@ -264,7 +271,8 @@ public sealed class QualityUpgradeWorker : BackgroundService
                 Str(song, "title") ?? "", Str(song, "artist") ?? "",
                 // A float in Navidrome's native API, unlike Subsonic's whole seconds.
                 song.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number
-                    ? (int)Math.Round(d.GetDouble()) : null));
+                    ? (int)Math.Round(d.GetDouble()) : null,
+                Str(song, "album")));
         }
         return (rows, count);
     }

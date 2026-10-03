@@ -7,8 +7,11 @@ using Octo.Services.Soulseek;
 
 namespace Octo.Services.Library;
 
+/// <param name="OnReplacementQueued">Told the provider and external id of the replacement download
+/// the moment it is queued, so the upgrade queue can follow that download's progress.</param>
 public sealed record LibraryActionRequest(LibraryAction Action, string NavidromeId, string Username,
-    Octo.Services.Subsonic.SubsonicCredential? Credential = null);
+    Octo.Services.Subsonic.SubsonicCredential? Credential = null,
+    Action<string, string>? OnReplacementQueued = null);
 
 /// <summary>
 /// Code says WHY, for callers that act on the reason: the upgrade queue waits for Soulseek on one
@@ -312,6 +315,8 @@ public sealed class LibraryActionExecutor
                 Album = original.Album, Duration = original.DurationSeconds,
             };
             var externalId = _ids.Register(routing);
+            try { request.OnReplacementQueued?.Invoke(SoulseekMetadataService.ProviderName, externalId); }
+            catch (Exception ex) { _logger.LogDebug("Replacement listener failed: {M}", ex.Message); }
             if (identity is null)
                 _logger.LogWarning("Library action {Action}: could not read the tags of {Path}, so Navidrome will treat its replacement as a new song",
                     request.Action, original.AbsolutePath);

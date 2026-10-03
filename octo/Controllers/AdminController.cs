@@ -71,6 +71,8 @@ public class AdminController : ControllerBase
     private readonly Octo.Services.Library.QualityUpgradeWorker? _qualityUpgrade;
     private readonly Octo.Services.Library.LibraryReviewSweepWorker? _reviewSweep;
     private readonly Octo.Services.Soulseek.ISoulseekLink? _soulseekLink;
+    private readonly Octo.Services.Library.UpgradeQueue? _upgradeQueue;
+    private readonly Octo.Services.Common.DownloadConcurrency? _downloadConcurrency;
 
     public AdminController(
         SettingsFileWriter settings,
@@ -115,8 +117,12 @@ public class AdminController : ControllerBase
         LastFmScrobbleService? lastFmScrobbles = null,
         Octo.Services.Library.QualityUpgradeWorker? qualityUpgrade = null,
         Octo.Services.Library.LibraryReviewSweepWorker? reviewSweep = null,
-        Octo.Services.Soulseek.ISoulseekLink? soulseekLink = null)
+        Octo.Services.Soulseek.ISoulseekLink? soulseekLink = null,
+        Octo.Services.Library.UpgradeQueue? upgradeQueue = null,
+        Octo.Services.Common.DownloadConcurrency? downloadConcurrency = null)
     {
+        _upgradeQueue = upgradeQueue;
+        _downloadConcurrency = downloadConcurrency;
         _soulseekLink = soulseekLink;
         _reviewSweep = reviewSweep;
         _qualityUpgrade = qualityUpgrade;
@@ -1085,7 +1091,8 @@ public class AdminController : ControllerBase
     /// Session-gated, because it lists filenames and usernames. Read-only: there is deliberately
     /// no endpoint here that deletes a quarantined file or applies an action on demand, since
     /// /api/admin has no authentication of its own and those would be the wrong things to leave
-    /// reachable.
+    /// reachable. The one exception is the Better quality page's upgrade queue, which needs a
+    /// Navidrome admin sign-in and acts as that person, who must be on the allowed list.
     /// </summary>
     [HttpGet("library-actions")]
     public IActionResult GetLibraryActions([FromHeader(Name = "X-Octo-Browse-Token")] string? token)
@@ -1203,6 +1210,155 @@ public class AdminController : ControllerBase
     [HttpGet("quality-upgrade")]
     public IActionResult GetQualityUpgrade() =>
         _qualityUpgrade is null ? NotFound() : Ok(_qualityUpgrade.Status());
+
+    private const string SignInFirst = "Sign in with your Navidrome admin account first.";
+
+    // The library's lossy songs, listed from Navidrome. Walking a big library takes a while, so the
+    // answer is kept a few minutes; "refresh" asks again.
+    private static readonly object LossyLock = new();
+    private static (DateTime At, IReadOnlyList<Octo.Services.Library.LibrarySongRow> Rows)? _lossyCache;
+    private static readonly TimeSpan LossyFor = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The Better quality page's list: every song in the library that is not lossless, with whether
+    /// Octo got it from YouTube, when the weekly upgrade last tried it, and any job for it now.
+    /// Session-gated, because it lists paths.
+    /// </summary>
+    [HttpGet("lossy")]
+    public async Task<IActionResult> GetLossy([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
+        [FromQuery] bool refresh, CancellationToken ct)
+    {
+        if (!HasBrowseSession(token)) return Unauthorized(new { error = SignInFirst });
+        if (_qualityUpgrade is null) return NotFound();
+        if (!_navIdentity.HasAdminIdentity)
+            return BadRequest(new { error = "Octo needs a Navidrome admin credential to read the whole library." });
+
+        IReadOnlyList<Octo.Services.Library.LibrarySongRow> rows;
+        lock (LossyLock) rows = !refresh && _lossyCache is { } cached && DateTime.UtcNow - cached.At < LossyFor ? cached.Rows : [];
+        if (rows.Count == 0)
+        {
+            var (songs, complete) = await _qualityUpgrade.ListSongs(ct);
+            if (!complete && songs.Count == 0) return StatusCode(502, new { error = "Navidrome did not list the library." });
+            rows = songs.Where(song => !Octo.Services.Library.DuplicateScanWorker.IsLosslessFile(song.Suffix, song.BitRate)).ToList();
+            lock (LossyLock) _lossyCache = (DateTime.UtcNow, rows);
+        }
+
+        // Octo's own record of what it fetched from YouTube, matched by file name, then by path.
+        var youTube = _history.GetRecent(int.MaxValue)
+            .Where(entry => string.Equals(entry.Source, "YouTube", StringComparison.OrdinalIgnoreCase) && entry.Path.Length > 0)
+            .Select(entry => entry.Path.Replace('\\', '/'))
+            .GroupBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        var tried = _qualityUpgrade.Tried().Attempts;
+        var jobs = (_upgradeQueue?.Snapshot() ?? []).ToDictionary(job => job.NavidromeId, StringComparer.Ordinal);
+
+        return Ok(new
+        {
+            total = rows.Count,
+            songs = rows.Select(row =>
+            {
+                var key = Octo.Services.Library.QualityUpgradeWorker.KeyOf(row);
+                var relative = key[..key.LastIndexOf('|')];
+                var fromYouTube = youTube.TryGetValue(Path.GetFileName(relative), out var named)
+                    && named.Any(path => path.EndsWith("/" + relative, StringComparison.OrdinalIgnoreCase) || path == relative);
+                return new
+                {
+                    id = row.Id, title = row.Title, artist = row.Artist, album = row.Album, suffix = row.Suffix,
+                    bitRate = row.BitRate, size = row.Size, path = relative, fromYouTube, attemptKey = key,
+                    lastTried = tried.TryGetValue(key, out var attempt) ? new { atUtc = attempt.AtUtc, outcome = attempt.Outcome } : null,
+                    job = jobs.TryGetValue(row.Id, out var job) ? new { state = job.State, detail = job.Detail } : null,
+                };
+            }),
+        });
+    }
+
+    /// <summary>The upgrade queue, how many run at once and why, Soulseek's state, and the gate.</summary>
+    [HttpGet("upgrades")]
+    public async Task<IActionResult> GetUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token, CancellationToken ct)
+    {
+        var user = _browseSessions.UserOf(Request.Cookies[BrowseCookieName] ?? token);
+        if (user is null) return Unauthorized(new { error = SignInFirst });
+        var progress = (_acquisitions?.All() ?? [])
+            .GroupBy(row => $"{row.Provider}:{row.ExternalId}")
+            .ToDictionary(group => group.Key, group => group.First().Progress);
+        var reading = _soulseekLink is null ? null : await _soulseekLink.ReadAsync(fresh: false, ct);
+        var (up, warning, detail) = Octo.Services.Soulseek.SoulseekLink.Describe(reading, _soulseekOpts.CurrentValue.EffectiveOutageHoldHours);
+        var settings = _libraryActionOpts.CurrentValue;
+        return Ok(new
+        {
+            jobs = (_upgradeQueue?.Snapshot() ?? []).Select(job => new
+            {
+                id = job.NavidromeId, job.Title, job.Artist, job.Album, job.Suffix, job.State, job.Detail, job.RequestedBy,
+                job.Origin, queuedUtc = job.QueuedUtc, updatedUtc = job.UpdatedUtc,
+                progress = job.AcquisitionKey is { } key && job.State == Octo.Services.Library.UpgradeStates.Working
+                    ? progress.GetValueOrDefault(key) : null,
+            }),
+            parallel = _downloadConcurrency?.Current ?? 1,
+            why = _downloadConcurrency?.Why ?? "One at a time.",
+            soulseek = new { ok = up, warning, detail },
+            gate = new
+            {
+                user,
+                enabled = settings.Enabled,
+                allowed = settings.IsAllowed(user),
+                dryRun = settings.DryRun,
+                betterQuality = settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled),
+            },
+        });
+    }
+
+    public sealed record UpgradeQueueRequest(List<Octo.Services.Library.UpgradeAsk>? Songs);
+    public sealed record UpgradeIdsRequest(List<string>? Ids);
+
+    /// <summary>Most songs one press of the page's button may queue.</summary>
+    internal const int MaxUpgradesPerRequest = 2000;
+
+    /// <summary>
+    /// Queue songs for a higher quality copy, acting as the Navidrome admin signed in on this page.
+    /// Refused unless every gate of the Better quality action is open for that person.
+    /// </summary>
+    [HttpPost("upgrades")]
+    public IActionResult QueueUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
+        [FromBody] UpgradeQueueRequest request)
+    {
+        var user = _browseSessions.UserOf(Request.Cookies[BrowseCookieName] ?? token);
+        if (user is null) return Unauthorized(new { error = SignInFirst });
+        if (_upgradeQueue is null) return NotFound();
+        var settings = _libraryActionOpts.CurrentValue;
+        if (!settings.IsAllowed(user))
+            return StatusCode(403, new { error = $"{user} is not on the library actions allowed list, so Octo will not change files for them." });
+        var closed = !settings.Enabled ? "Turn on library actions first."
+            : !settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled) ? "Turn on the Better quality action first."
+            : settings.DryRun ? "Library actions only rehearse while dry run is on; turn it off first."
+            : null;
+        if (closed is not null) return BadRequest(new { error = closed });
+        var songs = request.Songs ?? [];
+        if (songs.Count == 0) return BadRequest(new { error = "No songs picked." });
+        if (songs.Count > MaxUpgradesPerRequest)
+            return BadRequest(new { error = $"At most {MaxUpgradesPerRequest} songs at a time." });
+        var (jobs, refused) = _upgradeQueue.Add(songs, user, "page");
+        _logger.LogInformation("{User} queued {Count} songs for higher quality from the dashboard", user, jobs.Count);
+        return Accepted(new { ok = true, queued = jobs.Count, refused });
+    }
+
+    /// <summary>Take back songs that have not started.</summary>
+    [HttpPost("upgrades/cancel")]
+    public IActionResult CancelUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
+        [FromBody] UpgradeIdsRequest request)
+    {
+        if (!HasBrowseSession(token)) return Unauthorized(new { error = SignInFirst });
+        if (_upgradeQueue is null) return NotFound();
+        return Ok(new { ok = true, cancelled = _upgradeQueue.Cancel(request.Ids ?? []) });
+    }
+
+    /// <summary>Forget finished jobs.</summary>
+    [HttpPost("upgrades/clear")]
+    public IActionResult ClearUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token)
+    {
+        if (!HasBrowseSession(token)) return Unauthorized(new { error = SignInFirst });
+        if (_upgradeQueue is null) return NotFound();
+        return Ok(new { ok = true, cleared = _upgradeQueue.ClearFinished() });
+    }
 
     /// <summary>
     /// Ask what file a Navidrome song id resolves to, and say which leg answered.

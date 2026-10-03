@@ -252,6 +252,12 @@ builder.Services.AddSingleton(sp => new Octo.Services.Library.QualityUpgradeStor
     System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "quality-upgrade.json"),
     sp.GetRequiredService<ILogger<Octo.Services.Library.QualityUpgradeStore>>()));
 builder.Services.AddSingleton<Octo.Services.Library.QualityUpgradeWorker>();
+// Songs asked to be found in higher quality, from the apps and the Better quality page.
+builder.Services.AddSingleton(sp => new Octo.Services.Library.UpgradeQueue(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "upgrades.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.UpgradeQueue>>()));
+builder.Services.AddSingleton<Octo.Services.Library.UpgradeWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.UpgradeWorker>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.QualityUpgradeWorker>());
 // The library Review sweep (#72): asks about music that was already there, a few songs an hour,
 // only while nothing downloads. Off until LibraryActions:ReviewSweepPerHour is set.

@@ -53,6 +53,13 @@ public class BrowseSessionStore
         return true;
     }
 
+    /// <summary>
+    /// The Navidrome admin a live token was minted for, or null. Slides the expiry like Validate.
+    /// What the Better quality page acts as, so a file is only ever changed for a person who signed in.
+    /// </summary>
+    public string? UserOf(string? token) =>
+        Validate(token) && _sessions.TryGetValue(token!, out var session) ? session.User : null;
+
     private void Prune()
     {
         var now = DateTime.UtcNow;
