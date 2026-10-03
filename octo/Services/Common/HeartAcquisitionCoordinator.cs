@@ -27,6 +27,10 @@ public sealed class HeartAcquisitionCoordinator
     private readonly ISoulseekLink? _soulseek;
     private readonly SoulseekHoldStore? _holds;
 
+    /// <summary>Optional: without it every heart goes down the chain, and the download itself
+    /// notices a song that is already there, as before.</summary>
+    private readonly Octo.Services.Library.HeartOwnership? _owned;
+
     // Plays waiting for Soulseek, one per song however often it is played meanwhile.
     private readonly ConcurrentDictionary<string, byte> _heldPlays = new();
 
@@ -34,8 +38,10 @@ public sealed class HeartAcquisitionCoordinator
         TrackAcquisitionQueue directQueue, IDownloadService directDownloads,
         ILidarrHeartAcquisitionService lidarr, ILogger<HeartAcquisitionCoordinator> logger,
         AcquisitionTracker? tracker = null, ExternalIdRegistry? idRegistry = null,
-        ISoulseekLink? soulseek = null, SoulseekHoldStore? holds = null)
+        ISoulseekLink? soulseek = null, SoulseekHoldStore? holds = null,
+        Octo.Services.Library.HeartOwnership? owned = null)
     {
+        _owned = owned;
         _settings = settings;
         _directQueue = directQueue;
         _directDownloads = directDownloads;
@@ -162,6 +168,7 @@ public sealed class HeartAcquisitionCoordinator
     internal async Task AcquireTrackAsync(string provider, string externalId,
         string? requestedBy = null, DateTime? heldSinceUtc = null)
     {
+        if (await AlreadyYoursAsync(provider, externalId, requestedBy)) return;
         var steps = EnabledSteps(albumHeart: false);
         for (var index = 0; index < steps.Count; index++)
         {
@@ -226,6 +233,7 @@ public sealed class HeartAcquisitionCoordinator
     internal async Task AcquireAlbumAsync(string provider, string albumExternalId,
         string? requestedBy = null, DateTime? heldSinceUtc = null)
     {
+        if (await AlbumAlreadyYoursAsync(provider, albumExternalId, requestedBy)) return;
         var steps = EnabledSteps(albumHeart: true);
         for (var index = 0; index < steps.Count; index++)
         {
@@ -289,6 +297,50 @@ public sealed class HeartAcquisitionCoordinator
         return sources[0] == HeartDownloadSource.YouTube ? DownloadSource.YouTube
             : sources.Contains(HeartDownloadSource.YouTube) ? DownloadSource.SoulseekThenYouTube
             : DownloadSource.Soulseek;
+    }
+
+    /// <summary>
+    /// A heart on a song already in the library is a favourite, not a download. Asked first, so
+    /// it never waits behind other downloads or a Soulseek outage, and never sends Lidarr for a
+    /// whole album. The row closes on the library's own song, which favourites it for whoever
+    /// hearted it (StarOnArrival); an owned lossy copy is also queued for Better quality.
+    /// </summary>
+    private async Task<bool> AlreadyYoursAsync(string provider, string externalId, string? requestedBy)
+    {
+        if (_owned is null || await _owned.FindSongAsync(provider, externalId) is not { } found) return false;
+        var upgrading = _owned.QueueUpgradeIfWanted(found.Copy, found.Song, requestedBy);
+        _logger.LogInformation("Hearted '{Artist} - {Title}' is already in the library ({Suffix}); favouriting it instead of downloading{Upgrade}",
+            found.Song.Artist, found.Song.Title, found.Copy.Suffix, upgrading ? ", and looking for a higher quality copy" : "");
+        Settle(provider, externalId, found.Copy);
+        return true;
+    }
+
+    /// <summary>An album heart where every song is already in the library: each is favourited
+    /// through its row, and so the album too. One missing song and the album goes down the chain,
+    /// where the songs already there are skipped as before.</summary>
+    private async Task<bool> AlbumAlreadyYoursAsync(string provider, string albumExternalId, string? requestedBy)
+    {
+        if (_owned is null || await _owned.FindWholeAlbumAsync(provider, albumExternalId) is not { } whole) return false;
+        var tracked = whole.Songs.Where(pair => !string.IsNullOrEmpty(pair.Song.ExternalId)).ToList();
+        _tracker?.Announce(provider, albumExternalId, null,
+            tracked.Select(pair => (pair.Song.ExternalId!, (string?)pair.Song.Artist, (string?)pair.Song.Title, (string?)whole.Album.Title)));
+        var upgrading = 0;
+        foreach (var (song, copy) in tracked)
+        {
+            if (_owned.QueueUpgradeIfWanted(copy, song, requestedBy)) upgrading++;
+            Settle(song.ExternalProvider ?? provider, song.ExternalId!, copy);
+        }
+        _logger.LogInformation("Hearted album '{Artist} - {Album}' is already in the library ({Count} songs); favouriting it instead of downloading{Upgrade}",
+            whole.Album.Artist, whole.Album.Title, whole.Songs.Count, upgrading > 0 ? $", {upgrading} queued for a higher quality copy" : "");
+        return true;
+    }
+
+    /// <summary>Close a row on the library's copy: by its Navidrome id when known, which is
+    /// immediate, or by its path, which the tracker watches until Navidrome shows it.</summary>
+    private void Settle(string provider, string externalId, Octo.Services.Library.OwnedCopy copy)
+    {
+        if (copy.NavidromeId is { } libraryId) _tracker?.Complete(provider, externalId, libraryId);
+        else _tracker?.Imported(provider, externalId, null, null, copy.AbsolutePath);
     }
 
     /// <summary>

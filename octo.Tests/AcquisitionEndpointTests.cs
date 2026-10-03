@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -25,12 +26,18 @@ public sealed class AcquisitionEndpointTests
     private sealed class FakeNavidrome : HttpMessageHandler
     {
         public int Pings;
+        public ConcurrentQueue<string> Stars { get; } = new();
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var uri = request.RequestUri!;
             var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
             var json = query["f"] == "json";
+            if (uri.AbsolutePath.EndsWith("/rest/star", StringComparison.Ordinal) || uri.AbsolutePath.EndsWith("/rest/star.view", StringComparison.Ordinal))
+            {
+                Stars.Enqueue($"{query["u"]}:{query["id"]}");
+                return Task.FromResult(Json("""{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome"}}"""));
+            }
             if (uri.AbsolutePath.EndsWith("/rest/ping", StringComparison.Ordinal))
             {
                 Interlocked.Increment(ref Pings);
@@ -207,6 +214,23 @@ public sealed class AcquisitionEndpointTests
         // The download is asked for either way; only the favourite depends on who starred it.
         Assert.Single(factory.Tracker.ForUser("alice"));
         return factory.Services.GetRequiredService<StarOnArrival>().Held;
+    }
+
+    /// <summary>A song already in Navidrome carries Navidrome's own id, so its heart is
+    /// Navidrome's favourite, sent on as the person who hearted it, and nothing downloads.</summary>
+    [Fact]
+    public async Task StarringALibrarySong_IsANavidromeFavouriteAndDownloadsNothing()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/rest/star.view?{Auth("alice", client: "Symfonium")}&f=json&id=nd-42");
+
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Equal(["alice:nd-42"], factory.Navidrome.Stars);
+        Assert.True(factory.Services.GetRequiredService<TrackAcquisitionQueue>().IsIdle);
+        Assert.Empty(factory.Tracker.All());
+        Assert.Equal(0, factory.Services.GetRequiredService<StarOnArrival>().Held);
     }
 
     [Fact]

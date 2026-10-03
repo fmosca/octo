@@ -277,6 +277,8 @@ builder.Services.AddSingleton(sp => new Octo.Services.Updates.UpdateHost(
     sp.GetRequiredService<ILogger<Octo.Services.Updates.UpdateHost>>()));
 // Whether a song is already in the library, so nothing downloads a second copy.
 builder.Services.AddSingleton<Octo.Services.Library.LibraryOwnership>();
+// Asked before a heart goes anywhere: a song already in the library is favourited, not fetched.
+builder.Services.AddSingleton<Octo.Services.Library.HeartOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.UpgradeWorker>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.QualityUpgradeWorker>());
 // The library Review sweep (#72): asks about music that was already there, a few songs an hour,

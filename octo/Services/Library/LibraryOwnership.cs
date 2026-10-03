@@ -88,6 +88,11 @@ public sealed class LibraryOwnership
     /// it for Better quality when a lossless source is in the chain and the asker may; keep it
     /// otherwise too, since an MP3 for an MP3 is no upgrade.
     /// </summary>
+    /// <summary>Whether Better quality may run for this person: every gate of the action.</summary>
+    public static bool UpgradeAllowed(LibraryActionSettings actions, string? user) =>
+        !string.IsNullOrWhiteSpace(user) && actions.Enabled && !actions.DryRun && actions.IsAllowed(user)
+        && actions.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled);
+
     public static OwnedDecision Decide(OwnedCopy? owned, bool sourceCanBeLossless, bool upgradeAllowed) =>
         owned is null ? OwnedDecision.Download
         : owned.Lossless || !sourceCanBeLossless || !upgradeAllowed || owned.NavidromeId is null ? OwnedDecision.KeepYours
