@@ -1115,6 +1115,9 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
   .genre-change-row > span:first-child { grid-column: 1 / -1; }
 }
 
+/* ── Who the dashboard is signed in as, above Restart ── */
+.sidebar-signed-in { margin: 0 0 var(--s-m); color: var(--ink-2); font-size: 12px; display: flex; gap: var(--s-m); flex-wrap: wrap; align-items: baseline; }
+
 /* ── Better quality: lossy songs, five columns ── */
 .lossy-tool { padding: var(--s-xl); display: flex; flex-direction: column; gap: var(--s-l); }
 .lossy-filters { display: flex; flex-wrap: wrap; gap: var(--s-m) var(--s-l); align-items: center; }

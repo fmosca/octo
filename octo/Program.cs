@@ -156,7 +156,10 @@ builder.Services.AddSingleton<Octo.Services.Admin.DirectoryBrowser>();
 // Singleton so browse tokens survive between requests; they are in-memory only,
 // so a restart ends every browse session, which is the right trade for a token
 // that grants filesystem visibility.
-builder.Services.AddSingleton<Octo.Services.Admin.BrowseSessionStore>();
+// Dashboard sign-ins, remembered per browser across restarts; only token hashes are written.
+builder.Services.AddSingleton(sp => new Octo.Services.Admin.BrowseSessionStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "browse-sessions.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Admin.BrowseSessionStore>>()));
 builder.Services.AddSingleton<Octo.Services.Metadata.DeezerMetadataService>();
 
 // Deezer's public API allows roughly 50 requests per 5 seconds and signals refusal with

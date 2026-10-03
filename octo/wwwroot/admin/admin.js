@@ -2778,8 +2778,32 @@ async function browseAuthenticate(result) {
     result.innerHTML = esc(data.error || 'Sign-in failed.');
     return false;
   }
-  return true;   // the session is now in the cookie the response set
+  showSignedIn(data.user);
+  return true;   // the session is now in the cookie the response set, kept for this browser
 }
+
+// The footer says who this browser is signed in as. The sign-in is remembered across restarts
+// and lapses only after 90 days without a visit; Sign out forgets it now.
+function showSignedIn(user) {
+  const line = document.getElementById('signed-in');
+  if (!line) return;
+  line.hidden = !user;
+  document.getElementById('signed-in-user').textContent = user ? `Signed in as ${user}` : '';
+}
+
+async function loadSignedIn() {
+  try {
+    const r = await api('/api/admin/browse/session', { credentials: 'same-origin' });
+    const body = await r.json();
+    showSignedIn(body.signedIn ? body.user : null);
+  } catch { showSignedIn(null); }
+}
+
+document.getElementById('sign-out')?.addEventListener('click', async () => {
+  await api('/api/admin/browse/signout', { method: 'POST', credentials: 'same-origin' });
+  showSignedIn(null);
+  toast('Signed out of this browser.');
+});
 
 function renderBrowse(data, result, input) {
   const rows = [];
@@ -4021,3 +4045,4 @@ document.getElementById('lossy-clear')?.addEventListener('click', async () => {
 // ────────────────────────────────────────────────────────────────
 if (location.hash) followHash();
 loadSettings();
+loadSignedIn();

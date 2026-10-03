@@ -243,6 +243,9 @@ public sealed class UpgradeQueueTests : IDisposable
                 services.RemoveAll<IHostedService>();
                 services.RemoveAll<UpgradeQueue>();
                 services.AddSingleton(Queue);
+                // In memory, so signing in never writes beside a real settings file.
+                services.RemoveAll<BrowseSessionStore>();
+                services.AddSingleton(new BrowseSessionStore());
             });
         });
 

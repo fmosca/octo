@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -302,6 +304,12 @@ internal sealed class AdminWebFactory : WebApplicationFactory<Program>
             // Synthetic, and only here to prove the admin API never hands it back.
             ["Subsonic:AdminPassword"] = "synthetic-admin-password",
         }));
+        // In memory, so a test that signs in never writes beside the real settings file.
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<Octo.Services.Admin.BrowseSessionStore>();
+            services.AddSingleton(new Octo.Services.Admin.BrowseSessionStore());
+        });
         return base.CreateHost(builder);
     }
 

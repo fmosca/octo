@@ -469,15 +469,8 @@ public class AdminController : ControllerBase
             // on the page cannot read it even if something managed to inject some.
             // Secure only over HTTPS, since this is normally reached over plain HTTP
             // on a LAN and a Secure cookie would simply be dropped there.
-            Response.Cookies.Append(BrowseCookieName, token, new CookieOptions
-            {
-                HttpOnly = true,
-                SameSite = SameSiteMode.Strict,
-                Secure = Request.IsHttps,
-                Path = "/api/admin",
-                MaxAge = BrowseSessionStore.Ttl,
-            });
-            return Ok(new { ok = true });
+            Response.Cookies.Append(BrowseCookieName, token, BrowseCookieOptions());
+            return Ok(new { ok = true, user = req.Username });
         }
         catch (Exception ex)
         {
@@ -496,8 +489,7 @@ public class AdminController : ControllerBase
     {
         // Cookie first (how the admin UI authenticates), header second so the
         // endpoint stays usable from curl or a script without one.
-        var session = Request.Cookies[BrowseCookieName] ?? token;
-        if (!_browseSessions.Validate(session))
+        if (BrowseUser(token) is null)
             return Unauthorized(new { error = "Browse session required." });
 
         var result = _browser.Browse(path);
@@ -536,6 +528,46 @@ public class AdminController : ControllerBase
     /// <summary>Cookie carrying the browse session. Scoped to /api/admin so it is
     /// never sent with the Subsonic traffic Octo proxies.</summary>
     internal const string BrowseCookieName = "octo_browse";
+
+    /// <summary>
+    /// The cookie's terms. Secure only over HTTPS, since this is normally reached over plain HTTP
+    /// on a LAN and a Secure cookie would simply be dropped there. Its age is set again on every
+    /// signed-in request, so the browser keeps it exactly as long as the server keeps the session.
+    /// </summary>
+    private CookieOptions BrowseCookieOptions() => new()
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        Secure = Request.IsHttps,
+        Path = "/api/admin",
+        MaxAge = BrowseSessionStore.Ttl,
+    };
+
+    /// <summary>
+    /// The Navidrome admin this request is signed in as, or null. Cookie first (how the admin UI
+    /// signs in), header second so the endpoints stay usable from curl. A live cookie is renewed.
+    /// </summary>
+    private string? BrowseUser(string? headerToken)
+    {
+        var cookie = Request.Cookies[BrowseCookieName];
+        var user = _browseSessions.UserOf(cookie ?? headerToken);
+        if (user is not null && cookie is not null) Response.Cookies.Append(BrowseCookieName, cookie, BrowseCookieOptions());
+        return user;
+    }
+
+    /// <summary>Who this browser is signed in as, for the dashboard's footer. Never prompts.</summary>
+    [HttpGet("browse/session")]
+    public IActionResult BrowseSession() =>
+        BrowseUser(null) is { } user ? Ok(new { signedIn = true, user }) : Ok(new { signedIn = false });
+
+    /// <summary>Sign this browser out: the session is forgotten and the cookie removed.</summary>
+    [HttpPost("browse/signout")]
+    public IActionResult BrowseSignOut()
+    {
+        _browseSessions.Revoke(Request.Cookies[BrowseCookieName]);
+        Response.Cookies.Delete(BrowseCookieName, new CookieOptions { Path = "/api/admin" });
+        return Ok(new { ok = true });
+    }
 
     /// <summary>The running log of songs Octo has fetched, newest first.</summary>
     [HttpGet("downloads")]
@@ -1277,7 +1309,7 @@ public class AdminController : ControllerBase
     [HttpGet("upgrades")]
     public async Task<IActionResult> GetUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token, CancellationToken ct)
     {
-        var user = _browseSessions.UserOf(Request.Cookies[BrowseCookieName] ?? token);
+        var user = BrowseUser(token);
         if (user is null) return Unauthorized(new { error = SignInFirst });
         var progress = (_acquisitions?.All() ?? [])
             .GroupBy(row => $"{row.Provider}:{row.ExternalId}")
@@ -1322,7 +1354,7 @@ public class AdminController : ControllerBase
     public IActionResult QueueUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
         [FromBody] UpgradeQueueRequest request)
     {
-        var user = _browseSessions.UserOf(Request.Cookies[BrowseCookieName] ?? token);
+        var user = BrowseUser(token);
         if (user is null) return Unauthorized(new { error = SignInFirst });
         if (_upgradeQueue is null) return NotFound();
         var settings = _libraryActionOpts.CurrentValue;
@@ -1404,8 +1436,7 @@ public class AdminController : ControllerBase
     /// that rewrites or deletes a tag is gated on this rather than being the second
     /// unauthenticated destructive surface.
     /// </summary>
-    private bool HasBrowseSession(string? headerToken) =>
-        _browseSessions.Validate(Request.Cookies[BrowseCookieName] ?? headerToken);
+    private bool HasBrowseSession(string? headerToken) => BrowseUser(headerToken) is not null;
 
     public sealed record GenreBackfillStartRequest(string? Scope, bool DryRun, string? Confirm);
 
