@@ -3853,9 +3853,9 @@ async function loadLossy(refresh = false) {
   if (!list) return;
   list.innerHTML = stateBlock('loading', 'Reading your library…');
   try {
-    const response = await lossyFetch(`/api/admin/lossy${refresh ? '?refresh=1' : ''}`);
+    const response = await lossyFetch(`/api/admin/lossy${refresh ? '?refresh=true' : ''}`);
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    if (!response.ok) throw new Error(body.error || body.title || `HTTP ${response.status}`);
     lossy.rows = body.songs || [];
     lossy.shown = LOSSY_PAGE;
     const formats = [...new Set(lossy.rows.map(row => (row.suffix || '').toLowerCase()).filter(Boolean))].sort();

@@ -1259,15 +1259,17 @@ public class AdminController : ControllerBase
     /// </summary>
     [HttpGet("lossy")]
     public async Task<IActionResult> GetLossy([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
-        [FromQuery] bool refresh, CancellationToken ct)
+        [FromQuery] string? refresh, CancellationToken ct)
     {
         if (!HasBrowseSession(token)) return Unauthorized(new { error = SignInFirst });
         if (_qualityUpgrade is null) return NotFound();
         if (!_navIdentity.HasAdminIdentity)
             return BadRequest(new { error = "Octo needs a Navidrome admin credential to read the whole library." });
 
+        // "1", "true" or "yes": a bool parameter refused "1" with a bare 400 before this ran.
+        var fresh = refresh?.Trim().ToLowerInvariant() is "1" or "true" or "yes";
         IReadOnlyList<Octo.Services.Library.LibrarySongRow> rows;
-        lock (LossyLock) rows = !refresh && _lossyCache is { } cached && DateTime.UtcNow - cached.At < LossyFor ? cached.Rows : [];
+        lock (LossyLock) rows = !fresh && _lossyCache is { } cached && DateTime.UtcNow - cached.At < LossyFor ? cached.Rows : [];
         if (rows.Count == 0)
         {
             var (songs, complete) = await _qualityUpgrade.ListSongs(ct);

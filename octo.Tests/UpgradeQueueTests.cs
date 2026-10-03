@@ -290,6 +290,21 @@ public sealed class UpgradeQueueTests : IDisposable
         Assert.True(doc.RootElement.GetProperty("gate").GetProperty("allowed").GetBoolean());
     }
 
+    [Theory]
+    [InlineData("1")]
+    [InlineData("true")]
+    public async Task RefreshingTheListIsNeverAValidationError(string refresh)
+    {
+        await using var page = Page();
+        using var client = page.Client(page.SignIn());
+        var response = await client.GetAsync($"/api/admin/lossy?refresh={refresh}");
+        var body = await response.Content.ReadAsStringAsync();
+        // The test host has no Navidrome admin credential, so the answer is that plain reason, never
+        // ASP.NET's "the value is not valid" for the parameter itself.
+        Assert.DoesNotContain("errors", body);
+        Assert.Contains("Navidrome admin credential", body);
+    }
+
     [Fact]
     public async Task AnAdminNotOnTheAllowedListIsRefused()
     {
