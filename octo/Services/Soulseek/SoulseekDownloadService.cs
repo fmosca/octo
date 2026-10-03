@@ -517,7 +517,9 @@ public class SoulseekDownloadService : BaseDownloadService
             var choice = AlbumFolderPicker.Choose(hits, wanted, hit =>
                 CandidateAllowed(hit, _rejectedPeers, _verification.RemembersRejections)
                 && string.Equals(hit.Extension, wantedExt, StringComparison.OrdinalIgnoreCase)
-                && hit.Size >= _settings.MinFileSizeBytes);
+                && hit.Size >= _settings.MinFileSizeBytes
+                // A studio album is never taken from a live album's folder.
+                && !FromLiveFolder(hit.Filename, "", album.Title));
             if (choice is null)
             {
                 Logger.LogInformation("Album '{Album}': no one folder covers enough of it; searching song by song", album.Title);
@@ -636,7 +638,7 @@ public class SoulseekDownloadService : BaseDownloadService
                 // Ranked once, on the whole search: slskd hands over a search's answers only when it
                 // ends, so there is nothing to stop early on.
                 hits = await _slskd.SearchAsync(query.Text, profile, cancellationToken);
-                found = RankCandidates(hits, routing.Title!, routing.Duration, strict)
+                found = RankCandidates(hits, routing.Title!, routing.Duration, strict, routing.Album)
                     .Where(h => passOver is null || h.Username != passOver.Username || h.Filename != passOver.Filename)
                     .ToList();
                 if (found.Count > 0) break;
@@ -877,7 +879,8 @@ public class SoulseekDownloadService : BaseDownloadService
                     // Second on purpose. The check above reads a TagLib header; this one spawns a
                     // process and makes a network call, and neither is worth spending on a file
                     // already known to be wrong.
-                    var verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc);
+                    var verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc,
+                        refuseLive: !LiveVersion.Requested(routing.Title, routing.Album));
                     // fpcalc reports a file that is not there as undecodable audio, which is a Mismatch.
                     // If the file moved during the check, find it and ask again instead of blaming the
                     // peer for slskd's own move.
@@ -885,7 +888,8 @@ public class SoulseekDownloadService : BaseDownloadService
                         && FindOwnFile() is { } movedTo)
                     {
                         localPath = movedTo;
-                        verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc);
+                        verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc,
+                        refuseLive: !LiveVersion.Requested(routing.Title, routing.Album));
                     }
                     if (verdict.Verdict == Octo.Services.Fingerprint.VerificationVerdict.Mismatch)
                     {
@@ -1142,6 +1146,19 @@ public class SoulseekDownloadService : BaseDownloadService
     internal static bool AddsVersion(string filename, string title) =>
         SongIdentity.AddedVersions(title, LeafTitle(filename)).Count > 0;
 
+    /// <summary>
+    /// Whether a plainly named file sits in a live album's folder: "Decade (live at the El
+    /// Mocambo) (2010)/17 - Smile in Your Sleep.flac" is the live take, though its own name says
+    /// nothing. The album folder and the one above it are read (a disc folder sits between);
+    /// not the share's top level. Never when the request itself asks for a live song or album.
+    /// </summary>
+    internal static bool FromLiveFolder(string filename, string title, string? album)
+    {
+        if (LiveVersion.Requested(title, album)) return false;
+        var parts = filename.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 1 && parts[..^1].TakeLast(2).Any(LiveVersion.Mentions);
+    }
+
     private static string LeafTitle(string filename)
     {
         var leaf = LeafOf(filename);
@@ -1150,7 +1167,7 @@ public class SoulseekDownloadService : BaseDownloadService
     }
 
     private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title, int? expectedDuration,
-        bool strict = false)
+        bool strict = false, string? album = null)
     {
         var wanted = SoulseekClient.NormalizeExtension(_settings.PreferredExtension, "");
         return hits
@@ -1164,6 +1181,7 @@ public class SoulseekDownloadService : BaseDownloadService
             .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title, requirePhrase: strict))
             .Where(h => DurationPlausible(h.Length, expectedDuration, requireKnownLength: strict))
             .Where(h => !AddsVersion(h.Filename, title))
+            .Where(h => !FromLiveFolder(h.Filename, title, album))
             // An unnamed bracketed addition sorts last rather than being dropped: it may be a
             // different take ("Angel (Angel Dust)"), or only a peer's own label.
             .OrderBy(h => VariantPenalty(h.Filename, title))

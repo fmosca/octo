@@ -176,7 +176,7 @@ if [ "$mode" = image ]; then
     run docker compose up -d octo || fail "docker compose up failed. The log has the details." "Restarting Octo"
     wait_until_running || fail "Octo was started but did not stay running. 'docker compose logs octo' says why." "Restarting Octo"
   fi
-  write_status done "$([ "$DRYRUN" = 1 ] && echo "Dry run: nothing was changed" || echo "Octo restarted on the new image")"
+  write_status "done" "$([ "$DRYRUN" = 1 ] && echo "Dry run: nothing was changed" || echo "Octo restarted on the new image")"
   exit 0
 fi
 
@@ -203,7 +203,7 @@ fi
 if [ "$DRYRUN" = 1 ]; then
   write_status building "Dry run: would build $tag"
   log "Dry run: would check out $tag, build, and restart"
-  write_status done "Dry run: nothing was changed"
+  write_status "done" "Dry run: nothing was changed"
   exit 0
 fi
 
@@ -229,7 +229,7 @@ if ! run docker compose up -d || ! wait_until_running; then
   fail "Octo $tag did not stay running, and going back to ${from:-the old version} failed too. 'docker compose logs octo' on the host says why." "Restarting Octo"
 fi
 
-write_status done "Octo now runs $tag"
+write_status "done" "Octo now runs $tag"
 log "Done: $from to $tag"
 refresh_helper
 exit 0

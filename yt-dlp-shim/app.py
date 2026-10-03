@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -341,6 +342,23 @@ def _search_single(q: str, bg: bool = False) -> Optional[dict]:
     return payload
 
 
+_LIVE = re.compile(r"\b(live|unplugged|in concert|concert|bootleg)\b", re.IGNORECASE)
+
+
+def _rank_by_length(candidates: list, q: str, duration_hint: int) -> list:
+    """Closest length first, but a live take never beats a studio one unless the query asks
+    for live itself. A live video of a song is usually within seconds of the studio length,
+    so length alone picked it as often as not. All of them live: the closest still plays."""
+    wants_live = bool(_LIVE.search(q))
+
+    def key(r: dict):
+        live = 0 if wants_live or not _LIVE.search(r.get("title") or "") else 1
+        length = abs((r.get("duration") or 0) - duration_hint) if r.get("duration") else float("inf")
+        return (live, length)
+
+    return sorted(candidates, key=key)
+
+
 def _search_with_hint(q: str, duration_hint: int, bg: bool = False) -> Optional[dict]:
     """Duration hint present: pick the closest-length of 5 flat candidates
     (cheap, no per-video extraction), then resolve the winner's URL once.
@@ -371,12 +389,9 @@ def _search_with_hint(q: str, duration_hint: int, bg: bool = False) -> Optional[
             pass
     if not candidates:
         return {}
-    # Closest duration wins; candidates without a duration sort last so a hint
-    # never drags us onto an entry we can't length-match.
-    candidates.sort(
-        key=lambda r: abs((r.get("duration") or 0) - duration_hint)
-        if r.get("duration") else float("inf")
-    )
+    # Closest duration wins, live takes last; candidates without a duration sort
+    # last so a hint never drags us onto an entry we can't length-match.
+    candidates = _rank_by_length(candidates, q, duration_hint)
     payload = _payload_from(candidates[0])
     if payload.get("video_id"):
         # Warm the URL cache for the coming /stream (single-flight + cached).
@@ -495,9 +510,7 @@ def meta():
                     pass
         if not cands:
             return jsonify(error="no_hit"), 404
-        cands.sort(key=lambda r: abs((r.get("duration") or 0) - duration_hint)
-                   if r.get("duration") else float("inf"))
-        data = cands[0]
+        data = _rank_by_length(cands, q, duration_hint)[0]
     else:
         out = _run([f"ytsearch1:{q}", "--flat-playlist", "--print", "%(.{id,title,duration})j"],
                    timeout=15, label="meta", bg=bg)

@@ -78,7 +78,7 @@ check() { # name, expected state, expected checkout, words the error must hold
 }
 
 fresh; request 2026.10.04
-check "updates to a newer release" done 2026.10.04 ""
+check "updates to a newer release" "done" 2026.10.04 ""
 grep -q '^mode=build$' "$work/config/update/helper" && echo "ok    describes itself as a built install" || { echo "FAIL  helper file"; failures=$((failures + 1)); }
 
 fresh; request "2026.10.04; touch $work/pwned"
@@ -98,7 +98,7 @@ fresh; echo "<!-- edit -->" >> "$work/octo/octo/octo.csproj"; request 2026.10.04
 check "local changes to Octo's own files are left alone" failed 2026.10.01 "(octo/octo.csproj)"
 
 fresh; echo "KEY=value" > "$work/octo/.env"; request 2026.10.04
-check "untracked files such as .env are fine" done 2026.10.04 ""
+check "untracked files such as .env are fine" "done" 2026.10.04 ""
 
 fresh; request 2026.10.04
 DOCKER_FAIL=build check "a failed build changes nothing" failed 2026.10.01 "nothing was restarted"
@@ -110,11 +110,11 @@ fresh; request 2026.10.04
 FAKE_STATE=restarting check "a failed rollback says so" failed 2026.10.01 "failed too"
 
 fresh; request 2026.10.04
-OCTO_UPDATER_DRYRUN=1 check "a dry run changes nothing" done 2026.10.01 ""
+OCTO_UPDATER_DRYRUN=1 check "a dry run changes nothing" "done" 2026.10.01 ""
 grep -q 'compose build' "$FAKE_LOG" && { echo "FAIL  the dry run built"; failures=$((failures + 1)); } || echo "ok    the dry run never builds"
 
 fresh; request 2026.10.04
-FAKE_MODE=image check "an image install pulls instead" done 2026.10.01 ""
+FAKE_MODE=image check "an image install pulls instead" "done" 2026.10.01 ""
 grep -q 'compose pull octo' "$FAKE_LOG" && echo "ok    pulled the image" || { echo "FAIL  no pull"; failures=$((failures + 1)); }
 
 fresh
