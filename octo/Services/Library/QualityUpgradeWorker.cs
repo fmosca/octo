@@ -70,7 +70,7 @@ public sealed class QualityUpgradeStore
 /// Trickles lossy songs through Better quality, a few a week (#70). Every safety the action has
 /// applies unchanged, because this only ever calls it: the allowlist, dry run, the quarantine,
 /// and putting the original back when the new file is not really better, and the upgraded song
-/// keeps its place in Navidrome, with its plays, favourites and playlist entries (W8).
+/// keeps its place in Navidrome, with its plays, favorites and playlist entries (W8).
 /// </summary>
 public sealed class QualityUpgradeWorker : BackgroundService
 {

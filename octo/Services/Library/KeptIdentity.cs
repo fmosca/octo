@@ -12,7 +12,7 @@ public sealed record KeptIdentity(
 
 /// <summary>
 /// Reads a file's identity the way Navidrome 0.64 does and writes it onto a replacement (W8).
-/// Navidrome keeps a moved song's id, and every play, favourite and playlist place on it, only
+/// Navidrome keeps a moved song's id, and every play, favorite and playlist place on it, only
 /// when the new file has the same persistent id as the one that went missing. Key lists are
 /// resources/mappings.yaml's aliases, lowercased, in its order.
 /// </summary>

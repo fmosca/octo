@@ -277,7 +277,7 @@ builder.Services.AddSingleton(sp => new Octo.Services.Updates.UpdateHost(
     sp.GetRequiredService<ILogger<Octo.Services.Updates.UpdateHost>>()));
 // Whether a song is already in the library, so nothing downloads a second copy.
 builder.Services.AddSingleton<Octo.Services.Library.LibraryOwnership>();
-// Asked before a heart goes anywhere: a song already in the library is favourited, not fetched.
+// Asked before a heart goes anywhere: a song already in the library is favorited, not fetched.
 builder.Services.AddSingleton<Octo.Services.Library.HeartOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.UpgradeWorker>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.QualityUpgradeWorker>());
@@ -377,7 +377,7 @@ builder.Services.AddHostedService<Octo.Services.Common.AcquisitionWorker>();
 // the dashboard. In memory only; it watches the pipeline and never steers it.
 builder.Services.AddSingleton(sp => new Octo.Services.Common.AcquisitionTracker(
     sp.GetRequiredService<ILogger<Octo.Services.Common.AcquisitionTracker>>(), sp));
-// Favourites a starred outside song for whoever starred it once Navidrome shows it (#71).
+// Favorites a starred outside song for whoever starred it once Navidrome shows it (#71).
 builder.Services.AddSingleton<Octo.Services.Common.StarOnArrival>();
 
 // Long enough for an already-downloaded file to finish being tagged and registered, and

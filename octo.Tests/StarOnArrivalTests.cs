@@ -10,8 +10,8 @@ namespace Octo.Tests;
 
 /// <summary>
 /// #71: with StarDownloadsForRequester on (off by default), a star from another app on a song
-/// Octo found becomes a Navidrome favourite once the song lands, for the person who starred it,
-/// signed as them, and only once. A song already owned is favourited whatever it says.
+/// Octo found becomes a Navidrome favorite once the song lands, for the person who starred it,
+/// signed as them, and only once. A song already owned is favorited whatever it says.
 /// </summary>
 public sealed class StarOnArrivalTests
 {
@@ -61,7 +61,7 @@ public sealed class StarOnArrivalTests
         _calls.Where(call => call.Endpoint == endpoint).Select(call => call.Parameters).ToList();
 
     [Fact]
-    public async Task AStarredSongIsFavouritedForTheStarrerWhenItArrives()
+    public async Task AStarredSongIsFavoritedForTheStarrerWhenItArrives()
     {
         var tracker = Tracker();
         using var stars = Stars(tracker);
@@ -84,7 +84,7 @@ public sealed class StarOnArrivalTests
     }
 
     [Fact]
-    public async Task EachStarrerGetsTheirOwnFavourite()
+    public async Task EachStarrerGetsTheirOwnFavorite()
     {
         var tracker = Tracker();
         using var stars = Stars(tracker);
@@ -114,7 +114,7 @@ public sealed class StarOnArrivalTests
     }
 
     [Fact]
-    public async Task ASongNavidromeNeverShowsIsNotFavourited()
+    public async Task ASongNavidromeNeverShowsIsNotFavorited()
     {
         var tracker = Tracker(canLook: false);
         using var stars = Stars(tracker);
@@ -137,7 +137,7 @@ public sealed class StarOnArrivalTests
     }
 
     [Fact]
-    public async Task AnAlbumStarFavouritesTheAlbumOnce()
+    public async Task AnAlbumStarFavoritesTheAlbumOnce()
     {
         var tracker = Tracker();
         using var stars = Stars(tracker);
@@ -187,7 +187,7 @@ public sealed class StarOnArrivalTests
     }
 
     [Fact]
-    public async Task TheDefaultIsThatADownloadIsNotFavourited()
+    public async Task TheDefaultIsThatADownloadIsNotFavorited()
     {
         Assert.False(new SubsonicSettings().StarDownloadsForRequester);
         var tracker = Tracker();
@@ -204,7 +204,7 @@ public sealed class StarOnArrivalTests
     }
 
     [Fact]
-    public async Task ASongAlreadyOwnedIsFavouritedWithTheSettingOff()
+    public async Task ASongAlreadyOwnedIsFavoritedWithTheSettingOff()
     {
         var tracker = Tracker();
         _settings.Set(new SubsonicSettings { StarDownloadsForRequester = false });
@@ -212,7 +212,7 @@ public sealed class StarOnArrivalTests
         tracker.Begin("soulseek", "abc", "abc", "alice");
         stars.HoldSong("soulseek", "abc", Credential("alice"), "alice");
 
-        Assert.True(stars.FavouriteOwned("soulseek", "abc", "nd-owned", "A", "Song", "/music/song.flac"));
+        Assert.True(stars.FavoriteOwned("soulseek", "abc", "nd-owned", "A", "Song", "/music/song.flac"));
 
         await LastFmScrobbleServiceTests.Until(() => Calls("rest/star").Count == 1);
         Assert.Equal("nd-owned", Calls("rest/star").Single()["id"]);
@@ -220,15 +220,15 @@ public sealed class StarOnArrivalTests
     }
 
     [Fact]
-    public void AnOwnedSongFromOctosOwnAppsIsNotFavourited()
+    public void AnOwnedSongFromOctosOwnAppsIsNotFavorited()
     {
         using var stars = Stars(Tracker());
-        Assert.False(stars.FavouriteOwned("soulseek", "abc", "nd-owned", "A", "Song", "/music/song.flac"));
+        Assert.False(stars.FavoriteOwned("soulseek", "abc", "nd-owned", "A", "Song", "/music/song.flac"));
         Assert.Empty(_calls);
     }
 
     [Fact]
-    public async Task AlreadyAFavouriteIsLeftAlone()
+    public async Task AlreadyAFavoriteIsLeftAlone()
     {
         _alreadyStarred = true;
         var tracker = Tracker();
@@ -266,7 +266,7 @@ public sealed class StarOnArrivalTests
     public void IsOctoApp(string? client, bool expected) => Assert.Equal(expected, StarOnArrival.IsOctoApp(client));
 
     [Fact]
-    public async Task StarWhenVisibleFavouritesTheReplacement()
+    public async Task StarWhenVisibleFavoritesTheReplacement()
     {
         using var stars = Stars(Tracker());
         stars.LibraryLookup = (_, _, _, _) => Task.FromResult<string?>("nd-new");

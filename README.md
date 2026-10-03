@@ -275,7 +275,7 @@ Use **Streams & hearts → Heart download priority** in the admin UI to order So
 
 Lidarr works at album level, so enabling it for song hearts still fetches the song's full album. It is last and disabled by default; configure its URL, API key, root folder, and profiles on the Lidarr page, then enable the heart types you want in the priority list.
 
-To stop downloading altogether, turn off both heart types for every source. On an env-only installation, set `Subsonic__DownloadOnStar=false` and `Subsonic__DownloadAlbumOnStar=false`. A heart on a song Octo found for you then downloads nothing and is not kept, because Navidrome has no such song to favourite.
+To stop downloading altogether, turn off both heart types for every source. On an env-only installation, set `Subsonic__DownloadOnStar=false` and `Subsonic__DownloadAlbumOnStar=false`. A heart on a song Octo found for you then downloads nothing and is not kept, because Navidrome has no such song to favorite.
 
 `RECORD_REQUESTED_BY` (on by default) names the Subsonic user who asked for each download on
 its entry in **Fetched songs** and on the download notification, so on a shared library you can
@@ -285,11 +285,11 @@ starting a second one. Acquisitions Octo starts itself are unattributed, as are 
 written before this existed. Turning it off stops the username being captured at all rather
 than hiding it afterwards, so nothing downstream holds it; names already written stay.
 
-A heart on a song you already have is a favourite in Navidrome, straight away, and downloads
+A heart on a song you already have is a favorite in Navidrome, straight away, and downloads
 nothing. A heart on a song you do not have only downloads it; heart it again once it is in your
-library to make it a favourite. `STAR_DOWNLOADS_FOR_REQUESTER` (off by default) makes Octo also
-favourite a download when it lands, for the person who hearted it; an album heart then
-favourites the album. Octo's own apps are left out,
+library to make it a favorite. `STAR_DOWNLOADS_FOR_REQUESTER` (off by default) makes Octo also
+favorite a download when it lands, for the person who hearted it; an album heart then
+favorites the album. Octo's own apps are left out,
 because their star button means Add. The person's sign-in is held in memory
 with the download until the song arrives (a password is first turned into a token, so the
 password itself is never held), and a restart drops it.
@@ -393,7 +393,7 @@ names, which actions exist, and which star count maps to which action are all ed
 five stars means Keep, which removes nothing, so the top of the scale is never destructive.
 A replacement (Better quality, Wrong version, Wrong song) takes the original's place in
 Navidrome: it keeps the original's file name, title, album and album artist tags, so its plays,
-favourites and playlist places stay with it. The action history says whether Navidrome kept it.
+favorites and playlist places stay with it. The action history says whether Navidrome kept it.
 
 `LIBRARY_ACTIONS_DRY_RUN` is on by default, so the first run of a newly enabled install is a
 rehearsal you can read before anything is real. Nothing is ever deleted outright: removed files
@@ -508,7 +508,7 @@ track AcoustID named as something else, for a fingerprint other than the standar
 artist and length.
 
 Each kind of dynamic station is configured on its own, so a listener can keep Your Mix
-without collecting an artist radio per favourite band. `LASTFM_ENABLE_YOUR_MIX` and
+without collecting an artist radio per favorite band. `LASTFM_ENABLE_YOUR_MIX` and
 `LASTFM_ENABLE_DISCOVERY_MIX` (both default true) switch those two stations,
 `LASTFM_ARTIST_STATION_COUNT` (default 2) and `LASTFM_GENRE_STATION_COUNT` (default 3)
 say how many of each to build, and 0 builds none. The defaults are what Octo has always
@@ -671,7 +671,7 @@ The dashboard's **Better quality** page lists every song in your library that is
 
 Copies come from Soulseek, from Lidarr, or from both: **Library actions → Where to look for a higher quality copy** (`LIBRARY_ACTIONS_UPGRADE_SOURCE`). Automatic, the default, asks Soulseek first and Lidarr for what Soulseek cannot find, using whichever is set up, and asks Lidarr alone while Soulseek is offline. Lidarr only fetches whole albums, so Octo borrows the album: it copies out the one song, which then goes through the same checks and the same in-place swap as a Soulseek copy, deletes the other files that search brought in, and puts the album's monitoring back as it was. A song whose file Lidarr itself manages is left to Lidarr, which upgrades it in place when its quality profile asks for lossless.
 
-> **A heart is "fetch" for a song you do not have, and "favourite" for one you do.** Octo checks your library first. A song you already have, even the copy Octo found outside your library, becomes your favourite in Navidrome straight away and downloads nothing (an MP3 is queued for Better quality). A song you do not have is downloaded and nothing more: once it is in your library, heart it there to make it a favourite. `STAR_DOWNLOADS_FOR_REQUESTER` makes Octo favourite downloads when they land instead. Octo's own apps are left out of both, since their heart means Add.
+> **A heart is "fetch" for a song you do not have, and "favorite" for one you do.** Octo checks your library first. A song you already have, even the copy Octo found outside your library, becomes your favorite in Navidrome straight away and downloads nothing (an MP3 is queued for Better quality). A song you do not have is downloaded and nothing more: once it is in your library, heart it there to make it a favorite. `STAR_DOWNLOADS_FOR_REQUESTER` makes Octo favorite downloads when they land instead. Octo's own apps are left out of both, since their heart means Add.
 
 ### Cover art aggregator
 
@@ -689,7 +689,7 @@ Cached cross-source so a queue scroll doesn't trigger N external API calls per v
 Yes. Every download is matched against the fingerprint service, the music database and Deezer, tagged with the full release set and ReplayGain, given the largest cover found, and filed per `FolderStructure` before the Navidrome rescan. See [Do downloaded songs get tagged correctly?](#do-downloaded-songs-get-tagged-correctly) above.
 
 **What if all 5 Soulseek peers reject?**
-The next source in your heart order is tried. If every one fails and notifications are set up, you get a **Download failed** message; your music app itself hears nothing, because the heart was answered straight away. The heart may clear on the app's next sync, since Navidrome never stored a favourite for a song it doesn't have. Try again later or grab the file by hand.
+The next source in your heart order is tried. If every one fails and notifications are set up, you get a **Download failed** message; your music app itself hears nothing, because the heart was answered straight away. The heart may clear on the app's next sync, since Navidrome never stored a favorite for a song it doesn't have. Try again later or grab the file by hand.
 
 **Can it run without Soulseek?**
 Yes. Enable YouTube for MP3 downloads, Lidarr for album-level heart acquisition, or disable every song-heart source to keep discovery without automatic acquisition.

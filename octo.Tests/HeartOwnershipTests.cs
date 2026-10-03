@@ -15,8 +15,8 @@ using Octo.Services.Subsonic;
 namespace Octo.Tests;
 
 /// <summary>
-/// A heart on a song Octo found outside the library downloads it, then favourites it for whoever
-/// hearted it. A heart on a song that is already in the library is a favourite and nothing else:
+/// A heart on a song Octo found outside the library downloads it, then favorites it for whoever
+/// hearted it. A heart on a song that is already in the library is a favorite and nothing else:
 /// it never downloads, never waits behind other downloads or a Soulseek outage, and never sends
 /// Lidarr for a whole album. An owned MP3 is also queued for Better quality.
 /// </summary>
@@ -134,7 +134,7 @@ public sealed class HeartOwnershipTests : IDisposable
         _calls.Where(call => call.Endpoint == "rest/star").Select(call => call.Parameters).ToList();
 
     [Fact]
-    public async Task AHeartOnASongYouHave_FavouritesYourCopyAndDownloadsNothing()
+    public async Task AHeartOnASongYouHave_FavoritesYourCopyAndDownloadsNothing()
     {
         _library = [Owned("nd-9", "Teardrop", "flac")];
         Heart();
@@ -150,7 +150,7 @@ public sealed class HeartOwnershipTests : IDisposable
     }
 
     [Fact]
-    public async Task AHeartOnAnMp3YouHave_FavouritesItAndQueuesBetterQuality()
+    public async Task AHeartOnAnMp3YouHave_FavoritesItAndQueuesBetterQuality()
     {
         _library = [Owned("nd-9", "Teardrop", "mp3", 320)];
         Heart();
@@ -182,10 +182,10 @@ public sealed class HeartOwnershipTests : IDisposable
         await chain.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
-    /// <summary>The heart was the download: it is not a favourite when the song lands, unless
+    /// <summary>The heart was the download: it is not a favorite when the song lands, unless
     /// StarDownloadsForRequester asks for that (off by default).</summary>
     [Fact]
-    public async Task AHeartOnASongYouDoNotHave_IsNotAFavouriteWhenItLands()
+    public async Task AHeartOnASongYouDoNotHave_IsNotAFavoriteWhenItLands()
     {
         Heart();
 
@@ -235,7 +235,7 @@ public sealed class HeartOwnershipTests : IDisposable
     [Fact]
     public async Task FromOctosOwnApps_ASongYouHaveIsLeftAsItIs()
     {
-        // Their heart means Add, and the song is already added: no favourite, no download.
+        // Their heart means Add, and the song is already added: no favorite, no download.
         _library = [Owned("nd-9", "Teardrop", "flac")];
         Heart(octoApp: true);
 
@@ -263,7 +263,7 @@ public sealed class HeartOwnershipTests : IDisposable
     }
 
     [Fact]
-    public async Task AnAlbumYouHaveWhole_IsFavouritedAndNothingDownloads()
+    public async Task AnAlbumYouHaveWhole_IsFavoritedAndNothingDownloads()
     {
         _library = [Owned("nd-1", "Angel", "flac"), Owned("nd-3", "Teardrop", "flac")];
         _tracker.BeginAlbum("deezer", "mezzanine", "alice");

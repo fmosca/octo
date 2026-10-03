@@ -290,9 +290,9 @@ public sealed class LidarrTrackFetcherTests : IDisposable
         private HttpResponseMessage Search()
         {
             Searches++;
-            var run = OnSearch;
-            // Outside the lock: an import takes it too.
-            if (run is not null) _ = Task.Run(run);
+            // Before the answer, the way a quick Lidarr would have it, so no test races the clock.
+            // The lock is the same thread's, and C#'s lock lets it in again.
+            OnSearch?.Invoke();
             return Json("""{"id":1,"name":"AlbumSearch"}""");
         }
 

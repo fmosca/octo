@@ -2389,7 +2389,7 @@ public class SubsonicController : ControllerBase
 
     /// <summary>
     /// Stars (favorites) an item. For playlists, triggers download. For external songs and
-    /// albums, triggers a download and, outside Octo's own apps, favourites it once it arrives.
+    /// albums, triggers a download and, outside Octo's own apps, favorites it once it arrives.
     /// </summary>
     [HttpGet, HttpPost]
     [Route("rest/star")]
@@ -2486,7 +2486,7 @@ public class SubsonicController : ControllerBase
             // is never written anywhere.
             var who = await SignedInUserAsync(parameters);
             // Held before the download is queued, so one that finishes at once still finds it.
-            if (FavouriteCredential(parameters) is { } credential)
+            if (FavoriteCredential(parameters) is { } credential)
                 _starOnArrival!.HoldAlbum(albumProviderName, albumCandidate, credential, who);
             _acquisitionTracker?.BeginAlbum(albumProviderName, albumCandidate, who);
             _heartAcquisitions.QueueAlbum(albumProviderName, albumCandidate, RequesterFor(who));
@@ -2518,7 +2518,7 @@ public class SubsonicController : ControllerBase
             // app can find its row. Named from the routing, which is already in memory.
             var who = await SignedInUserAsync(parameters);
             // Held before the download is queued, so one that finishes at once still finds it.
-            if (FavouriteCredential(parameters) is { } credential)
+            if (FavoriteCredential(parameters) is { } credential)
                 _starOnArrival!.HoldSong(provider!, externalId!, credential, who);
             var routing = _idRegistry.Lookup(externalId!);
             _acquisitionTracker?.Begin(provider!, externalId!, itemId, who,
@@ -3835,12 +3835,12 @@ public class SubsonicController : ControllerBase
         _subsonicSettings.RecordRequestedBy && !string.IsNullOrWhiteSpace(username) ? username : null;
 
     /// <summary>
-    /// The sign-in to favourite a hearted outside song or album with, or null. Held for every
-    /// heart from another app, not only while downloads are favourited: a song that turns out to
-    /// be in the library already is always that person's favourite. Octo's own apps send star for
-    /// Add, which asks for a copy and not a favourite.
+    /// The sign-in to favorite a hearted outside song or album with, or null. Held for every
+    /// heart from another app, not only while downloads are favorited: a song that turns out to
+    /// be in the library already is always that person's favorite. Octo's own apps send star for
+    /// Add, which asks for a copy and not a favorite.
     /// </summary>
-    private SubsonicCredential? FavouriteCredential(IReadOnlyDictionary<string, string> parameters) =>
+    private SubsonicCredential? FavoriteCredential(IReadOnlyDictionary<string, string> parameters) =>
         _starOnArrival is not null && !StarOnArrival.IsOctoApp(parameters.GetValueOrDefault("c"))
             ? SubsonicCredential.From(parameters) : null;
 

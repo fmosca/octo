@@ -211,15 +211,15 @@ public sealed class AcquisitionEndpointTests
         using var doc = JsonDocument.Parse(await http.GetStringAsync($"/rest/star.view?{Auth("alice", client: client)}&f=json&id={id}"));
 
         Assert.Equal("ok", doc.RootElement.GetProperty("subsonic-response").GetProperty("status").GetString());
-        // The download is asked for either way; only the favourite depends on who starred it.
+        // The download is asked for either way; only the favorite depends on who starred it.
         Assert.Single(factory.Tracker.ForUser("alice"));
         return factory.Services.GetRequiredService<StarOnArrival>().Held;
     }
 
     /// <summary>A song already in Navidrome carries Navidrome's own id, so its heart is
-    /// Navidrome's favourite, sent on as the person who hearted it, and nothing downloads.</summary>
+    /// Navidrome's favorite, sent on as the person who hearted it, and nothing downloads.</summary>
     [Fact]
-    public async Task StarringALibrarySong_IsANavidromeFavouriteAndDownloadsNothing()
+    public async Task StarringALibrarySong_IsANavidromeFavoriteAndDownloadsNothing()
     {
         await using var factory = new AcquisitionWebFactory();
         using var client = factory.CreateClient();
@@ -230,6 +230,22 @@ public sealed class AcquisitionEndpointTests
         Assert.Equal(["alice:nd-42"], factory.Navidrome.Stars);
         Assert.True(factory.Services.GetRequiredService<TrackAcquisitionQueue>().IsIdle);
         Assert.Empty(factory.Tracker.All());
+        Assert.Equal(0, factory.Services.GetRequiredService<StarOnArrival>().Held);
+    }
+
+    /// <summary>Octo's own apps sync their favorites as stars on library songs. Those reach
+    /// Navidrome exactly as before: the heart rules for outside songs never touch them.</summary>
+    [Fact]
+    public async Task StarringALibrarySongFromTheOctoApp_IsRelayedAsBefore()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/rest/star.view?{Auth("alice", client: "Octo")}&f=json&id=nd-42");
+
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Equal(["alice:nd-42"], factory.Navidrome.Stars);
+        Assert.True(factory.Services.GetRequiredService<TrackAcquisitionQueue>().IsIdle);
         Assert.Equal(0, factory.Services.GetRequiredService<StarOnArrival>().Held);
     }
 
@@ -248,9 +264,9 @@ public sealed class AcquisitionEndpointTests
     }
 
     [Fact]
-    public async Task StarWithDownloadFavouritesOff_StillHoldsTheSignIn()
+    public async Task StarWithDownloadFavoritesOff_StillHoldsTheSignIn()
     {
-        // The song may turn out to be in the library already, and that heart is always a favourite.
+        // The song may turn out to be in the library already, and that heart is always a favorite.
         await using var factory = new AcquisitionWebFactory(new Dictionary<string, string?>
         {
             ["Subsonic:StarDownloadsForRequester"] = "false",

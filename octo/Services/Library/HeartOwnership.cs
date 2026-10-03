@@ -6,7 +6,7 @@ namespace Octo.Services.Library;
 
 /// <summary>
 /// Whether a hearted outside song, or every song of a hearted outside album, is already in the
-/// library. Asked before a heart goes anywhere: a song you have is favourited, never downloaded
+/// library. Asked before a heart goes anywhere: a song you have is favorited, never downloaded
 /// again, and never waits behind other downloads, a Soulseek outage, or a whole Lidarr album.
 /// </summary>
 public sealed class HeartOwnership(

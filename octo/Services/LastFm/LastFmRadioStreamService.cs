@@ -431,7 +431,7 @@ public sealed class LastFmRadioStreamService
     /// loudness range, texture as spectral flatness (loudness itself is not a term
     /// because every track has been brought to the same level). Kinship: one minus the
     /// overlap of their Last.fm tags, the catalogue genre when tags are missing, and a
-    /// neutral middle when nothing is known so an unmeasured track is neither favoured
+    /// neutral middle when nothing is known so an unmeasured track is neither favored
     /// nor punished.
     /// </summary>
     internal static double FlowDistance(RadioAudioProfile current, RadioAudioProfile next)

@@ -90,7 +90,7 @@ public sealed class LibraryActionRatingWorker : BackgroundService
     }
 
     /// <summary>The executor's request, with the rater's own sign-in, so a replaced song keeps
-    /// the favourite they gave it.</summary>
+    /// the favorite they gave it.</summary>
     internal static LibraryActionRequest ToActionRequest(RatingActionRequest request) =>
         new(request.Action, request.NavidromeId, request.Username,
             SubsonicCredential.From(new Dictionary<string, string>

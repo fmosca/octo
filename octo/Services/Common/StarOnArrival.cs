@@ -6,12 +6,12 @@ using Octo.Services.Subsonic;
 namespace Octo.Services.Common;
 
 /// <summary>
-/// Favourites a starred outside song in Navidrome once its download lands, for the person who
+/// Favorites a starred outside song in Navidrome once its download lands, for the person who
 /// starred it (#71). In most clients a star means "I like this", and Octo kept the song but lost
 /// the like, because the id that was starred was never Navidrome's.
 ///
-/// Navidrome favourites only as the user who signs the call, so that person's sign-in is held
-/// with the download: in memory only, and dropped once the favourite is sent, once the download
+/// Navidrome favorites only as the user who signs the call, so that person's sign-in is held
+/// with the download: in memory only, and dropped once the favorite is sent, once the download
 /// ends without a song, or after a day. A restart loses what is held. A password is never held:
 /// it is turned into a token first.
 /// </summary>
@@ -68,7 +68,7 @@ public sealed class StarOnArrival : IDisposable
         lock (_lock)
         {
             Prune();
-            // A second star from the same person replaces the first: one favourite each.
+            // A second star from the same person replaces the first: one favorite each.
             holds.RemoveAll(hold => hold.Key == key && string.Equals(hold.Who, name, StringComparison.OrdinalIgnoreCase));
             holds.Add(new Hold(key, credential, name, Now));
             var over = _songs.Count + _albums.Count - AcquisitionTracker.Capacity;
@@ -90,7 +90,7 @@ public sealed class StarOnArrival : IDisposable
         {
             if (end.Done)
                 foreach (var hold in songs)
-                    _logger.LogInformation("'{Artist} - {Title}' is in the folder but Navidrome did not show it, so it was not favourited for {User}",
+                    _logger.LogInformation("'{Artist} - {Title}' is in the folder but Navidrome did not show it, so it was not favorited for {User}",
                         end.Artist, end.Title, hold.Who);
             return;
         }
@@ -109,20 +109,20 @@ public sealed class StarOnArrival : IDisposable
             try
             {
                 var albumId = SongFacts(await CallAsync("rest/getSong", hold.Credential.Parameters(("id", libraryId))))?.AlbumId;
-                if (albumId is null) { _logger.LogInformation("Navidrome did not say which album {Id} is on, so no album was favourited for {User}", libraryId, hold.Who); continue; }
+                if (albumId is null) { _logger.LogInformation("Navidrome did not say which album {Id} is on, so no album was favorited for {User}", libraryId, hold.Who); continue; }
                 Report(await CallAsync("rest/star", hold.Credential.Parameters(("albumId", albumId))), hold.Who, $"album {albumId}");
             }
-            catch (Exception ex) { _logger.LogInformation("Could not favourite the album of {Id} for {User}: {Reason}", libraryId, hold.Who, ex.Message); }
+            catch (Exception ex) { _logger.LogInformation("Could not favorite the album of {Id} for {User}: {Reason}", libraryId, hold.Who, ex.Message); }
         }
     }
 
     /// <summary>
-    /// A heart on a song already in the library: favourite the library's copy now for whoever
+    /// A heart on a song already in the library: favorite the library's copy now for whoever
     /// hearted it, whatever StarDownloadsForRequester says, since that setting is only about
     /// downloads. By its Navidrome id, or found by its path when only that is known. False when
     /// nobody's sign-in was held (Octo's own apps, whose heart means Add).
     /// </summary>
-    public bool FavouriteOwned(string provider, string externalId, string? libraryId, string artist, string title, string path)
+    public bool FavoriteOwned(string provider, string externalId, string? libraryId, string artist, string title, string path)
     {
         List<Hold> songs;
         lock (_lock) songs = Take(_songs, hold => hold.Key == AcquisitionTracker.KeyOf(provider, externalId));
@@ -137,9 +137,9 @@ public sealed class StarOnArrival : IDisposable
         return true;
     }
 
-    /// <summary>A heart on an album already whole in the library: favourite the album now, found
+    /// <summary>A heart on an album already whole in the library: favorite the album now, found
     /// through one of its songs, whatever StarDownloadsForRequester says.</summary>
-    public bool FavouriteOwnedAlbum(string provider, string albumId, string libraryIdOfASong)
+    public bool FavoriteOwnedAlbum(string provider, string albumId, string libraryIdOfASong)
     {
         List<Hold> albums;
         lock (_lock) albums = Take(_albums, hold => hold.Key == AcquisitionTracker.KeyOf(provider, albumId));
@@ -149,14 +149,14 @@ public sealed class StarOnArrival : IDisposable
         return true;
     }
 
-    /// <summary>Whether this person has favourited a song. False when Navidrome cannot say.</summary>
+    /// <summary>Whether this person has favorited a song. False when Navidrome cannot say.</summary>
     public async Task<bool> IsStarredAsync(SubsonicCredential credential, string navidromeId)
     {
         try { return SongFacts(await CallAsync("rest/getSong", credential.Parameters(("id", navidromeId))))?.Starred == true; }
-        catch (Exception ex) { _logger.LogDebug("Could not read whether {Id} is a favourite: {Reason}", navidromeId, ex.Message); return false; }
+        catch (Exception ex) { _logger.LogDebug("Could not read whether {Id} is a favorite: {Reason}", navidromeId, ex.Message); return false; }
     }
 
-    /// <summary>Favourite a file for this person once Navidrome shows it, for a replacement that
+    /// <summary>Favorite a file for this person once Navidrome shows it, for a replacement that
     /// arrives as a new song. Polls about ten minutes, then gives up with a log line.</summary>
     public void StarWhenVisible(SubsonicCredential credential, string who, string artist, string title, string path)
     {
@@ -165,7 +165,7 @@ public sealed class StarOnArrival : IDisposable
             {
                 if ((LibraryLookup ?? ResolveLookup()) is not { } lookup)
                 {
-                    _logger.LogInformation("Octo has no Navidrome sign-in of its own yet, so the replacement of '{Title}' was not favourited for {User}", title, who);
+                    _logger.LogInformation("Octo has no Navidrome sign-in of its own yet, so the replacement of '{Title}' was not favorited for {User}", title, who);
                     return;
                 }
                 for (var attempt = 0; attempt < Math.Max(1, VisibilityAttempts); attempt++)
@@ -176,7 +176,7 @@ public sealed class StarOnArrival : IDisposable
                     catch (Exception ex) { _logger.LogDebug("Library lookup for {Path} failed: {Reason}", path, ex.Message); }
                     if (!string.IsNullOrWhiteSpace(id)) { await StarSongAsync(credential, who, id); return; }
                 }
-                _logger.LogInformation("Navidrome never showed the replacement of '{Title}', so it was not favourited for {User}", title, who);
+                _logger.LogInformation("Navidrome never showed the replacement of '{Title}', so it was not favorited for {User}", title, who);
             });
     }
 
@@ -184,18 +184,18 @@ public sealed class StarOnArrival : IDisposable
     {
         try
         {
-            // Already a favourite: starring again would only move it to the top of the list.
+            // Already a favorite: starring again would only move it to the top of the list.
             if (SongFacts(await CallAsync("rest/getSong", credential.Parameters(("id", libraryId))))?.Starred == true) return;
             Report(await CallAsync("rest/star", credential.Parameters(("id", libraryId))), who, libraryId);
         }
-        catch (Exception ex) { _logger.LogInformation("Could not favourite {Id} for {User}: {Reason}", libraryId, who, ex.Message); }
+        catch (Exception ex) { _logger.LogInformation("Could not favorite {Id} for {User}: {Reason}", libraryId, who, ex.Message); }
     }
 
     private void Report(byte[] body, string who, string what)
     {
-        if (CredentialCheck.Status(body) == "ok") _logger.LogInformation("Favourited {What} for {User}, who starred it", what, who);
+        if (CredentialCheck.Status(body) == "ok") _logger.LogInformation("Favorited {What} for {User}, who starred it", what, who);
         // Most likely the password changed while the download ran.
-        else _logger.LogInformation("Navidrome would not favourite {What} for {User}", what, who);
+        else _logger.LogInformation("Navidrome would not favorite {What} for {User}", what, who);
     }
 
     internal static (bool Starred, string? AlbumId)? SongFacts(byte[] body)
@@ -246,6 +246,6 @@ public sealed class StarOnArrival : IDisposable
         int lost;
         lock (_lock) { lost = _songs.Count + _albums.Count; _songs.Clear(); _albums.Clear(); }
         if (lost > 0)
-            _logger.LogInformation("Octo is stopping with {Count} starred download(s) still to favourite; they will arrive without the favourite", lost);
+            _logger.LogInformation("Octo is stopping with {Count} starred download(s) still to favorite; they will arrive without the favorite", lost);
     }
 }

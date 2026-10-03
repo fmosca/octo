@@ -258,7 +258,7 @@ public sealed class LibraryActionOneAtATimeTests : IDisposable
     }
 
     /// <summary>A refused replacement leaves the original exactly as it was, mapping included,
-    /// so who sent it is still known and a favourite does not download it again.</summary>
+    /// so who sent it is still known and a favorite does not download it again.</summary>
     [Fact]
     public async Task ARefusedReplacement_KeepsTheOriginalsMapping()
     {

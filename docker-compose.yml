@@ -28,9 +28,9 @@ services:
       Subsonic__DownloadAlbumOnStar: ${DOWNLOAD_ALBUM_ON_STAR:-true}
       # Name the user who starred a track on its history entry and notification.
       Subsonic__RecordRequestedBy: ${RECORD_REQUESTED_BY:-true}
-      # Also favourite a hearted song in Navidrome once it downloads, for whoever hearted it.
+      # Also favorite a hearted song in Navidrome once it downloads, for whoever hearted it.
       # Off by default: a heart on a song you do not have only downloads it. A heart on a song
-      # you already have is always a favourite.
+      # you already have is always a favorite.
       Subsonic__StarDownloadsForRequester: ${STAR_DOWNLOADS_FOR_REQUESTER:-false}
       # Never download a song already in the library; a lossy copy is queued for a
       # higher quality one instead.

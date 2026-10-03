@@ -84,7 +84,7 @@ public sealed class LibraryActionExecutor
     /// <summary>Navidrome shows this id at this file. Tests set it; otherwise the resolver.</summary>
     internal Func<string, string, CancellationToken, Task<bool>>? ShowsAt { get; set; }
     internal Func<Task<bool>>? ForceScan { get; set; }
-    internal const string HistoryKeptText = "Navidrome kept it as the same song, so its plays, favourites and playlist places stayed with it.";
+    internal const string HistoryKeptText = "Navidrome kept it as the same song, so its plays, favorites and playlist places stayed with it.";
     internal const string HistoryLostText = "Navidrome took it for a new song, so its plays and playlist places stayed with the old entry.";
     private sealed record Replaced(LibraryActionOutcome Outcome, string? QuarantinePath, string? NewPath);
 
@@ -227,7 +227,7 @@ public sealed class LibraryActionExecutor
         string key, LibraryActionEntry pending, CancellationToken ct)
     {
         // Read now, while Navidrome still knows the song here. Only the acting user's own
-        // favourite can be read, with their own sign-in; anyone else's is out of reach.
+        // favorite can be read, with their own sign-in; anyone else's is out of reach.
         var carryStar = await WasStarredByRequesterAsync(request);
 
         // Written BEFORE the file is touched. A crash between the two leaves this Pending, and
@@ -431,8 +431,8 @@ public sealed class LibraryActionExecutor
 
     /// <summary>
     /// One scan, then watch the ORIGINAL id until it shows the replacement (W8): proof that the
-    /// plays, favourites and playlist places stayed with the song. About ten minutes, scanning
-    /// again every two in case Navidrome was busy. If not shown, the rater's favourite (W6).
+    /// plays, favorites and playlist places stayed with the song. About ten minutes, scanning
+    /// again every two in case Navidrome was busy. If not shown, the rater's favorite (W6).
     /// </summary>
     internal async Task<bool> ConfirmHistoryKeptAsync(LibraryActionRequest request, ResolvedSongFile original,
         string newPath, string key, bool carryStar)
@@ -492,7 +492,7 @@ public sealed class LibraryActionExecutor
     private async Task<bool> SoulseekOutAsync(CancellationToken ct) =>
         _soulseekLink is not null && (await _soulseekLink.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
 
-    /// <summary>Whether the person asking for a replacement had favourited the song. False when
+    /// <summary>Whether the person asking for a replacement had favorited the song. False when
     /// nothing will replace it, when the request carries no sign-in (playlist actions never
     /// do), or when Navidrome cannot say.</summary>
     internal async Task<bool> WasStarredByRequesterAsync(LibraryActionRequest request) =>

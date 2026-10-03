@@ -1035,7 +1035,7 @@ public class LastFmRadioRecommendationTests
     /// <summary>
     /// Each dynamic station type is configured on its own (issue #39). Before this the
     /// four types shared one switch and the counts were literals in BuildAsync, so a
-    /// listener who wanted Your Mix also got an artist radio per favourite band.
+    /// listener who wanted Your Mix also got an artist radio per favorite band.
     /// </summary>
     [Fact]
     public async Task StationTypeToggles_BuildOnlyTheEnabledKinds()

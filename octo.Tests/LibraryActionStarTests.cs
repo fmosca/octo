@@ -10,7 +10,7 @@ namespace Octo.Tests;
 
 /// <summary>
 /// #71 for library actions: a replacement asked for by rating carries the rater's own sign-in,
-/// so whether they had favourited the song can be read before it is replaced. Nothing else reads.
+/// so whether they had favorited the song can be read before it is replaced. Nothing else reads.
 /// </summary>
 public sealed class LibraryActionStarTests
 {
@@ -62,7 +62,7 @@ public sealed class LibraryActionStarTests
     }
 
     [Fact]
-    public async Task ReplacementOfAFavourite_IsMarkedToCarry()
+    public async Task ReplacementOfAFavorite_IsMarkedToCarry()
     {
         var executor = Executor(starred: true);
 

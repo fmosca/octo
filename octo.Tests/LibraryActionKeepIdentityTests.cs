@@ -15,7 +15,7 @@ namespace Octo.Tests;
 /// <summary>
 /// W8: a replacement takes the original's folder and name, Octo checks that Navidrome kept the
 /// ORIGINAL id on the new file, records the answer on the action, and only when it did not,
-/// favourites the new song again for the person who rated it.
+/// favorites the new song again for the person who rated it.
 /// </summary>
 public sealed class LibraryActionKeepIdentityTests : IDisposable
 {
@@ -128,7 +128,7 @@ public sealed class LibraryActionKeepIdentityTests : IDisposable
     }
 
     [Fact]
-    public async Task NavidromeTakingItForANewSong_FallsBackToTheRatersFavourite()
+    public async Task NavidromeTakingItForANewSong_FallsBackToTheRatersFavorite()
     {
         var journal = Journal();
         var executor = Executor(journal, Stars());
@@ -149,7 +149,7 @@ public sealed class LibraryActionKeepIdentityTests : IDisposable
     }
 
     [Fact]
-    public async Task NotKeptWithoutAFavourite_StarsNothing()
+    public async Task NotKeptWithoutAFavorite_StarsNothing()
     {
         var journal = Journal();
         var executor = Executor(journal, Stars());
