@@ -338,11 +338,18 @@ YTDLP_SEARCH_CACHE_MAX=1024
 YTDLP_URL_CACHE_MAX=512
 YTDLP_URL_CACHE_TTL=3600
 EOF
+# Kept from the old .env when they were set there: settings this installer never asks about.
+for key in OCTO_CONFIG_DIR SLSKD_STATE_DIR UPDATES_CHECK UPDATES_REPO; do
+  if [ -n "$(existing "$key")" ]; then
+    printf '%s=%s
+' "$key" "$(existing "$key")" >> .env
+  fi
+done
 chmod 600 .env
 green "✓ wrote .env (chmod 600)"
 
 # Make sure the bind-mount targets exist so docker doesn't create them root-owned.
-mkdir -p octo-config slskd-state
+mkdir -p "$(existing OCTO_CONFIG_DIR | grep . || echo octo-config)" "$(existing SLSKD_STATE_DIR | grep . || echo slskd-state)"
 
 # ─────────────────────────────────────────────────────────────────
 # Build + start
@@ -400,6 +407,22 @@ if [ "${DOWNLOAD_SOURCE,,}" = "lidarr" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────
+# Update helper (optional)
+# ─────────────────────────────────────────────────────────────────
+# Lets the dashboard's About page install a new release with one button. Linux
+# with systemd only; elsewhere the dashboard shows the command to run instead.
+if [ -d /run/systemd/system ]; then
+  echo
+  bold "─── Updates ────────────────────────────────────────────────"
+  echo "  Octo can install new releases from its dashboard, through a small"
+  echo "  service on this machine (scripts/updater). Octo itself never gets"
+  echo "  access to Docker; it can only ask for the newest release."
+  if ask_yn "  Let the dashboard update Octo?" "y"; then
+    scripts/updater/install-updater.sh || yellow "  ⚠ The update helper was not installed; the dashboard will show the command instead."
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────
 # Done
 # ─────────────────────────────────────────────────────────────────
 echo
@@ -423,5 +446,5 @@ fi
 echo
 dim "  slskd web UI:    http://<this-host>:5030    (admin / shown above)"
 dim "  Stop:            docker compose down"
-dim "  Update later:    git pull && ./install.sh"
+dim "  Update later:    admin dashboard, About (or see Updating in the README)"
 bold "═══════════════════════════════════════════════════════════"

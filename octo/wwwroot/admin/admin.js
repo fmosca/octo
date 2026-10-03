@@ -54,6 +54,7 @@ function activateTab(name, { focus = false } = {}) {
   if (name === 'lastfm' && typeof loadRadioStatus === 'function') loadRadioStatus();
   if (name === 'lastfm' && typeof loadLastFmScrobbling === 'function') loadLastFmScrobbling();
   if (name === 'lastfm' && typeof loadLastFmAccount === 'function') loadLastFmAccount();
+  if (name === 'about' && typeof loadUpdate === 'function') loadUpdate();
   if (focus) {
     window.scrollTo({ top: 0 });
     const heading = document.querySelector(`section[data-pane="${name}"] h1`);
@@ -4206,8 +4207,309 @@ document.getElementById('lossy-clear')?.addEventListener('click', async () => {
 });
 
 // ────────────────────────────────────────────────────────────────
+// Updates: whether a newer release is out, and Update now through the host helper
+// ────────────────────────────────────────────────────────────────
+// Octo asks GitHub for its releases; the host helper (scripts/updater) does the update when
+// asked through a file in the config folder. Without the helper this card shows the command.
+let updateInfo = null;
+let updateRequestId = null;
+let updatePollTimer = null;
+let updateOutageSince = null;
+const UPDATE_RUNNING = ['accepted', 'fetching', 'building', 'restarting'];
+const UPDATE_STEPS = [
+  ['accepted', 'Handed to the update helper'],
+  ['fetching', 'Fetching the release'],
+  ['building', 'Building the new Octo'],
+  ['restarting', 'Restarting Octo'],
+];
+const UPDATE_LATER_KEY = 'octo.update.later';
+
+function updateLater() {
+  try { return localStorage.getItem(UPDATE_LATER_KEY); } catch { return null; }
+}
+
+// Release notes are Markdown from GitHub. Everything is escaped first; then only headings,
+// lists, bold, inline code, rules and links to github.com come back as markup.
+function renderNotes(markdown) {
+  const text = String(markdown ?? '').replace(/<!--[\s\S]*?-->/g, '').replace(/\r/g, '');
+  const inline = s => escapeHtml(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\((https:\/\/github\.com\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    // A link anywhere else keeps its words and loses the address.
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+  const out = [];
+  let para = [];
+  let list = null;
+  const flushPara = () => { if (para.length) out.push(`<p>${inline(para.join(' '))}</p>`); para = []; };
+  const flushList = () => {
+    if (list) out.push(`<${list.tag}>${list.items.map(item => `<li>${inline(item)}</li>`).join('')}</${list.tag}>`);
+    list = null;
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+    if ((m = line.match(/^#{1,6}\s+(.*)$/))) { flushPara(); flushList(); out.push(`<h4>${inline(m[1])}</h4>`); continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushPara(); flushList(); out.push('<hr>'); continue; }
+    const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (bullet || numbered) {
+      flushPara();
+      const tag = bullet ? 'ul' : 'ol';
+      if (list && list.tag !== tag && !/^\s/.test(line)) flushList();
+      if (!list) list = { tag, items: [] };
+      list.items.push((bullet || numbered)[1]);
+      continue;
+    }
+    // An indented line under a list item continues it.
+    if (list && /^\s/.test(line)) { list.items[list.items.length - 1] += ` ${line.trim()}`; continue; }
+    flushList();
+    para.push(line.trim());
+  }
+  flushPara();
+  flushList();
+  return out.join('');
+}
+
+function showReleaseNotes() {
+  const info = updateInfo;
+  const releases = info?.newer?.length ? info.newer : (info?.latest ? [info.latest] : []);
+  if (!releases.length) return;
+  const modal = document.getElementById('notes-modal');
+  document.getElementById('notes-title').textContent = releases.length > 1
+    ? `What's new in the last ${releases.length} releases` : `What's new in ${releases[0].tag}`;
+  document.getElementById('notes-body').innerHTML = releases.map(release => {
+    const when = release.publishedUtc ? new Date(release.publishedUtc).toLocaleDateString() : '';
+    const notes = renderNotes(release.notes) || '<p>This release has no notes.</p>';
+    return `<section class="notes-release"><h3>${escapeHtml(release.name || release.tag)}${when ? ` <span class="notes-date">${escapeHtml(when)}</span>` : ''}</h3>${notes}</section>`;
+  }).join('');
+  const link = document.getElementById('notes-link');
+  const url = releases[0].url || '';
+  link.hidden = !url.startsWith('https://github.com/');
+  if (!link.hidden) link.href = url;
+  const opener = document.activeElement;
+  const app = document.querySelector('.app');
+  if (app) app.inert = true;
+  modal.hidden = false;
+  const closeBtn = document.getElementById('notes-close');
+  closeBtn.focus();
+  const close = () => {
+    modal.hidden = true;
+    if (app) app.inert = false;
+    closeBtn.removeEventListener('click', close);
+    modal.removeEventListener('keydown', onKey);
+    modal.removeEventListener('mousedown', onBackdrop);
+    if (opener && typeof opener.focus === 'function') opener.focus();
+  };
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'Tab') {
+      const stops = Array.from(modal.querySelectorAll('a[href], button')).filter(el => !el.hidden && el.offsetParent !== null);
+      const head = stops[0];
+      const tail = stops[stops.length - 1];
+      if (e.shiftKey && document.activeElement === head) { e.preventDefault(); tail.focus(); }
+      else if (!e.shiftKey && document.activeElement === tail) { e.preventDefault(); head.focus(); }
+    }
+  };
+  const onBackdrop = e => { if (e.target === modal) close(); };
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('keydown', onKey);
+  modal.addEventListener('mousedown', onBackdrop);
+}
+
+function updateRunActive(info = updateInfo) {
+  return !!info && (info.pending || (!!info.run && UPDATE_RUNNING.includes(info.run.state)));
+}
+
+function renderUpdate() {
+  const info = updateInfo;
+  if (!info) return;
+  const byId = id => document.getElementById(id);
+  const latest = info.latest;
+  const helper = info.helper?.installed;
+  const active = updateRunActive();
+  const run = info.run;
+  const ours = !!run && !!updateRequestId && run.id === updateRequestId;
+
+  let line;
+  if (!info.enabled) line = 'Looking for new releases is off.';
+  else if (active) line = `Updating to ${run?.tag || latest?.tag || 'the newest release'}…`;
+  else if (info.updateAvailable) {
+    const behind = info.newer.length > 1 ? ` That is ${info.newer.length} releases ahead.` : '';
+    line = `Octo ${latest.tag} is out. You run ${info.running}.${behind}`;
+  } else if (latest) {
+    const checked = info.checkedUtc ? `, checked ${relTime(info.checkedUtc)}` : '';
+    line = info.standing === 'ahead'
+      ? `Up to date: this build is newer than the newest release, ${latest.tag}${checked}.`
+      : info.standing === 'current' ? `Up to date${checked}.`
+        : `The newest release is ${latest.tag}${checked}. This build names no release, so Octo cannot compare.`;
+  } else line = info.error ? '' : 'Not checked yet.';
+  if (info.enabled && info.error) line = `${line} ${info.error}`.trim();
+  byId('update-line').textContent = line;
+
+  byId('update-now').hidden = !(info.updateAvailable && helper && !active);
+  byId('update-notes').hidden = !latest;
+  byId('update-check').hidden = !info.enabled;
+  byId('update-check').disabled = active;
+
+  // The steps, while a run is under way or just after one this page started.
+  const steps = byId('update-steps');
+  const log = byId('update-log');
+  const showSteps = active || ours;
+  steps.hidden = !showSteps;
+  log.hidden = true;
+  if (showSteps) {
+    const state = updateOutageSince ? 'restarting' : (info.pending ? 'accepted' : run?.state);
+    const at = UPDATE_STEPS.findIndex(([key]) => key === state);
+    if (state === 'failed') {
+      steps.innerHTML = `<li class="is-failed">${escapeHtml(run.error || 'The update failed.')}</li>`;
+      if (run.log?.length) { log.textContent = run.log.join('\n'); log.hidden = false; }
+    } else if (state === 'done') {
+      steps.innerHTML = `<li class="is-done">${escapeHtml(run.step || `Octo now runs ${run.tag}`)}</li>`;
+    } else {
+      steps.innerHTML = UPDATE_STEPS.map(([key, label], i) => {
+        const cls = at < 0 ? '' : i < at ? 'is-done' : i === at ? 'is-current' : '';
+        const words = i === at && run?.step && !info.pending && !updateOutageSince ? run.step : label;
+        return `<li class="${cls}">${escapeHtml(words)}</li>`;
+      }).join('');
+    }
+  } else if (run && run.state === 'failed') {
+    // A failed run is worth seeing, even on a page that did not start it.
+    steps.hidden = false;
+    steps.innerHTML = `<li class="is-failed">The last update, to ${escapeHtml(run.tag || 'a release')}, failed: ${escapeHtml(run.error || 'no reason given')}</li>`;
+    if (run.log?.length) { log.textContent = run.log.join('\n'); log.hidden = false; }
+  }
+
+  // The command, when there is no helper or it did not answer.
+  const manual = byId('update-manual');
+  const unanswered = !!info.unanswered && info.unanswered === updateRequestId;
+  manual.hidden = !(info.updateAvailable && !active && (!helper || unanswered));
+  if (!manual.hidden) {
+    const where = info.helper?.dir ? `in ${info.helper.dir}` : 'in your Octo folder';
+    byId('update-manual-where').textContent = unanswered
+      ? `The update helper on this server's host did not answer, so nothing changed. To update by hand, run this ${where}:`
+      : `To update, run this ${where}:`;
+    const image = info.helper?.mode === 'image';
+    byId('update-command').textContent = image ? info.imageCommand : info.command;
+    byId('update-image-line').hidden = image;
+    byId('update-image-command').textContent = info.imageCommand;
+    byId('update-helper-hint').hidden = !!helper;
+  }
+
+  // The banner on every page, and the dot on About.
+  const banner = byId('update-banner');
+  banner.hidden = !(info.updateAvailable && !active && updateLater() !== latest?.tag);
+  if (!banner.hidden) byId('update-banner-text').textContent = `Octo ${latest.tag} is out. You run ${info.running}.`;
+  const about = document.querySelector('.sidebar-nav-item[data-tab="about"]');
+  let flag = about?.querySelector('.nav-flag');
+  if (about && info.updateAvailable && !flag) {
+    flag = document.createElement('span');
+    flag.className = 'nav-flag nav-flag-update';
+    flag.innerHTML = '<span class="visually-hidden"> (update available)</span>';
+    about.appendChild(flag);
+  } else if (flag && !info.updateAvailable) flag.remove();
+
+  if (active && !updatePollTimer) pollUpdate();
+}
+
+async function loadUpdate({ check = false } = {}) {
+  try {
+    const response = check
+      ? await api('/api/admin/update/check', { method: 'POST' })
+      : await api('/api/admin/update', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    updateInfo = await response.json();
+  } catch {
+    if (!updateInfo) document.getElementById('update-line').textContent = "Couldn't ask Octo about new releases.";
+    return;
+  }
+  renderUpdate();
+}
+
+// Every 2 seconds while a run is under way. Octo is down while it restarts, so failed polls
+// read as "Restarting" for up to 15 minutes before the page gives up.
+function pollUpdate() {
+  clearTimeout(updatePollTimer);
+  updatePollTimer = setTimeout(async () => {
+    const before = updateInfo?.running;
+    try {
+      const response = await api('/api/admin/update', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      updateInfo = await response.json();
+      updateOutageSince = null;
+    } catch {
+      updateOutageSince ??= Date.now();
+      if (Date.now() - updateOutageSince > 15 * 60_000) {
+        updatePollTimer = null;
+        updateOutageSince = null;
+        document.getElementById('update-line').textContent = 'Octo has not come back after the update. "docker compose logs octo" on the host says why.';
+        return;
+      }
+      renderUpdate();
+      pollUpdate();
+      return;
+    }
+    updatePollTimer = null;
+    renderUpdate();
+    if (updateRunActive()) { pollUpdate(); return; }
+    const run = updateInfo.run;
+    if (run?.state === 'done' && before && updateInfo.running !== before) {
+      toast(`Octo now runs ${updateInfo.running}.`, 'ok');
+      await loadSettings();
+    } else if (run?.state === 'failed' && run.id === updateRequestId) {
+      toast('The update failed. Octo still runs the old version.', 'error');
+    } else if (updateRequestId && updateInfo.unanswered === updateRequestId) {
+      toast('The update helper did not answer. The command to run is on the About page.', 'error');
+    }
+  }, 2000);
+}
+
+document.getElementById('update-check')?.addEventListener('click', async event => {
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  await loadUpdate({ check: true });
+  btn.disabled = updateRunActive();
+});
+
+document.getElementById('update-now')?.addEventListener('click', async () => {
+  const tag = updateInfo?.latest?.tag;
+  if (!tag) return;
+  const unsavedCards = document.querySelectorAll('form.unsaved').length;
+  const unsavedNote = unsavedCards
+    ? `\n\nYou have unsaved changes on ${unsavedCards} card${unsavedCards === 1 ? '' : 's'}; the restart discards them.`
+    : '';
+  if (!(await askConfirm(`Update to ${tag}?`,
+    `Octo fetches ${tag}, builds it, and restarts. Playback through Octo stops for a minute or two. If the build fails, nothing changes.${unsavedNote}`,
+    'Update now'))) return;
+  const response = await api('/api/admin/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { toast(body.error || `HTTP ${response.status}`, 'error'); await loadUpdate(); return; }
+  updateRequestId = body.id;
+  updateInfo = { ...updateInfo, pending: true, pendingId: body.id };
+  renderUpdate();
+});
+
+document.getElementById('update-notes')?.addEventListener('click', showReleaseNotes);
+document.getElementById('update-banner-notes')?.addEventListener('click', showReleaseNotes);
+document.getElementById('update-banner-later')?.addEventListener('click', () => {
+  try { localStorage.setItem(UPDATE_LATER_KEY, updateInfo?.latest?.tag ?? ''); } catch { /* the banner comes back next visit */ }
+  document.getElementById('update-banner').hidden = true;
+});
+document.getElementById('update-copy')?.addEventListener('click', async () => {
+  const text = document.getElementById('update-command').textContent;
+  try { await navigator.clipboard.writeText(text); toast('Command copied.', 'ok'); }
+  catch { await askDialog({ title: 'Copy the command', confirm: 'Done', cancel: null, input: { value: text, readOnly: true } }); }
+});
+
+// ────────────────────────────────────────────────────────────────
 // Boot
 // ────────────────────────────────────────────────────────────────
 if (location.hash) followHash();
 loadSettings();
 loadSignedIn();
+loadUpdate();

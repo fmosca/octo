@@ -69,6 +69,8 @@ obj/
 *.log
 
 /.env
+# A server's own compose additions, so the folder stays a clean clone the update helper can move.
+/docker-compose.override.yml
 
 # Downloaded music files
 octo/downloads/

@@ -84,6 +84,8 @@ builder.Services.Configure<ServerSettings>(
     builder.Configuration.GetSection("Server"));
 builder.Services.Configure<ListenBrainzSettings>(
     builder.Configuration.GetSection("ListenBrainz"));
+builder.Services.Configure<UpdateSettings>(
+    builder.Configuration.GetSection("Updates"));
 // Listens are records of plays that already happened; a slow ListenBrainz must not
 // hold a scrobble response or a radio stream, so the client is short-fused.
 builder.Services.AddHttpClient(Octo.Services.ListenBrainz.ListenBrainzService.ClientName,
@@ -260,6 +262,17 @@ builder.Services.AddSingleton(sp => new Octo.Services.Library.UpgradeQueue(
     System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "upgrades.json"),
     sp.GetRequiredService<ILogger<Octo.Services.Library.UpgradeQueue>>()));
 builder.Services.AddSingleton<Octo.Services.Library.UpgradeWorker>();
+// Whether a newer Octo release is out, and the files that hand Update now to the host helper.
+builder.Services.AddHttpClient(Octo.Services.Updates.ReleaseCheck.ClientName, c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton(sp => new Octo.Services.Updates.ReleaseCheck(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "update", "release.json"),
+    sp.GetRequiredService<IHttpClientFactory>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<UpdateSettings>>(),
+    sp.GetRequiredService<ILogger<Octo.Services.Updates.ReleaseCheck>>()));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Updates.ReleaseCheck>());
+builder.Services.AddSingleton(sp => new Octo.Services.Updates.UpdateHost(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "update"),
+    sp.GetRequiredService<ILogger<Octo.Services.Updates.UpdateHost>>()));
 // Whether a song is already in the library, so nothing downloads a second copy.
 builder.Services.AddSingleton<Octo.Services.Library.LibraryOwnership>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.UpgradeWorker>());

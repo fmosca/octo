@@ -746,6 +746,11 @@ public class AdminController : ControllerBase
             {
                 ["PublicUrl"] = _serverOpts.CurrentValue.PublicUrl ?? "",
             },
+            ["Updates"] = new Dictionary<string, object>
+            {
+                ["Check"] = UpdateOptions.Check,
+                ["Repo"] = UpdateOptions.Repo ?? "",
+            },
             ["Soulseek"] = new Dictionary<string, object>
             {
                 ["BaseUrl"] = soulseek.BaseUrl ?? "",
@@ -1699,6 +1704,11 @@ public class AdminController : ControllerBase
             {
                 ["PublicUrl"] = server.PublicUrl ?? "",
             },
+            ["Updates"] = new JsonObject
+            {
+                ["Check"] = UpdateOptions.Check,
+                ["Repo"] = UpdateOptions.Repo ?? "",
+            },
             ["Soulseek"] = new JsonObject
             {
                 ["BaseUrl"] = soulseek.BaseUrl ?? "",
@@ -1979,6 +1989,7 @@ public class AdminController : ControllerBase
             "Subsonic:PlaylistsDirectory",
             "Library:DownloadPath",
             "Server:PublicUrl",
+            "Updates:Check", "Updates:Repo",
             "Soulseek:BaseUrl", "Soulseek:Username", "Soulseek:Password",
             "Soulseek:SearchWaitSeconds", "Soulseek:UpgradeSearchWaitSeconds", "Soulseek:MinFileSizeBytes",
             "Soulseek:PreferredExtension", "Soulseek:DownloadTimeoutSeconds",
@@ -2358,6 +2369,9 @@ public class AdminController : ControllerBase
                 ["SessionKey"] = SecretPlaceholder,
                 ["LastFmUser"] = pair.Value.LastFmUser ?? "",
             })));
+
+    /// <summary>The Updates section as configured now; read when asked, so a save shows at once.</summary>
+    private UpdateSettings UpdateOptions => _config.GetSection("Updates").Get<UpdateSettings>() ?? new UpdateSettings();
 
     /// <summary>The release this build came from, e.g. "2026.07.29". Falls back to the
     /// assembly version if the informational version was not stamped.</summary>

@@ -146,13 +146,39 @@ clients speak JSON, some (DSub) only XML.
 
 ## Updating
 
+Octo checks GitHub every 6 hours for a newer release. When one is out, the dashboard says so at the top of every page, and **About** shows what's new.
+
+### From the dashboard
+
+On Linux with systemd, the installer offers a small update helper. With it, **About → Update now** installs the new release: the helper fetches it, builds it, and restarts Octo, and the dashboard shows each step.
+
+- Octo itself never gets access to Docker. It can only ask, by writing a file in its config folder, and only for the newest published release.
+- The helper builds the new release before it stops anything, so a failed build leaves Octo running as it was. If the new release will not stay up, the helper goes back to the old one.
+- It leaves the folder alone when Octo's own files have local changes. Your `.env`, `docker-compose.override.yml` and config are not Octo's files, so they never block it.
+
+To add the helper to an existing install, or take it off again:
+
 ```bash
-git pull && ./install.sh
+scripts/updater/install-updater.sh
 ```
 
-Re-running the installer keeps your existing answers.
+```bash
+scripts/updater/install-updater.sh --remove
+```
 
-Octo builds from source, so `git pull` is what actually updates it. `docker compose pull` only refreshes slskd.
+### By hand
+
+Without the helper, **About** shows the command for the new release. From the Octo folder:
+
+```bash
+git fetch --tags && git checkout --detach 2026.10.05 && docker compose build && docker compose up -d
+```
+
+Octo builds from source, so this is what actually updates it. `docker compose pull` only refreshes slskd. Re-running `./install.sh` also works and keeps your existing answers.
+
+If you track `main` instead of releases, `git checkout main && git pull && ./install.sh` still works.
+
+To turn the release check off, set `UPDATES_CHECK=false`, or switch off **Look for new releases** under **About**.
 
 ### Which version am I on
 
@@ -226,7 +252,7 @@ Navidrome's radio plays songs from your existing library. Octo's radio reaches *
 
 ### Is my data going anywhere?
 
-Octo's per-user play ledger and station snapshots stay in `/app/config/lastfm-radio-state.json`. It sends Last.fm only the artist, title, and tag lookups needed to build recommendations; it does not send the ledger, Navidrome credentials, usernames, or stream URLs. Continuous Radio URLs contain opaque, expiring in-memory session tokens rather than Navidrome credentials. YouTube and Soulseek receive the ordinary outbound lookups needed for preview/acquisition. Once a listener connects Last.fm on the dashboard, Octo also sends that listener's plays (outside songs, and library songs unless left to Navidrome; artist, title, album and time) to their own Last.fm account, and with a ListenBrainz token set it sends the same plays to ListenBrainz.
+Octo's per-user play ledger and station snapshots stay in `/app/config/lastfm-radio-state.json`. It sends Last.fm only the artist, title, and tag lookups needed to build recommendations; it does not send the ledger, Navidrome credentials, usernames, or stream URLs. Continuous Radio URLs contain opaque, expiring in-memory session tokens rather than Navidrome credentials. Every 6 hours Octo asks GitHub for its own release list, sending nothing but its version in the request's user agent; `UPDATES_CHECK=false` stops it. YouTube and Soulseek receive the ordinary outbound lookups needed for preview/acquisition. Once a listener connects Last.fm on the dashboard, Octo also sends that listener's plays (outside songs, and library songs unless left to Navidrome; artist, title, album and time) to their own Last.fm account, and with a ListenBrainz token set it sends the same plays to ListenBrainz.
 
 ### Do downloaded songs get tagged correctly?
 

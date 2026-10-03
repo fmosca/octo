@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Tests octo-updater.sh against a throwaway git origin, with docker, flock and sleep
+# faked, so it runs anywhere bash and git do (CI runs it beside shellcheck).
+#   scripts/updater/test-updater.sh
+set -uo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+script="$here/octo-updater.sh"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/bin" "$work/origin-src/octo"
+failures=0
+
+# docker logs what it was asked. FAKE_MODE picks a built or a pulled Octo, DOCKER_FAIL makes
+# one compose verb fail, and FAKE_BAD_VERSION is a release whose container never stays up.
+cat > "$work/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+echo "docker $*" >> "$FAKE_LOG"
+if [ "$1" = compose ]; then
+  case "$2" in
+    config)
+      if [ "${FAKE_MODE:-build}" = build ]; then
+        printf 'name: octo\nservices:\n  octo:\n    build:\n      context: .\n  slskd:\n    image: slskd/slskd\n'
+      else
+        printf 'name: octo\nservices:\n  octo:\n    image: ghcr.io/winters27/octo:latest\n'
+      fi ;;
+    ps) echo cid ;;
+    *) if [ "${DOCKER_FAIL:-}" = "$2" ]; then echo "boom: $2 failed"; exit 1; fi ;;
+  esac
+  exit 0
+fi
+if [ "$1" = inspect ]; then
+  if [ -n "${FAKE_BAD_VERSION:-}" ] && grep -q "$FAKE_BAD_VERSION" "$OCTO_DIR/octo/octo.csproj"; then
+    echo restarting
+  else
+    echo "${FAKE_STATE:-running}"
+  fi
+fi
+EOF
+printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/flock"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/sleep"
+chmod +x "$work/bin/"*
+export PATH="$work/bin:$PATH" FAKE_LOG="$work/docker.log"
+
+# An origin whose main is at 2026.10.01, with a newer release 2026.10.04 tagged.
+(
+  cd "$work/origin-src" || exit 1
+  git init -q -b main . && git config user.email test@example.com && git config user.name test
+  version() { printf '<Project>\n  <PropertyGroup>\n    <InformationalVersion>%s</InformationalVersion>\n  </PropertyGroup>\n</Project>\n' "$1" > octo/octo.csproj; }
+  version 2026.10.01 && git add -A && git commit -qm one && git tag 2026.10.01
+  version 2026.10.04 && git add -A && git commit -qm two && git tag 2026.10.04
+  git reset -q --hard 2026.10.01
+) || { echo "could not build the test origin"; exit 1; }
+git clone -q --bare "$work/origin-src" "$work/origin.git"
+
+fresh() { # a clone on main at 2026.10.01 that has not fetched 2026.10.04 yet
+  rm -rf "$work/octo" "$work/config"
+  git clone -q "$work/origin.git" "$work/octo"
+  git -C "$work/octo" tag -d 2026.10.04 > /dev/null 2>&1 || true
+  mkdir -p "$work/config/update"
+  : > "$FAKE_LOG"
+}
+request() { # tag, id
+  printf 'id=%s\ntag=%s\nby=test\nat=2026-10-03T12:00:00Z\n' "${2:-0b7c7a8e-1111-4222-8333-444455556666}" "$1" > "$work/config/update/request"
+}
+status_of() { sed -n "s/^$1=//p" "$work/config/update/status" 2>/dev/null | head -n 1; }
+check() { # name, expected state, expected checkout, words the error must hold
+  local name="$1" state head error
+  OCTO_DIR="$work/octo" OCTO_UPDATE_DIR="$work/config/update" bash "$script" > /dev/null 2>&1
+  state="$(status_of state)"
+  head="$(git -C "$work/octo" describe --tags --exact-match 2>/dev/null || echo none)"
+  error="$(status_of error)"
+  if [ "$state" = "$2" ] && [ "$head" = "$3" ] && [[ "$error" == *"$4"* ]] && [ ! -f "$work/config/update/request" ]; then
+    echo "ok    $name"
+  else
+    echo "FAIL  $name: state=$state (want $2), checkout=$head (want $3), error=$error"
+    failures=$((failures + 1))
+  fi
+}
+
+fresh; request 2026.10.04
+check "updates to a newer release" done 2026.10.04 ""
+grep -q '^mode=build$' "$work/config/update/helper" && echo "ok    describes itself as a built install" || { echo "FAIL  helper file"; failures=$((failures + 1)); }
+
+fresh; request "2026.10.04; touch $work/pwned"
+check "a tag that is not a release is ignored" failed 2026.10.01 "did not name a dated release"
+[ ! -e "$work/pwned" ] && echo "ok    nothing in a request is run" || { echo "FAIL  a request ran a command"; failures=$((failures + 1)); }
+
+fresh; request 2026.10.04 not-a-guid
+check "a request without a valid id is ignored" failed 2026.10.01 "no valid id"
+
+fresh; request 2026.10.09
+check "a release that does not exist" failed 2026.10.01 "is not a release tag"
+
+fresh; request 2026.10.01
+check "the same release is refused" failed 2026.10.01 "not older than"
+
+fresh; echo "<!-- edit -->" >> "$work/octo/octo/octo.csproj"; request 2026.10.04
+check "local changes to Octo's own files are left alone" failed 2026.10.01 "has changes to Octo's own files"
+
+fresh; echo "KEY=value" > "$work/octo/.env"; request 2026.10.04
+check "untracked files such as .env are fine" done 2026.10.04 ""
+
+fresh; request 2026.10.04
+DOCKER_FAIL=build check "a failed build changes nothing" failed 2026.10.01 "nothing was restarted"
+
+fresh; request 2026.10.04
+FAKE_BAD_VERSION=2026.10.04 check "a release that will not stay up is rolled back" failed 2026.10.01 "went back to 2026.10.01"
+
+fresh; request 2026.10.04
+FAKE_STATE=restarting check "a failed rollback says so" failed 2026.10.01 "failed too"
+
+fresh; request 2026.10.04
+OCTO_UPDATER_DRYRUN=1 check "a dry run changes nothing" done 2026.10.01 ""
+grep -q 'compose build' "$FAKE_LOG" && { echo "FAIL  the dry run built"; failures=$((failures + 1)); } || echo "ok    the dry run never builds"
+
+fresh; request 2026.10.04
+FAKE_MODE=image check "an image install pulls instead" done 2026.10.01 ""
+grep -q 'compose pull octo' "$FAKE_LOG" && echo "ok    pulled the image" || { echo "FAIL  no pull"; failures=$((failures + 1)); }
+
+fresh
+OCTO_DIR="$work/octo" OCTO_UPDATE_DIR="$work/config/update" bash "$script" > /dev/null 2>&1
+[ ! -f "$work/config/update/status" ] && echo "ok    no request, no run" || { echo "FAIL  ran without a request"; failures=$((failures + 1)); }
+
+echo
+[ "$failures" = 0 ] && echo "All update helper tests passed." || echo "$failures update helper test(s) failed."
+[ "$failures" = 0 ]

@@ -30,6 +30,7 @@ public class AdminContractTests
         ("Notifications", typeof(NotificationSettings)),
         ("Metadata", typeof(MetadataSettings)),
         ("Server", typeof(ServerSettings)),
+        ("Updates", typeof(UpdateSettings)),
         ("ListenBrainz", typeof(ListenBrainzSettings)),
         ("GeneratedPlaylists", typeof(GeneratedPlaylistSettings)),
     ];

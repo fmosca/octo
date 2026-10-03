@@ -221,11 +221,18 @@ services:
       Notifications__NotifyLosslessFallback: ${NOTIFY_LOSSLESS_FALLBACK:-true}
       Notifications__NotifyDownloadFailed: ${NOTIFY_DOWNLOAD_FAILED:-true}
       Notifications__NotifyAlbumCompleted: ${NOTIFY_ALBUM_COMPLETED:-true}
+      # ----- Updates -----
+      # Ask GitHub every 6 hours whether a newer Octo release is out, and say so on
+      # the dashboard. With the update helper on the host, the dashboard can also
+      # install it (see "Updating" in the README).
+      Updates__Check: ${UPDATES_CHECK:-true}
+      Updates__Repo: ${UPDATES_REPO:-winters27/octo}
     volumes:
       - ${DOWNLOAD_PATH:-./downloads}:/music
-      # Editable settings file — admin UI writes here, ASP.NET hot-reloads on
-      # change. Bind-mounted to host so values survive `docker compose up`.
-      - ./octo-config:/app/config
+      # Editable settings file: the admin UI writes here, ASP.NET hot-reloads on
+      # change. Bind-mounted to host so values survive `docker compose up`. The
+      # update helper watches its update/ folder.
+      - ${OCTO_CONFIG_DIR:-./octo-config}:/app/config
     depends_on:
       - yt-dlp-shim
       - slskd
@@ -304,7 +311,7 @@ services:
       SLSKD_USERNAME: ${SLSKD_USERNAME:-slskd}
       SLSKD_PASSWORD: ${SLSKD_PASSWORD:-slskd}
     volumes:
-      - ./slskd-state:/app
+      - ${SLSKD_STATE_DIR:-./slskd-state}:/app
       - ${DOWNLOAD_PATH:-./downloads}:/music
 
 volumes:

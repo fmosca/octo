@@ -1,0 +1,12 @@
+# Installed by scripts/updater/install-updater.sh. Starts octo-updater.service
+# when Octo's dashboard writes an update request into Octo's config folder.
+[Unit]
+Description=Watch for Octo update requests from the dashboard
+
+[Path]
+PathExists=@UPDATE_DIR@/request
+MakeDirectory=yes
+Unit=octo-updater.service
+
+[Install]
+WantedBy=multi-user.target

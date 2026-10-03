@@ -149,6 +149,14 @@
         <span><strong>settings.json can't be read,</strong> so Octo won't save over it, and changes stored there may not be in effect. Fix it under <button type="button" class="link-button" data-open-tab="raw">Raw config</button>.</span>
       </div>
       <div class="notice notice-warn app-banner" id="restart-pending" role="status" hidden></div>
+      <div class="notice notice-update app-banner" id="update-banner" role="status" hidden>
+        <span id="update-banner-text"></span>
+        <span class="update-banner-actions">
+          <button type="button" class="btn btn-ghost" id="update-banner-notes">What's new</button>
+          <button type="button" class="btn btn-primary" data-open-tab="about">Update</button>
+          <button type="button" class="btn btn-ghost" id="update-banner-later">Later</button>
+        </span>
+      </div>
 
       <!-- ─── STATUS ──────────────────────────────────────────── -->
       <section data-pane="status" class="active">
@@ -2111,10 +2119,38 @@
           <p>Octo sits in front of your Navidrome library and adds discovery and downloads to it. Search shows songs you don't own beside your own. Radio on any song finds more through Last.fm and plays previews from YouTube. Heart a song you don't own and Octo fetches it through Soulseek, YouTube or your own Lidarr.</p>
         </div>
 
-        <div class="info-card">
+        <div class="info-card" id="update-card">
           <h3 class="info-card-title">Version</h3>
           <p>This is Octo <code id="meta-version">unknown</code>. Please include it in any bug report. Releases are named by date, so <code>2026.07.29</code> is the release cut that day.</p>
+          <p class="update-line" id="update-line" aria-live="polite">Looking for new releases…</p>
+          <div class="update-actions">
+            <button type="button" class="btn btn-primary" id="update-now" hidden><svg class="icon" aria-hidden="true"><use href="#i-tray-arrow-down"/></svg><span>Update now</span></button>
+            <button type="button" class="btn btn-ghost" id="update-notes" hidden>What's new</button>
+            <button type="button" class="btn btn-ghost" id="update-check"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Check now</span></button>
+          </div>
+          <ol class="update-steps" id="update-steps" hidden></ol>
+          <pre class="update-log" id="update-log" hidden></pre>
+          <div class="update-manual" id="update-manual" hidden>
+            <p id="update-manual-where">To update, run this in your Octo folder:</p>
+            <div class="update-command">
+              <code id="update-command"></code>
+              <button type="button" class="btn btn-ghost" id="update-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button>
+            </div>
+            <p class="update-fine" id="update-image-line">Running the published image instead of building? <code id="update-image-command"></code></p>
+            <p class="update-fine" id="update-helper-hint">On Linux with systemd, <code>scripts/updater/install-updater.sh</code> in the Octo folder installs a small helper, and then Update now does this for you.</p>
+          </div>
         </div>
+
+        <form data-section="updates" class="set-card">
+          <div class="set-row">
+            <div class="set-info">
+              <div class="set-info-t">Look for new releases</div>
+              <div class="set-info-d">Asks GitHub every 6 hours whether a newer Octo is out, and says so here and at the top of every page. On by default.</div>
+              <div class="set-info-more">Off means Octo never contacts GitHub for this. Only dated releases count, never the apps' own releases. A fork with its own releases sets <code>Updates.Repo</code> under Raw config.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="f-updates-check" name="Updates.Check" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+          </div>
+        </form>
 
         <div class="info-card">
           <h3 class="info-card-title">Settings file</h3>
@@ -2161,6 +2197,18 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="ask-cancel">Cancel</button>
         <button type="button" class="btn btn-primary" id="ask-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Release notes, from the update banner and the About page. -->
+  <div class="modal-backdrop" id="notes-modal" hidden>
+    <div class="modal notes-modal" role="dialog" aria-modal="true" aria-labelledby="notes-title">
+      <div class="modal-title" id="notes-title">What's new</div>
+      <div class="notes-body" id="notes-body"></div>
+      <div class="modal-actions">
+        <a class="btn btn-ghost" id="notes-link" target="_blank" rel="noopener noreferrer">On GitHub</a>
+        <button type="button" class="btn btn-primary" id="notes-close">Close</button>
       </div>
     </div>
   </div>
