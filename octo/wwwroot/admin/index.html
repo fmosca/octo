@@ -102,6 +102,10 @@
             <svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg>
             <span>Library actions</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="lossy">
+            <svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg>
+            <span>Better quality</span>
+          </button>
         </div>
 
         <div class="sidebar-nav-section">
@@ -1690,6 +1694,46 @@
               <label class="switch"><input type="checkbox" name="Metadata.EmbedFullSizeCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
           </form>
+        </div>
+      </section>
+
+      <section data-pane="lossy">
+        <header class="page-header">
+          <div>
+            <h1>Better quality</h1>
+            <p>Songs in your library that are not lossless. Pick some, and Octo looks for a higher quality copy of each on Soulseek, several at a time.</p>
+          </div>
+        </header>
+
+        <div class="notice notice-warn" id="lossy-gate" hidden></div>
+
+        <div class="set-section">
+          <div class="set-card lossy-tool">
+            <p class="set-info-d" id="lossy-status">Reading your library.</p>
+            <div class="lossy-filters">
+              <input class="set-input" id="lossy-q" type="search" placeholder="Title, artist or album" aria-label="Filter songs" />
+              <select class="set-input" id="lossy-format" aria-label="Format"><option value="">Every format</option></select>
+              <label class="lossy-check"><input type="checkbox" id="lossy-youtube" /><span>Only songs Octo got from YouTube</span></label>
+              <label class="lossy-check"><input type="checkbox" id="lossy-hide-tried" /><span>Hide songs tried in the last 4 weeks</span></label>
+              <button class="btn btn-ghost" type="button" id="lossy-refresh"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Refresh</span></button>
+            </div>
+            <div id="lossy-list"></div>
+            <div class="cover-bar" id="lossy-bar">
+              <span class="cover-count" id="lossy-count">Nothing picked</span>
+              <span class="cover-hint">
+                <button type="button" class="link-btn" id="lossy-all">Select all shown</button>
+                <span aria-hidden="true">·</span>
+                <button type="button" class="link-btn" id="lossy-none">Clear</button>
+              </span>
+              <button class="btn btn-ghost" type="button" id="lossy-cancel">Cancel queued</button>
+              <button class="btn btn-ghost" type="button" id="lossy-clear">Clear finished</button>
+              <button class="btn btn-primary" type="button" id="lossy-go" disabled>Find higher quality</button>
+            </div>
+            <details class="cover-how">
+              <summary>How it works</summary>
+              <p>Each song goes through Better quality, exactly as the action playlist does it: a lossless copy is looked for on Soulseek, checked to be the same recording and really lossless, and put in the original's place, so the song keeps its plays, favourites and playlist places. The original waits in quarantine until its replacement passes. A song with no lossless copy anywhere stays as it is and is not looked for again by the weekly upgrade for 4 weeks. While Soulseek is not connected, songs wait for it.</p>
+            </details>
+          </div>
         </div>
       </section>
 
