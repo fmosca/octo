@@ -54,11 +54,19 @@ public sealed class SoulseekIncompleteFolderTests : IDisposable
     }
 
     [Theory]
-    [InlineData(null, new[] { "incomplete" })]
-    [InlineData("/app/incomplete", new[] { "incomplete" })]
-    [InlineData(@"D:\slskd\Partial\", new[] { "incomplete", "Partial" })]
+    [InlineData(null, new[] { "incomplete", ".octo-incoming" })]
+    [InlineData("/app/incomplete", new[] { "incomplete", ".octo-incoming" })]
+    [InlineData(@"D:\slskd\Partial\", new[] { "incomplete", "Partial", ".octo-incoming" })]
     public void ExcludedNames(string? configured, string[] expected) =>
         Assert.Equal(expected, SoulseekDownloadService.ExcludedFolderNames(configured));
+
+    [Fact]
+    public void AFileInAnotherDownloadsJobFolderIsNeverFoundByName()
+    {
+        // Another download's job folder holds a file with the very same name and size.
+        Write(Path.Combine(".octo-incoming", "slskd", "0123456789abcdef", Leaf));
+        Assert.Null(Resolve(excluded: SoulseekDownloadService.ExcludedFolderNames(null)));
+    }
 
     [Fact]
     public async Task TheWaitOutlastsSlskdsMoveAndReturnsTheFinalPath()

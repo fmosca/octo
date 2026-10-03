@@ -1447,6 +1447,22 @@
               </div>
               <input class="set-input" id="f-slskd-outage-hold" name="Soulseek.OutageHoldHours" type="number" min="0" max="48" aria-label="Hours to wait for Soulseek" />
             </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Downloads at once</div>
+                <div class="set-info-d">How many songs may download side by side, 1 to 6. Each lands in its own folder, so they never mix up.</div>
+                <div class="set-info-more">Octo keeps to one at a time until slskd has put a download in its own folder, and goes back to one if slskd ever does not. Moving files into your library stays one at a time either way. 1 is how Octo always worked.</div>
+              </div>
+              <input class="set-input" id="f-slskd-parallel" name="Soulseek.ParallelDownloads" type="number" min="1" max="6" aria-label="Downloads at once" />
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Albums from one folder</div>
+                <div class="set-info-d">A hearted album is searched once, and one person's folder of it is taken in one go. On by default.</div>
+                <div class="set-info-more">Songs that folder lacks, or whose file fails a check, are searched one by one as before. Off searches every song on its own.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Soulseek.AlbumFolders" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Smallest file <span class="set-opt">bytes</span> / file type</div>

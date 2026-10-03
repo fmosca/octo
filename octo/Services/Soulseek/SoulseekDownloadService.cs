@@ -315,6 +315,149 @@ public class SoulseekDownloadService : BaseDownloadService
         }
     }
 
+    /// <summary>A new job folder, relative to slskd's downloads directory. A dot folder, so
+    /// Navidrome's scan never sees a download before Octo has placed it.</summary>
+    internal static string NewJobDir() => $"{IncomingFolderName}/slskd/{Guid.NewGuid():N}";
+
+    // Songs whose file an album walk has queued already, by external id, taken by the song's own
+    // download. A walk removes whatever it left here when it ends.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PreparedTransfer> _prepared = new();
+
+    // slskd's downloads directory as Octo sees it, once slskd has said; empty when it is not a
+    // path here. And roots learned from a job folder found somewhere else.
+    private string? _slskdDownloads;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _learnedRoots = new();
+
+    /// <summary>
+    /// Where a job folder can be, in order: slskd's own downloads directory when that path exists
+    /// here too, the download path, /music, and any root learned from a job folder found elsewhere.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> JobRootsAsync(CancellationToken ct)
+    {
+        if (_slskdDownloads is null && await _slskd.GetDownloadsDirectoryAsync(ct) is { } reported)
+            _slskdDownloads = Directory.Exists(reported) ? reported : "";
+        var roots = new List<string>();
+        void Add(string? root)
+        {
+            if (!string.IsNullOrEmpty(root) && !roots.Contains(root)) roots.Add(root);
+        }
+        Add(_slskdDownloads);
+        Add(DownloadPath);
+        Add("/music");
+        foreach (var learned in _learnedRoots.Keys) Add(learned);
+        return roots;
+    }
+
+    /// <summary>
+    /// The file an attempt asked slskd to put in its own folder. In that folder only: the leaf
+    /// itself, slskd's renamed copy of it, or, since slskd may clean a name up, the one file of
+    /// exactly this size, then the one within the usual size drift. Never anything outside it.
+    /// </summary>
+    internal static string? ResolveInJob(IReadOnlyList<string> roots, string jobDir, string remoteFilename,
+        long expectedSize, bool requireExactSize)
+    {
+        var leaf = remoteFilename.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+        if (string.IsNullOrEmpty(leaf)) return null;
+        var stem = Path.GetFileNameWithoutExtension(leaf);
+        var ext = Path.GetExtension(leaf);
+        var renamed = new Regex($"^{Regex.Escape(stem)}_[0-9]{{15,}}{Regex.Escape(ext)}$",
+            RegexOptions.CultureInvariant | (OperatingSystem.IsWindows() ? RegexOptions.IgnoreCase : 0));
+
+        foreach (var root in roots)
+        {
+            var folder = Path.Combine(root, jobDir);
+            try
+            {
+                if (!Directory.Exists(folder)) continue;
+                var exact = Path.Combine(folder, leaf);
+                if (FileMatches(exact, expectedSize, requireExactSize)) return exact;
+                var files = Directory.EnumerateFiles(folder).ToList();
+                var pick = files.Where(f => renamed.IsMatch(Path.GetFileName(f)) && FileMatches(f, expectedSize, requireExactSize))
+                    .OrderByDescending(IOFile.GetCreationTimeUtc).FirstOrDefault();
+                if (pick is not null) return pick;
+                var sameSize = files.Where(f => new FileInfo(f).Length == expectedSize).ToList();
+                if (sameSize.Count == 1) return sameSize[0];
+                if (!requireExactSize)
+                {
+                    var near = files.Where(f => FileMatches(f, expectedSize)).ToList();
+                    if (near.Count == 1) return near[0];
+                }
+            }
+            catch
+            {
+                // A folder that cannot be read holds nothing this attempt can use.
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// slskd says the transfer finished, and its file is not in the job folder where Octo looks.
+    /// Either slskd's downloads directory is somewhere else under the music folder, and the job
+    /// folder is found and its root learned, so downloads stay parallel and exact; or slskd ignored
+    /// the folder (a subdirectory pattern of {}), and the file is found by name the old way and
+    /// downloads go one at a time from here on.
+    /// </summary>
+    private string? FindOutsideJob(string jobDir, SoulseekFileHit hit, bool requireExactSize,
+        IReadOnlyCollection<string> excluded)
+    {
+        var job = jobDir.Split('/')[^1];
+        var tail = Path.Combine(IncomingFolderName, "slskd", job);
+        foreach (var root in new[] { DownloadPath, "/music" }.Where(r => !string.IsNullOrEmpty(r)).Distinct())
+        {
+            try
+            {
+                if (!Directory.Exists(root)) continue;
+                var folder = Directory.EnumerateDirectories(root, job, SearchOption.AllDirectories)
+                    .FirstOrDefault(d => d.EndsWith(tail, StringComparison.Ordinal));
+                if (folder is null) continue;
+                var learned = folder[..^tail.Length].TrimEnd('/', '\\');
+                if (ResolveInJob([learned], jobDir, hit.Filename, hit.Size, requireExactSize) is { } found)
+                {
+                    _learnedRoots.TryAdd(learned, 0);
+                    Logger.LogInformation("slskd's downloads directory is {Root} as Octo sees it; job folders are looked for there too", learned);
+                    Concurrency?.Prove();
+                    return found;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug("Looking for job folder {Job} under {Root} failed: {M}", job, root, ex.Message);
+            }
+        }
+
+        if (ResolveLanded(hit.Filename, hit.Size, requireExactSize, excluded) is not { } elsewhere) return null;
+        Concurrency?.Refuse("slskd put a download outside the folder Octo asked for");
+        return elsewhere;
+    }
+
+    /// <summary>
+    /// Removes job folders a placed or discarded download left empty, after half an hour so an album
+    /// batch between two files is left alone, and any job folder a day old. Only inside Octo's own
+    /// slskd job folder; nothing else is touched.
+    /// </summary>
+    private void SweepJobFolders()
+    {
+        if (string.IsNullOrEmpty(DownloadPath)) return;
+        var jobs = Path.Combine(DownloadPath, IncomingFolderName, "slskd");
+        try
+        {
+            if (!Directory.Exists(jobs)) return;
+            foreach (var dir in Directory.EnumerateDirectories(jobs))
+            {
+                var empty = !Directory.EnumerateFileSystemEntries(dir).Any();
+                var age = DateTime.UtcNow - Directory.GetLastWriteTimeUtc(dir);
+                if (empty ? age < TimeSpan.FromMinutes(30) : age < TimeSpan.FromHours(24)) continue;
+                Directory.Delete(dir, recursive: !empty);
+                if (!empty) Logger.LogInformation("Removed a stale download folder {Path}", dir);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug("Could not sweep {Jobs}: {M}", jobs, ex.Message);
+        }
+    }
+
     // Lossless FLAC via Soulseek/slskd: walk the top-N peers in quality order,
     // first successful transfer wins.
     private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, Song song, bool suppressNotify,
@@ -324,33 +467,46 @@ public class SoulseekDownloadService : BaseDownloadService
         var primaryQuery = queries[0].Query.Text;
         var trackKey = song.ExternalId ?? "";
         Track(t => t.Stage(ProviderName, trackKey, AcquisitionState.Searching, "Soulseek"));
+        SweepJobFolders();
 
-        List<SoulseekFileHit> hits = [];
-        List<SoulseekFileHit> ranked = [];
-        foreach (var (query, strict) in queries)
-        {
-            if (ReferenceEquals(query, queries[0].Query))
-                Logger.LogInformation("Soulseek search-for-star: '{Query}'", query.Text);
-            else
-                Logger.LogInformation("Soulseek query returned no usable hits; retrying with '{Query}'", query.Text);
-            // Ranked once, on the whole search: slskd hands over a search's answers only when it
-            // ends, so there is nothing to stop early on.
-            hits = await _slskd.SearchAsync(query.Text, profile, cancellationToken);
-            ranked = RankCandidates(hits, routing.Title!, routing.Duration, strict);
-            if (ranked.Count > 0) break;
-        }
+        // An album walk may have queued this song's file already, from one peer's folder of the
+        // album. That file is tried first, without a search; the search runs only if it fails.
+        _prepared.TryRemove(trackKey, out var prepared);
+        var searched = prepared is null;
+        var ranked = prepared is null ? await SearchRankedAsync(null) : [prepared.Hit];
 
-        // Logged here, once per song, rather than inside RankCandidates. This is the line that
-        // explains a track that used to download and now does not.
-        if (_verification.RemembersRejections)
+        async Task<List<SoulseekFileHit>> SearchRankedAsync(SoulseekFileHit? passOver)
         {
-            var denied = hits.Count(h => _rejectedPeers.IsDenied(h.Username, h.Filename));
-            if (denied > 0)
-                Logger.LogInformation(
-                    "Soulseek: {Denied} of {Total} hits for '{Artist} - {Title}' were downloaded before and "
-                    + "rejected as the wrong recording, so they are skipped. Use 'Forget rejected peers' on "
-                    + "the Soulseek admin page if that is wrong.",
-                    denied, hits.Count, routing.Artist, routing.Title);
+            List<SoulseekFileHit> hits = [];
+            List<SoulseekFileHit> found = [];
+            foreach (var (query, strict) in queries)
+            {
+                if (ReferenceEquals(query, queries[0].Query))
+                    Logger.LogInformation("Soulseek search-for-star: '{Query}'", query.Text);
+                else
+                    Logger.LogInformation("Soulseek query returned no usable hits; retrying with '{Query}'", query.Text);
+                // Ranked once, on the whole search: slskd hands over a search's answers only when it
+                // ends, so there is nothing to stop early on.
+                hits = await _slskd.SearchAsync(query.Text, profile, cancellationToken);
+                found = RankCandidates(hits, routing.Title!, routing.Duration, strict)
+                    .Where(h => passOver is null || h.Username != passOver.Username || h.Filename != passOver.Filename)
+                    .ToList();
+                if (found.Count > 0) break;
+            }
+
+            // Logged here, once per song, rather than inside RankCandidates. This is the line that
+            // explains a track that used to download and now does not.
+            if (_verification.RemembersRejections)
+            {
+                var denied = hits.Count(h => _rejectedPeers.IsDenied(h.Username, h.Filename));
+                if (denied > 0)
+                    Logger.LogInformation(
+                        "Soulseek: {Denied} of {Total} hits for '{Artist} - {Title}' were downloaded before and "
+                        + "rejected as the wrong recording, so they are skipped. Use 'Forget rejected peers' on "
+                        + "the Soulseek admin page if that is wrong.",
+                        denied, hits.Count, routing.Artist, routing.Title);
+            }
+            return found;
         }
 
         if (ranked.Count == 0)
@@ -392,260 +548,304 @@ public class SoulseekDownloadService : BaseDownloadService
             song.TranscodedFrom = transcodedFrom;
             return path;
         }
-        foreach (var (hit, attemptIdx) in ranked.Select((h, i) => (h, i + 1)))
+        while (true)
         {
-            Logger.LogInformation("Soulseek attempt {N}/{Total}: {User} -> {File} (queue={Q}, speed={S})",
-                attemptIdx, ranked.Count, hit.Username, hit.Filename, hit.QueueLength, hit.UploadSpeed);
-
-            // Used to decide whether a rejected file is ours to delete.
-            var attemptStartedUtc = DateTime.UtcNow;
-
-            try
+            foreach (var (hit, attemptIdx) in ranked.Select((h, i) => (h, i + 1)))
             {
-                await _slskd.EnqueueDownloadAsync(hit.Username, hit.Filename, hit.Size, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning("Soulseek enqueue failed for {User} ({Msg}); trying next peer", hit.Username, ex.Message);
-                lastError = ex;
-                continue;
-            }
+                Logger.LogInformation("Soulseek attempt {N}/{Total}: {User} -> {File} (queue={Q}, speed={S})",
+                    attemptIdx, ranked.Count, hit.Username, hit.Filename, hit.QueueLength, hit.UploadSpeed);
 
-            // A peer took it, but it can sit in that peer's queue for a while, so this still
-            // reads as searching until bytes move. A retry on the next peer starts from nothing.
-            Track(t => t.Stage(ProviderName, trackKey, AcquisitionState.Searching, "Soulseek"));
+                // Each attempt lands in a folder of its own, so finding its file never rests on the
+                // file's name, and a download beside it can never claim it. A file an album walk queued
+                // is already on its way into the walk's folder.
+                var fromAlbum = prepared is not null && ReferenceEquals(hit, prepared.Hit);
+                var jobDir = fromAlbum ? prepared!.JobDir : NewJobDir();
+                var transferId = fromAlbum ? prepared!.TransferId : null;
+                var batched = fromAlbum;
 
-            // Announced only after a peer actually accepted the transfer -- firing
-            // before the loop would claim a start that five straight rejections later
-            // never happened. Once per track: a retry on the next peer is the same
-            // download, not a new one. SizeBytes is this candidate's advertised size;
-            // DownloadCompleted carries the real file's.
-            if (!suppressNotify && !startAnnounced)
-            {
-                startAnnounced = true;
-                Notifications.Notify(new Octo.Services.Notifications.NotificationEvent
+                // Used to decide whether a rejected file is ours to delete.
+                var attemptStartedUtc = fromAlbum ? prepared!.QueuedUtc : DateTime.UtcNow;
+
+                if (!fromAlbum)
                 {
-                    Type = Octo.Services.Notifications.NotificationEventType.DownloadStarted,
-                    Artist = routing.Artist,
-                    Title = routing.Title,
-                    Album = routing.Album,
-                    Source = "Soulseek",
-                    Format = _settings.PreferredExtension.ToUpperInvariant(),
-                    SizeBytes = hit.Size,
-                    DurationSeconds = routing.Duration,
-                });
-            }
-
-            // Cancelling the WAIT must never cancel the TRANSFER. slskd already
-            // accepted the enqueue and keeps going on its own, so letting this
-            // throw straight out of the loop is what used to lose a finished
-            // download: the disk check, the move, the registration and the
-            // rescan were all skipped while the file quietly landed anyway.
-            SoulseekTransferState? state = null;
-            Exception? waitError = null;
-            try
-            {
-                state = await _slskd.WaitForCompletionAsync(
-                    hit.Username,
-                    hit.Filename,
-                    _settings.DownloadTimeoutSeconds,
-                    cancellationToken,
-                    // slskd's size is the real one once the peer answers; the search's is
-                    // what the peer advertised, kept for polls that leave it out.
-                    onProgress: p =>
+                    try
                     {
-                        if (p.IsMoving) Track(t => t.Transfer(ProviderName, trackKey,
-                            p.BytesTransferred, p.Size ?? hit.Size, p.PercentComplete, "Soulseek"));
-                    });
-            }
-            catch (Exception ex)
-            {
-                waitError = ex;
-            }
-
-            // An slskd HTTP timeout and a client disconnect both surface as
-            // TaskCanceledException, so the token is the only reliable way to
-            // tell "the caller left" from "slskd was slow".
-            var callerGaveUp = cancellationToken.IsCancellationRequested;
-
-            // Regardless of slskd's reported final state, the authoritative
-            // signal is the filesystem. slskd sometimes drops successful
-            // transfers from /api/v0/transfers/downloads/<user> between our
-            // polls, so we'd see Errored/timeout even though the file landed
-            // on disk a second ago. Check disk first; fall back to "this
-            // peer failed, try the next" only when the file truly isn't there.
-            //
-            // The usual 64KB size tolerance absorbs slskd's own size drift, but
-            // an interrupted transfer is far more likely to be genuinely
-            // truncated, so demand an exact match before promoting one.
-            //
-            // The check re-polls the disk for a bounded window: slskd reports
-            // Succeeded BEFORE moving the file out of its incomplete directory,
-            // and on bind mounts that move is a copy that can take seconds.
-            var localPath = await ResolveLocalPathWithRetryAsync(
-                hit.Filename, hit.Size, excluded,
-                requireExactSize: callerGaveUp,
-                maxWait: state == SoulseekTransferState.Succeeded
-                    ? TimeSpan.FromSeconds(15)
-                    : TimeSpan.FromSeconds(5),
-                cancellationToken);
-            if (!string.IsNullOrEmpty(localPath) && reserve is not null && SamePath(reserve.Path, localPath))
-            {
-                // The resolver matches on leaf name and size, so a peer offering the same rip as
-                // the copy held back can resolve to that very file. It is not a new copy, and
-                // every check below would either repeat itself or, worse, delete the only one.
-                Logger.LogInformation("Soulseek attempt {N} resolved to the copy already held back, not a new file; advancing",
-                    attemptIdx);
-                lastError = new Exception("the file found is the copy already held back");
-                if (callerGaveUp) break;
-                continue;
-            }
-
-            if (!string.IsNullOrEmpty(localPath))
-            {
-                Track(t => t.Stage(ProviderName, trackKey, AcquisitionState.Verifying));
-
-                // Last line of defence, and the only one that inspects the actual audio.
-                // A peer can advertise a length it does not deliver, and the tagger runs
-                // straight after this and would stamp the RIGHT title onto the wrong
-                // recording, leaving a library that looks correct and plays wrong.
-                if (!DownloadedDurationMatches(localPath, routing.Duration, out var actualSecs))
-                {
-                    Logger.LogWarning(
-                        "Soulseek attempt {N} delivered the wrong recording for '{Artist} - {Title}': "
-                        + "{Actual}s against an expected {Expected}s; discarding and advancing",
-                        attemptIdx, routing.Artist, routing.Title, actualSecs, routing.Duration);
-                    DiscardRejectedDownload(localPath, attemptStartedUtc);
-                    DenyCandidate(hit, routing, $"delivered {actualSecs}s for a {routing.Duration}s track");
-                    lastError = new Exception(
-                        $"peer delivered a {actualSecs}s file for a {routing.Duration}s track");
-                    continue;
-                }
-
-                // Apply the configured FolderStructure: slskd dumps to whatever
-                // path the peer used (e.g. ".../MyMusic/Mark Morrison/Return of
-                // the Mack/05 ...flac"), which is unpredictable per-peer. Move
-                // to the canonical location now so Navidrome scans it under a
-                // consistent layout.
-                // Same job as the duration check, one layer deeper: that one proves the file
-                // is the right LENGTH, and a cover, a live take or an unrelated song of the
-                // same runtime all survive it. This asks what the audio actually IS.
-                //
-                // Second on purpose. The check above reads a TagLib header; this one spawns a
-                // process and makes a network call, and neither is worth spending on a file
-                // already known to be wrong.
-                var verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc);
-                // fpcalc reports a file that is not there as undecodable audio, which is a Mismatch.
-                // If the file moved during the check, find it and ask again instead of blaming the
-                // peer for slskd's own move.
-                if (verdict.Verdict == Octo.Services.Fingerprint.VerificationVerdict.Mismatch && !IOFile.Exists(localPath)
-                    && ResolveLanded(hit.Filename, hit.Size, callerGaveUp, excluded) is { } movedTo)
-                {
-                    localPath = movedTo;
-                    verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc);
-                }
-                if (verdict.Verdict == Octo.Services.Fingerprint.VerificationVerdict.Mismatch)
-                {
-                    if (!IOFile.Exists(localPath))
+                        var batch = await _slskd.EnqueueBatchAsync(hit.Username, [(hit.Filename, hit.Size)], jobDir, cancellationToken);
+                        if (batch.Supported)
+                        {
+                            if (!batch.TransferIds.TryGetValue(hit.Filename, out transferId))
+                                throw new Exception(batch.Failures.Select(f => f.Message).FirstOrDefault(m => m.Length > 0)
+                                    ?? "slskd queued nothing");
+                            batched = true;
+                        }
+                        else
+                        {
+                            await _slskd.EnqueueDownloadAsync(hit.Username, hit.Filename, hit.Size, cancellationToken);
+                        }
+                    }
+                    catch (Exception ex)
                     {
-                        // Nothing was judged, so nothing is held against the peer: a deny-list entry
-                        // lasts weeks and this one would be wrong.
-                        Logger.LogWarning("Soulseek attempt {N}: {Path} disappeared while it was being identified; advancing without blaming {User}",
-                            attemptIdx, localPath, hit.Username);
-                        lastError = new Exception("the downloaded file disappeared while it was being identified");
-                        // Like the held-back copy: with the caller gone, no other peer is tried.
-                        if (callerGaveUp) break;
+                        Logger.LogWarning("Soulseek enqueue failed for {User} ({Msg}); trying next peer", hit.Username, ex.Message);
+                        lastError = ex;
                         continue;
                     }
-                    Logger.LogWarning(
-                        "Soulseek attempt {N} delivered {Actual} for a request of '{Artist} - {Title}' "
-                        + "(AcoustID score {Score:P0}); discarding, remembering the peer and advancing",
-                        attemptIdx, verdict.Describe(), routing.Artist, routing.Title, verdict.Score);
-                    DiscardRejectedDownload(localPath, attemptStartedUtc);
-                    DenyCandidate(hit, routing, verdict.DenyReason);
-                    lastError = new Exception($"AcoustID identified the file as {verdict.Describe()}");
-                    continue;
                 }
 
-                // Last, and the only check that never rejects: the right song made from an MP3 is
-                // still the right song. It decides only whether another peer's copy is worth a
-                // try, which is why it runs after the checks that can throw a file away.
-                var spectrum = await _verification.CheckLosslessAsync(localPath, routing.Artist, routing.Title);
-                if (spectrum.IsLikelyLossy)
-                {
-                    switch (WeighTranscode(reserve?.Path, reserve?.Spectrum.CutoffHz, localPath, spectrum.CutoffHz))
-                    {
-                        case ReserveChoice.AlreadyHeld:
-                            Logger.LogInformation("Soulseek attempt {N} resolved to the copy already held back; advancing", attemptIdx);
-                            break;
-                        case ReserveChoice.Hold:
-                            if (reserve is not null) DiscardRejectedDownload(reserve.Path, reserve.StartedUtc);
-                            reserve = new TranscodedReserve(localPath, hit, attemptIdx, verdict, spectrum, attemptStartedUtc);
-                            break;
-                        default:
-                            DiscardRejectedDownload(localPath, attemptStartedUtc);
-                            break;
-                    }
+                // A peer took it, but it can sit in that peer's queue for a while, so this still
+                // reads as searching until bytes move. A retry on the next peer starts from nothing.
+                Track(t => t.Stage(ProviderName, trackKey, AcquisitionState.Searching, "Soulseek"));
 
-                    Logger.LogWarning(
-                        "Soulseek attempt {N} for '{Artist} - {Title}' is {Spectrum}; {Plan}",
-                        attemptIdx, routing.Artist, routing.Title, spectrum.Describe(),
-                        callerGaveUp ? "the caller has left, so no other copy is tried"
-                            : "holding it back and trying the next lossless copy");
-                    lastError = new Exception($"the file is {spectrum.Describe()}");
+                // Announced only after a peer actually accepted the transfer -- firing
+                // before the loop would claim a start that five straight rejections later
+                // never happened. Once per track: a retry on the next peer is the same
+                // download, not a new one. SizeBytes is this candidate's advertised size;
+                // DownloadCompleted carries the real file's.
+                if (!suppressNotify && !startAnnounced)
+                {
+                    startAnnounced = true;
+                    Notifications.Notify(new Octo.Services.Notifications.NotificationEvent
+                    {
+                        Type = Octo.Services.Notifications.NotificationEventType.DownloadStarted,
+                        Artist = routing.Artist,
+                        Title = routing.Title,
+                        Album = routing.Album,
+                        Source = "Soulseek",
+                        Format = _settings.PreferredExtension.ToUpperInvariant(),
+                        SizeBytes = hit.Size,
+                        DurationSeconds = routing.Duration,
+                    });
+                }
+
+                // Cancelling the WAIT must never cancel the TRANSFER. slskd already
+                // accepted the enqueue and keeps going on its own, so letting this
+                // throw straight out of the loop is what used to lose a finished
+                // download: the disk check, the move, the registration and the
+                // rescan were all skipped while the file quietly landed anyway.
+                SoulseekTransferState? state = null;
+                Exception? waitError = null;
+                try
+                {
+                    state = await _slskd.WaitForCompletionAsync(
+                        hit.Username,
+                        hit.Filename,
+                        _settings.DownloadTimeoutSeconds,
+                        cancellationToken,
+                        // slskd's size is the real one once the peer answers; the search's is
+                        // what the peer advertised, kept for polls that leave it out.
+                        onProgress: p =>
+                        {
+                            if (p.IsMoving) Track(t => t.Transfer(ProviderName, trackKey,
+                                p.BytesTransferred, p.Size ?? hit.Size, p.PercentComplete, "Soulseek"));
+                        },
+                        transferId: transferId);
+                }
+                catch (Exception ex)
+                {
+                    waitError = ex;
+                }
+
+                // An slskd HTTP timeout and a client disconnect both surface as
+                // TaskCanceledException, so the token is the only reliable way to
+                // tell "the caller left" from "slskd was slow".
+                var callerGaveUp = cancellationToken.IsCancellationRequested;
+
+                // Regardless of slskd's reported final state, the authoritative
+                // signal is the filesystem. slskd sometimes drops successful
+                // transfers from /api/v0/transfers/downloads/<user> between our
+                // polls, so we'd see Errored/timeout even though the file landed
+                // on disk a second ago. Check disk first; fall back to "this
+                // peer failed, try the next" only when the file truly isn't there.
+                //
+                // The usual 64KB size tolerance absorbs slskd's own size drift, but
+                // an interrupted transfer is far more likely to be genuinely
+                // truncated, so demand an exact match before promoting one.
+                //
+                // The check re-polls the disk for a bounded window: slskd reports
+                // Succeeded BEFORE moving the file out of its incomplete directory,
+                // and on bind mounts that move is a copy that can take seconds.
+                var maxWait = state == SoulseekTransferState.Succeeded ? TimeSpan.FromSeconds(15) : TimeSpan.FromSeconds(5);
+                var jobRoots = batched ? await JobRootsAsync(cancellationToken) : [];
+                // Where this attempt's file is now, asked again after a check that took seconds.
+                string? FindOwnFile() => batched
+                    ? ResolveInJob(jobRoots, jobDir, hit.Filename, hit.Size, callerGaveUp)
+                    : ResolveLanded(hit.Filename, hit.Size, callerGaveUp, excluded);
+                var localPath = batched
+                    ? await RetryResolveAsync(FindOwnFile, maxWait, TimeSpan.FromSeconds(1), cancellationToken)
+                    : await ResolveLocalPathWithRetryAsync(
+                        hit.Filename, hit.Size, excluded,
+                        requireExactSize: callerGaveUp,
+                        maxWait: maxWait,
+                        cancellationToken);
+                if (batched && localPath is null && state == SoulseekTransferState.Succeeded)
+                    localPath = FindOutsideJob(jobDir, hit, callerGaveUp, excluded);
+                else if (batched && localPath is not null)
+                    Concurrency?.Prove();
+                if (!string.IsNullOrEmpty(localPath) && reserve is not null && SamePath(reserve.Path, localPath))
+                {
+                    // The resolver matches on leaf name and size, so a peer offering the same rip as
+                    // the copy held back can resolve to that very file. It is not a new copy, and
+                    // every check below would either repeat itself or, worse, delete the only one.
+                    Logger.LogInformation("Soulseek attempt {N} resolved to the copy already held back, not a new file; advancing",
+                        attemptIdx);
+                    lastError = new Exception("the file found is the copy already held back");
                     if (callerGaveUp) break;
                     continue;
                 }
 
-                // Checked again at the last moment, and before the held-back copy is let go. The
-                // checks above take seconds, and a path that stopped existing in that time would be
-                // placed, tagged and recorded as a download with nothing on disk (#69).
-                if (!FileMatches(localPath, hit.Size, callerGaveUp))
+                if (!string.IsNullOrEmpty(localPath))
                 {
-                    var foundAgain = ResolveLanded(hit.Filename, hit.Size, callerGaveUp, excluded);
-                    if (foundAgain is null)
+                    Track(t => t.Stage(ProviderName, trackKey, AcquisitionState.Verifying));
+
+                    // Last line of defence, and the only one that inspects the actual audio.
+                    // A peer can advertise a length it does not deliver, and the tagger runs
+                    // straight after this and would stamp the RIGHT title onto the wrong
+                    // recording, leaving a library that looks correct and plays wrong.
+                    if (!DownloadedDurationMatches(localPath, routing.Duration, out var actualSecs))
                     {
-                        Logger.LogWarning("Soulseek attempt {N}: {Path} is gone since it was checked; advancing",
-                            attemptIdx, localPath);
-                        lastError = new Exception("the downloaded file disappeared before it could be kept");
-                        // Like the held-back copy: with the caller gone, no other peer is tried.
+                        Logger.LogWarning(
+                            "Soulseek attempt {N} delivered the wrong recording for '{Artist} - {Title}': "
+                            + "{Actual}s against an expected {Expected}s; discarding and advancing",
+                            attemptIdx, routing.Artist, routing.Title, actualSecs, routing.Duration);
+                        DiscardRejectedDownload(localPath, attemptStartedUtc);
+                        DenyCandidate(hit, routing, $"delivered {actualSecs}s for a {routing.Duration}s track");
+                        lastError = new Exception(
+                            $"peer delivered a {actualSecs}s file for a {routing.Duration}s track");
+                        continue;
+                    }
+
+                    // Apply the configured FolderStructure: slskd dumps to whatever
+                    // path the peer used (e.g. ".../MyMusic/Mark Morrison/Return of
+                    // the Mack/05 ...flac"), which is unpredictable per-peer. Move
+                    // to the canonical location now so Navidrome scans it under a
+                    // consistent layout.
+                    // Same job as the duration check, one layer deeper: that one proves the file
+                    // is the right LENGTH, and a cover, a live take or an unrelated song of the
+                    // same runtime all survive it. This asks what the audio actually IS.
+                    //
+                    // Second on purpose. The check above reads a TagLib header; this one spawns a
+                    // process and makes a network call, and neither is worth spending on a file
+                    // already known to be wrong.
+                    var verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc);
+                    // fpcalc reports a file that is not there as undecodable audio, which is a Mismatch.
+                    // If the file moved during the check, find it and ask again instead of blaming the
+                    // peer for slskd's own move.
+                    if (verdict.Verdict == Octo.Services.Fingerprint.VerificationVerdict.Mismatch && !IOFile.Exists(localPath)
+                        && FindOwnFile() is { } movedTo)
+                    {
+                        localPath = movedTo;
+                        verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc);
+                    }
+                    if (verdict.Verdict == Octo.Services.Fingerprint.VerificationVerdict.Mismatch)
+                    {
+                        if (!IOFile.Exists(localPath))
+                        {
+                            // Nothing was judged, so nothing is held against the peer: a deny-list entry
+                            // lasts weeks and this one would be wrong.
+                            Logger.LogWarning("Soulseek attempt {N}: {Path} disappeared while it was being identified; advancing without blaming {User}",
+                                attemptIdx, localPath, hit.Username);
+                            lastError = new Exception("the downloaded file disappeared while it was being identified");
+                            // Like the held-back copy: with the caller gone, no other peer is tried.
+                            if (callerGaveUp) break;
+                            continue;
+                        }
+                        Logger.LogWarning(
+                            "Soulseek attempt {N} delivered {Actual} for a request of '{Artist} - {Title}' "
+                            + "(AcoustID score {Score:P0}); discarding, remembering the peer and advancing",
+                            attemptIdx, verdict.Describe(), routing.Artist, routing.Title, verdict.Score);
+                        DiscardRejectedDownload(localPath, attemptStartedUtc);
+                        DenyCandidate(hit, routing, verdict.DenyReason);
+                        lastError = new Exception($"AcoustID identified the file as {verdict.Describe()}");
+                        continue;
+                    }
+
+                    // Last, and the only check that never rejects: the right song made from an MP3 is
+                    // still the right song. It decides only whether another peer's copy is worth a
+                    // try, which is why it runs after the checks that can throw a file away.
+                    var spectrum = await _verification.CheckLosslessAsync(localPath, routing.Artist, routing.Title);
+                    if (spectrum.IsLikelyLossy)
+                    {
+                        switch (WeighTranscode(reserve?.Path, reserve?.Spectrum.CutoffHz, localPath, spectrum.CutoffHz))
+                        {
+                            case ReserveChoice.AlreadyHeld:
+                                Logger.LogInformation("Soulseek attempt {N} resolved to the copy already held back; advancing", attemptIdx);
+                                break;
+                            case ReserveChoice.Hold:
+                                if (reserve is not null) DiscardRejectedDownload(reserve.Path, reserve.StartedUtc);
+                                reserve = new TranscodedReserve(localPath, hit, attemptIdx, verdict, spectrum, attemptStartedUtc);
+                                break;
+                            default:
+                                DiscardRejectedDownload(localPath, attemptStartedUtc);
+                                break;
+                        }
+
+                        Logger.LogWarning(
+                            "Soulseek attempt {N} for '{Artist} - {Title}' is {Spectrum}; {Plan}",
+                            attemptIdx, routing.Artist, routing.Title, spectrum.Describe(),
+                            callerGaveUp ? "the caller has left, so no other copy is tried"
+                                : "holding it back and trying the next lossless copy");
+                        lastError = new Exception($"the file is {spectrum.Describe()}");
                         if (callerGaveUp) break;
                         continue;
                     }
-                    localPath = foundAgain;
+
+                    // Checked again at the last moment, and before the held-back copy is let go. The
+                    // checks above take seconds, and a path that stopped existing in that time would be
+                    // placed, tagged and recorded as a download with nothing on disk (#69).
+                    if (!FileMatches(localPath, hit.Size, callerGaveUp))
+                    {
+                        var foundAgain = FindOwnFile();
+                        if (foundAgain is null)
+                        {
+                            Logger.LogWarning("Soulseek attempt {N}: {Path} is gone since it was checked; advancing",
+                                attemptIdx, localPath);
+                            lastError = new Exception("the downloaded file disappeared before it could be kept");
+                            // Like the held-back copy: with the caller gone, no other peer is tried.
+                            if (callerGaveUp) break;
+                            continue;
+                        }
+                        localPath = foundAgain;
+                    }
+
+                    if (reserve is not null && !SamePath(reserve.Path, localPath))
+                    {
+                        Logger.LogInformation("Soulseek attempt {N} is a genuine copy; it replaces the transcoded one from attempt {Reserve}",
+                            attemptIdx, reserve.Attempt);
+                        DiscardRejectedDownload(reserve.Path, reserve.StartedUtc);
+                    }
+
+                    // The file stays where slskd put it; PlaceInLibraryAsync moves it once it knows
+                    // the album and the credit it will be filed under.
+                    Logger.LogInformation("Soulseek download complete (attempt {N}, slskd state={State}{Aborted}): {Path}",
+                        attemptIdx, state?.ToString() ?? "interrupted", callerGaveUp ? ", caller had already left" : "", localPath);
+                    return Accept(localPath, hit, verdict, transcodedFrom: null);
                 }
 
-                if (reserve is not null && !SamePath(reserve.Path, localPath))
+                if (waitError is not null)
                 {
-                    Logger.LogInformation("Soulseek attempt {N} is a genuine copy; it replaces the transcoded one from attempt {Reserve}",
-                        attemptIdx, reserve.Attempt);
-                    DiscardRejectedDownload(reserve.Path, reserve.StartedUtc);
+                    // Nothing on disk and the caller is gone: no later peer attempt
+                    // has anywhere to be delivered, so stop instead of burning the
+                    // rest of the list. A copy held back is still delivered.
+                    if (callerGaveUp)
+                    {
+                        if (reserve is not null) break;
+                        throw waitError;
+                    }
+                    Logger.LogWarning("Soulseek attempt {N} wait failed ({Msg}); advancing", attemptIdx, waitError.Message);
+                    lastError = waitError;
+                    continue;
                 }
 
-                // The file stays where slskd put it; PlaceInLibraryAsync moves it once it knows
-                // the album and the credit it will be filed under.
-                Logger.LogInformation("Soulseek download complete (attempt {N}, slskd state={State}{Aborted}): {Path}",
-                    attemptIdx, state?.ToString() ?? "interrupted", callerGaveUp ? ", caller had already left" : "", localPath);
-                return Accept(localPath, hit, verdict, transcodedFrom: null);
+                Logger.LogInformation("Soulseek attempt {N} failed (state={State}, no file on disk), advancing", attemptIdx, state);
+                lastError = new Exception($"transfer ended in state {state} with no resulting file");
             }
 
-            if (waitError is not null)
-            {
-                // Nothing on disk and the caller is gone: no later peer attempt
-                // has anywhere to be delivered, so stop instead of burning the
-                // rest of the list. A copy held back is still delivered.
-                if (callerGaveUp)
-                {
-                    if (reserve is not null) break;
-                    throw waitError;
-                }
-                Logger.LogWarning("Soulseek attempt {N} wait failed ({Msg}); advancing", attemptIdx, waitError.Message);
-                lastError = waitError;
-                continue;
-            }
-
-            Logger.LogInformation("Soulseek attempt {N} failed (state={State}, no file on disk), advancing", attemptIdx, state);
-            lastError = new Exception($"transfer ended in state {state} with no resulting file");
+            // The album folder's copy did not work out: now search for this song like any other.
+            if (searched || cancellationToken.IsCancellationRequested) break;
+            searched = true;
+            ranked = await SearchRankedAsync(prepared!.Hit);
+            if (ranked.Count == 0) break;
+            Logger.LogInformation("Soulseek: the album folder's copy of '{Artist} - {Title}' did not work out; {Count} other peers to try",
+                routing.Artist, routing.Title, ranked.Count);
         }
 
         if (reserve is { } kept)
@@ -669,6 +869,10 @@ public class SoulseekDownloadService : BaseDownloadService
             + $"If slskd shows these transfers as Completed, slskd's downloads directory is not the directory Octo watches ({DownloadPath}); "
             + "set SLSKD_DOWNLOADS_DIR=/music on the slskd container (see issue #17).");
     }
+
+    /// <summary>A song's file an album walk has queued already: the hit, the walk's job folder, the
+    /// transfer slskd gave it, and when it was queued, which says whether a rejected file is ours.</summary>
+    internal sealed record PreparedTransfer(SoulseekFileHit Hit, string JobDir, string? TransferId, DateTime QueuedUtc);
 
     /// <summary>A likely transcode held back while other peers are tried, and what it took to get it.</summary>
     private sealed record TranscodedReserve(string Path, SoulseekFileHit Hit, int Attempt,
@@ -1193,10 +1397,12 @@ public class SoulseekDownloadService : BaseDownloadService
     internal static string[] ExcludedFolderNames(string? slskdIncompleteDir)
     {
         var last = (slskdIncompleteDir ?? "").Replace('\\', '/').TrimEnd('/').Split('/')[^1];
+        // Octo's own staging, slskd job folders included: a file there belongs to one download,
+        // and a search by name must never hand it to another.
         return string.IsNullOrWhiteSpace(last)
             || string.Equals(last, DefaultIncompleteFolderName, StringComparison.OrdinalIgnoreCase)
-            ? [DefaultIncompleteFolderName]
-            : [DefaultIncompleteFolderName, last];
+            ? [DefaultIncompleteFolderName, IncomingFolderName]
+            : [DefaultIncompleteFolderName, last, IncomingFolderName];
     }
 
     private string? ResolveLanded(string remoteFilename, long expectedSize, bool requireExactSize,

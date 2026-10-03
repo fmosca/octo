@@ -118,6 +118,8 @@ builder.Services.AddSingleton<SoulseekClient>();
 // slskd's Soulseek login, read live, for the dashboard and for downloads that wait out an outage.
 builder.Services.AddSingleton<SoulseekLink>();
 builder.Services.AddSingleton<ISoulseekLink>(sp => sp.GetRequiredService<SoulseekLink>());
+// How many downloads transfer at once: one until slskd has put a download in its own folder.
+builder.Services.AddSingleton<Octo.Services.Common.DownloadConcurrency>();
 // Hearts waiting for Soulseek, on disk beside the other state files so a restart keeps them.
 builder.Services.AddSingleton(sp => new Octo.Services.Common.SoulseekHoldStore(
     System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "soulseek-holds.json"),

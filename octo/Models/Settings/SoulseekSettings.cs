@@ -184,6 +184,22 @@ public class SoulseekSettings
     public int OutageHoldHours { get; set; } = 6;
 
     /// <summary>
+    /// How many downloads may transfer at once. Each Soulseek download lands in its own folder,
+    /// which is what makes this safe; until slskd has put one there, Octo keeps to one at a time
+    /// whatever this says. Placing files into the library stays one at a time either way. 1 is the
+    /// old behaviour exactly. Read live.
+    /// Environment variable: SLSKD_PARALLEL_DOWNLOADS
+    /// </summary>
+    public int ParallelDownloads { get; set; } = 3;
+
+    /// <summary>
+    /// An album heart searches the album once and takes one peer's folder of it in one batch, then
+    /// searches song by song only for what that folder lacks. Off is the old song by song walk.
+    /// Environment variable: SLSKD_ALBUM_FOLDERS
+    /// </summary>
+    public bool AlbumFolders { get; set; } = true;
+
+    /// <summary>
     /// Send AcoustID the fingerprints a person confirmed with Keep, so the next person who
     /// downloads that recording gets Confirmed instead of Inconclusive (#47). Only a fingerprint
     /// whose MusicBrainz recording is unambiguous, only after a human kept it, and never one
@@ -213,6 +229,9 @@ public class SoulseekSettings
 
     /// <summary>Two days at most: past that the next source is the better answer.</summary>
     public int EffectiveOutageHoldHours => Math.Clamp(OutageHoldHours, 0, 48);
+
+    /// <summary>Six at most: more peers at once gains little and spends the Soulseek network's patience.</summary>
+    public int EffectiveParallelDownloads => Math.Clamp(ParallelDownloads, 1, 6);
 
     /// <summary>
     /// Below 50 an AcoustID score is noise and acting on it manufactures false rejections;

@@ -89,6 +89,10 @@ public abstract class BaseDownloadService : IDownloadService
     private MetadataSettings MetadataSettingsValue =>
         _serviceProvider.GetService<IOptionsMonitor<MetadataSettings>>()?.CurrentValue ?? new MetadataSettings();
 
+    /// <summary>How many transfers may run at once, and the gate they share. Null in tests that
+    /// build a service without one, which is one at a time, as before.</summary>
+    protected DownloadConcurrency? Concurrency => _serviceProvider.GetService<DownloadConcurrency>();
+
     /// <summary>
     /// Tell the live progress list where a download has got to. It only watches, so it is
     /// resolved per use through the provider like the settings above, and whatever it throws
@@ -535,9 +539,36 @@ public abstract class BaseDownloadService : IDownloadService
             // names the file, which is how every existing library was built.
             var requested = new RequestedIdentity(song.Artist, song.Title, song.Album ?? "", song.Track);
 
-            var landedPath = await DownloadTrackAsync(
-                externalId, song, silence, sourceOverride, upgradeSearch, cancellationToken);
+            // Parallel only once slskd has proven it files each download in its own folder; until
+            // then the lock is held through the transfer exactly as before. The in-progress marker
+            // above keeps a second request for this song waiting either way, and the limiter counts
+            // every transfer, album walks and hearts outside the queue included.
+            var concurrency = Concurrency;
+            IDisposable? slot = null;
+            if (concurrency?.Current > 1)
+            {
+                DownloadLock.Release();
+                lockHeld = false;
+                slot = await concurrency.Transfers.EnterAsync(CancellationToken.None);
+            }
+            string landedPath;
+            try
+            {
+                landedPath = await DownloadTrackAsync(
+                    externalId, song, silence, sourceOverride, upgradeSearch, cancellationToken);
+            }
+            finally
+            {
+                slot?.Dispose();
+            }
             EnsureOnDisk(landedPath);
+            // Placing, tagging and registering touch the library and the mapping file, and those
+            // stay one at a time.
+            if (!lockHeld)
+            {
+                await DownloadLock.WaitAsync(CancellationToken.None);
+                lockHeld = true;
+            }
             song.LocalPath = landedPath;
             Track(t => t.Stage(externalProvider, externalId, AcquisitionState.Importing));
             var finalize = System.Diagnostics.Stopwatch.StartNew();

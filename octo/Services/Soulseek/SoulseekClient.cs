@@ -21,6 +21,12 @@ public class SoulseekClient
     private DateTime _jwtExpiresUtc = DateTime.MinValue;
     private readonly SemaphoreSlim _authLock = new(1, 1);
 
+    // slskd runs one search start or one enqueue at a time and answers 429 to a second arriving in
+    // the same moment. With downloads side by side Octo now makes those itself, so its own POSTs
+    // queue here, and only the POST: never a wait on what it started.
+    private readonly SemaphoreSlim _operationGate = new(1, 1);
+    private DateTime _lastSearchStartUtc = DateTime.MinValue;
+
     public SoulseekClient(
         IHttpClientFactory httpClientFactory,
         IOptions<SoulseekSettings> settings,
@@ -316,28 +322,55 @@ public class SoulseekClient
 
     private async Task<bool> StartSearchAsync(string searchId, string query, SearchProfile profile, CancellationToken ct)
     {
+        try
+        {
+            using var resp = await SendOperationAsync($"{Base}/api/v0/searches",
+                SearchPayload(searchId, query, profile), search: true, ct);
+            resp.EnsureSuccessStatusCode();
+            return true;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning("Soulseek search start failed: {Msg}", ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>How many times a POST slskd refused with 429 is sent again, waiting
+    /// SearchStartRetryDelay longer each time.</summary>
+    internal const int OperationRetries = 3;
+
+    /// <summary>The least time between two search starts, so searches made side by side reach the
+    /// Soulseek network spaced out rather than in a burst. Only tests shorten it.</summary>
+    internal TimeSpan MinSearchSpacing { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// One POST to slskd's one-at-a-time endpoints (search start, enqueue), through Octo's own gate
+    /// and sent again on 429. A 429 that survives every retry is handed back for the caller to read.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendOperationAsync(string url, string body, bool search, CancellationToken ct)
+    {
         for (var attempt = 1; ; attempt++)
         {
+            HttpResponseMessage resp;
+            await _operationGate.WaitAsync(ct);
             try
             {
-                using var resp = await SendAsync(HttpMethod.Post, $"{Base}/api/v0/searches",
-                    new StringContent(SearchPayload(searchId, query, profile), Encoding.UTF8, "application/json"), ct);
-                // slskd starts one search at a time and refuses a second arriving in the same
-                // moment. Octo never starts two itself, so this is another client's search, and a
-                // start takes milliseconds: one short wait is enough.
-                if (resp.StatusCode == System.Net.HttpStatusCode.TooManyRequests && attempt == 1)
+                if (search)
                 {
-                    await Task.Delay(SearchStartRetryDelay, ct);
-                    continue;
+                    var wait = _lastSearchStartUtc + MinSearchSpacing - DateTime.UtcNow;
+                    if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
                 }
-                resp.EnsureSuccessStatusCode();
-                return true;
+                resp = await SendAsync(HttpMethod.Post, url, new StringContent(body, Encoding.UTF8, "application/json"), ct);
+                if (search) _lastSearchStartUtc = DateTime.UtcNow;
             }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
+            finally
             {
-                _logger.LogWarning("Soulseek search start failed: {Msg}", ex.Message);
-                return false;
+                _operationGate.Release();
             }
+            if (resp.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt > OperationRetries) return resp;
+            resp.Dispose();
+            await Task.Delay(SearchStartRetryDelay * attempt, ct);
         }
     }
 
@@ -526,17 +559,89 @@ public class SoulseekClient
             new { filename, size }
         });
 
-        using var resp = await SendAsync(
-            HttpMethod.Post,
-            $"{Base}/api/v0/transfers/downloads/{Uri.EscapeDataString(username)}",
-            new StringContent(body, Encoding.UTF8, "application/json"),
-            ct);
+        using var resp = await SendOperationAsync(
+            $"{Base}/api/v0/transfers/downloads/{Uri.EscapeDataString(username)}", body, search: false, ct);
 
         if (!resp.IsSuccessStatusCode)
         {
             var err = await resp.Content.ReadAsStringAsync(ct);
             throw new Exception($"slskd download enqueue failed: HTTP {(int)resp.StatusCode} {err}");
         }
+    }
+
+    /// <summary>
+    /// Whether this slskd takes batch downloads, which is what lets each download land in a folder
+    /// of Octo's choosing. Null until the first batch has been tried. True once one was accepted,
+    /// and from then on an error is an error. False once slskd answered the batch route as if it
+    /// did not know it, and from then on Octo enqueues the old way without asking again.
+    /// </summary>
+    internal bool? BatchesSupported { get; set; }
+
+    /// <summary>
+    /// Queues files from one peer as one slskd batch, all landing in <paramref name="destination"/>,
+    /// a folder relative to slskd's downloads directory. The answer carries each file's transfer id,
+    /// so the wait can follow that transfer rather than any transfer of the same file name.
+    ///
+    /// An slskd older than batches answers this route through its per-user enqueue (the user named
+    /// "batches"), which rejects the body with 400, or with 404 or 405. Before any batch has worked,
+    /// those mean "no batches here"; after one has, they are real errors.
+    /// </summary>
+    public async Task<BatchEnqueue> EnqueueBatchAsync(string username, IReadOnlyList<(string Filename, long Size)> files,
+        string destination, CancellationToken ct = default)
+    {
+        if (BatchesSupported == false) return BatchEnqueue.NotSupported;
+        using var resp = await SendOperationAsync($"{Base}/api/v0/transfers/downloads/batches",
+            BatchPayload(username, files, destination), search: false, ct);
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        if (resp.IsSuccessStatusCode)
+        {
+            BatchesSupported = true;
+            return ParseBatch(body);
+        }
+        if (BatchesSupported != true && resp.StatusCode is System.Net.HttpStatusCode.BadRequest
+                or System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.MethodNotAllowed)
+        {
+            BatchesSupported = false;
+            _logger.LogInformation("slskd does not take batch downloads (HTTP {Code}); downloads go one at a time, the old way",
+                (int)resp.StatusCode);
+            return BatchEnqueue.NotSupported;
+        }
+        throw new Exception($"slskd batch enqueue failed: HTTP {(int)resp.StatusCode} {body}");
+    }
+
+    internal static string BatchPayload(string username, IReadOnlyList<(string Filename, long Size)> files, string destination) =>
+        JsonSerializer.Serialize(new
+        {
+            id = Guid.NewGuid().ToString(),
+            username,
+            files = files.Select(file => new { filename = file.Filename, size = file.Size }),
+            options = new { destination },
+        });
+
+    /// <summary>Reads a batch answer: batch.transfers carries what slskd queued, failures what it
+    /// would not. Anything unreadable reads as nothing queued.</summary>
+    internal static BatchEnqueue ParseBatch(string json)
+    {
+        var ids = new Dictionary<string, string>(StringComparer.Ordinal);
+        var failures = new List<(string File, string Message)>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (TryGetPropertyIgnoreCase(root, "batch", out var batch)
+                && TryGetPropertyIgnoreCase(batch, "transfers", out var transfers) && transfers.ValueKind == JsonValueKind.Array)
+                foreach (var transfer in transfers.EnumerateArray())
+                    if (transfer.TryGetProperty("filename", out var name) && name.ValueKind == JsonValueKind.String
+                        && TransferId(transfer) is { } id)
+                        ids[name.GetString()!] = id;
+            if (TryGetPropertyIgnoreCase(root, "failures", out var failed) && failed.ValueKind == JsonValueKind.Array)
+                foreach (var failure in failed.EnumerateArray())
+                    failures.Add((
+                        failure.TryGetProperty("filename", out var f) ? f.GetString() ?? "" : "",
+                        failure.TryGetProperty("message", out var m) ? m.GetString() ?? "" : ""));
+        }
+        catch (JsonException) { }
+        return new BatchEnqueue(true, ids, failures);
     }
 
     /// <summary>
@@ -551,7 +656,7 @@ public class SoulseekClient
     /// and anything it throws is swallowed here.
     /// </summary>
     public async Task<SoulseekTransferState> WaitForCompletionAsync(string username, string filename, int? perAttemptTimeoutSeconds = null, CancellationToken ct = default,
-        Action<SoulseekTransferProgress>? onProgress = null)
+        Action<SoulseekTransferProgress>? onProgress = null, string? transferId = null)
     {
         var timeoutSec = perAttemptTimeoutSeconds ?? _settings.DownloadTimeoutSeconds;
         var watch = new TransferWatch(Clock(), TimeSpan.FromSeconds(timeoutSec), MaxTransferTime);
@@ -587,7 +692,7 @@ public class SoulseekClient
 
                 var json = await resp.Content.ReadAsStringAsync(ct);
                 using var doc = JsonDocument.Parse(json);
-                var transfer = FindTransfer(doc.RootElement, filename);
+                var transfer = FindTransfer(doc.RootElement, filename, transferId);
                 var state = transfer is { } found ? StateOf(found) : null;
                 bool foundThisPoll = state is not null;
                 if (foundThisPoll)
@@ -638,7 +743,7 @@ public class SoulseekClient
 
         // Giving up on this peer. Without a cancel slskd keeps the transfer going, and
         // a file that lands after the next peer's copy is a second copy in the library.
-        if (await CancelTransferAsync(username, filename) == SoulseekTransferState.Succeeded)
+        if (await CancelTransferAsync(username, filename, transferId) == SoulseekTransferState.Succeeded)
         {
             _logger.LogInformation("slskd transfer finished just as it was given up: {File}", filename);
             return SoulseekTransferState.Succeeded;
@@ -681,7 +786,7 @@ public class SoulseekClient
     /// Answers Succeeded instead when the transfer turns out to have just finished, and
     /// Errored otherwise, including when slskd cannot be asked.
     /// </summary>
-    public async Task<SoulseekTransferState> CancelTransferAsync(string username, string filename)
+    public async Task<SoulseekTransferState> CancelTransferAsync(string username, string filename, string? transferId = null)
     {
         var user = Uri.EscapeDataString(username);
         try
@@ -689,7 +794,7 @@ public class SoulseekClient
             using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/transfers/downloads/{user}", null, CancellationToken.None);
             if (!resp.IsSuccessStatusCode) return SoulseekTransferState.Errored;
             using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-            if (FindTransfer(doc.RootElement, filename) is not { } file) return SoulseekTransferState.Errored;
+            if (FindTransfer(doc.RootElement, filename, transferId) is not { } file) return SoulseekTransferState.Errored;
             var state = StateOf(file);
             if (state.Contains("Completed", StringComparison.OrdinalIgnoreCase) &&
                 state.Contains("Succeeded", StringComparison.OrdinalIgnoreCase))
@@ -742,8 +847,9 @@ public class SoulseekClient
             Long(file, "bytesTransferred"), Long(file, "size"), Double(file, "percentComplete"));
     }
 
-    /// <summary>The file object for a transfer, in either response shape, or null.</summary>
-    internal static JsonElement? FindTransfer(JsonElement root, string filename)
+    /// <summary>The file object for a transfer, in either response shape, or null. With an id, only
+    /// that transfer: an older transfer of the same file from the same peer may still be listed.</summary>
+    internal static JsonElement? FindTransfer(JsonElement root, string filename, string? transferId = null)
     {
         IEnumerable<JsonElement> userGroups = root.ValueKind switch
         {
@@ -763,6 +869,11 @@ public class SoulseekClient
                 if (files.ValueKind != JsonValueKind.Array) continue;
                 foreach (var file in files.EnumerateArray())
                 {
+                    if (transferId is not null)
+                    {
+                        if (TransferId(file) == transferId) return file;
+                        continue;
+                    }
                     var fn = file.TryGetProperty("filename", out var fnEl) ? fnEl.GetString() : null;
                     if (fn != filename) continue;
                     return file;
@@ -771,6 +882,14 @@ public class SoulseekClient
         }
         return null;
     }
+}
+
+/// <summary>What a batch enqueue came to. TransferIds maps each queued file to its transfer id;
+/// Failures are the files slskd would not queue.</summary>
+public sealed record BatchEnqueue(bool Supported, IReadOnlyDictionary<string, string> TransferIds,
+    IReadOnlyList<(string File, string Message)> Failures)
+{
+    public static readonly BatchEnqueue NotSupported = new(false, new Dictionary<string, string>(), []);
 }
 
 public class SoulseekFileHit

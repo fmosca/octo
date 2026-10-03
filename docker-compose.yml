@@ -80,6 +80,12 @@ services:
       # Hours a heart waits while slskd is up but not logged in to Soulseek (server
       # maintenance), before it uses the next source. 0 means do not wait.
       Soulseek__OutageHoldHours: ${SLSKD_OUTAGE_HOLD_HOURS:-6}
+      # Downloads that may transfer at once (1 to 6). Each lands in its own folder, and Octo
+      # keeps to one at a time until slskd has proven it. 1 is the old behaviour.
+      Soulseek__ParallelDownloads: ${SLSKD_PARALLEL_DOWNLOADS:-3}
+      # An album heart takes one peer's folder of the album in one batch, then searches song
+      # by song only for what it lacks. false is the old song by song walk.
+      Soulseek__AlbumFolders: ${SLSKD_ALBUM_FOLDERS:-true}
       # Send AcoustID the fingerprints you confirmed with Keep, so the next person gets a
       # confident match. Needs your personal AcoustID key (acoustid.org, after signing in).
       Soulseek__SubmitConfirmedFingerprints: ${ACOUSTID_SUBMIT:-false}
