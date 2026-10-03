@@ -1141,6 +1141,14 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
 .pick:disabled { opacity: 0.35; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) { .pick, .pick::before { transition: none; } }
 
+/* ── The shared question dialog: the sign-in card's look, words that keep their line breaks ── */
+.ask-desc { white-space: pre-line; overflow-wrap: anywhere; }
+.ask-desc:empty { display: none; }
+.ask-label { font-size: var(--t-label); color: var(--ink-2); }
+.btn-primary.btn-destructive { background: var(--destructive); }
+.btn-primary.btn-destructive:hover { background: #ff3b30; }
+.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
 /* ── Better quality: lossy songs, five columns ── */
 .lossy-tool { padding: var(--s-xl); display: flex; flex-direction: column; gap: var(--s-l); }
 .lossy-filters { display: flex; flex-wrap: wrap; gap: var(--s-m) var(--s-l); align-items: center; }
@@ -1154,6 +1162,18 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
 .lossy-row .value, .lossy-row .key { font-family: inherit; word-break: normal; overflow-wrap: anywhere; }
 .lossy-row .key { color: var(--ink); }
 .lossy-sub { display: block; color: var(--ink-2); font-size: 12px; }
+.lossy-detail { display: block; margin-top: 4px; color: var(--ink-2); font-size: 12px; line-height: 1.4; }
+.lossy-meter { display: block; height: 3px; margin-top: 6px; border-radius: 2px; background: var(--ink-4); overflow: hidden; }
+.lossy-meter > span { display: block; height: 100%; background: var(--accent); transition: width 0.4s ease; }
+.lossy-results { display: flex; flex-direction: column; gap: var(--s-m); }
+.lossy-results h4 { margin: var(--s-m) 0 0; font-size: var(--t-meta); color: var(--ink-1); font-weight: 600; }
+.lossy-result { padding: 10px var(--s-l); border-radius: 10px; background: var(--glass); border: 1px solid var(--glass-edge); }
+.lossy-result-head { display: flex; flex-wrap: wrap; gap: var(--s-m); align-items: baseline; justify-content: space-between; }
+.lossy-result-head strong { color: var(--ink); font-weight: 500; }
+.lossy-result dl { margin: 6px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px var(--s-l); font-size: 12px; }
+.lossy-result dt { color: var(--ink-2); }
+.lossy-result dd { margin: 0; color: var(--ink-1); overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .lossy-meter > span { transition: none; } }
 #lossy-list .config-table { max-height: 62vh; overflow-y: auto; }
 @container (max-width: 640px) {
   .lossy-row { grid-template-columns: 28px 1fr 72px; }

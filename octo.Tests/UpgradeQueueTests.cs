@@ -218,6 +218,51 @@ public sealed class UpgradeQueueTests : IDisposable
         Assert.True(store.Snapshot().Attempts.ContainsKey("Artist/a.mp3|100"));
     }
 
+    [Fact]
+    public void AnUpgradeSaysWhatChangedAndWhatItPassed()
+    {
+        var newFile = Path.Combine(_dir, "Song.flac");
+        File.WriteAllBytes(newFile, FlacOf(200));
+        var kept = Path.Combine(_dir, ".octo-trash", "2026-10-03", "Song.mp3");
+        Directory.CreateDirectory(Path.GetDirectoryName(kept)!);
+        File.WriteAllBytes(kept, AudioFixtures.Mp3());
+        var settings = TestOptions.Monitor(new SoulseekSettings { VerifyDownloads = true, AcoustIdApiKey = "key", DetectTranscodes = true });
+        var worker = new UpgradeWorker(new UpgradeQueue(), null!, null!, NullLogger<UpgradeWorker>.Instance, soulseekSettings: settings);
+
+        var result = worker.Report(new LibraryActionOutcome(LibraryActionState.Applied, "Replaced.") { NewPath = newFile, QuarantinePath = kept },
+            new UpgradeJob { StartedUtc = DateTime.UtcNow.AddSeconds(-68) });
+
+        Assert.Equal("FLAC 16-bit 44.1 kHz", result.After);
+        Assert.StartsWith("MP3", result.Before);
+        Assert.Equal("Song.flac", result.NewFile);
+        Assert.Equal(".octo-trash/2026-10-03", result.KeptAt);
+        Assert.Equal(["the same length", "AcoustID: the same recording", "the spectrum: really lossless, not a converted MP3"], result.Checks);
+        Assert.InRange(result.Seconds!.Value, 67, 70);
+    }
+
+    [Fact]
+    public void WithoutAcoustIdTheReportDoesNotClaimIt()
+    {
+        var worker = new UpgradeWorker(new UpgradeQueue(), null!, null!, NullLogger<UpgradeWorker>.Instance,
+            soulseekSettings: TestOptions.Monitor(new SoulseekSettings { VerifyDownloads = false, DetectTranscodes = true }));
+        var result = worker.Report(new LibraryActionOutcome(LibraryActionState.Applied, "ok"), new UpgradeJob());
+        Assert.DoesNotContain(result.Checks, check => check.Contains("AcoustID"));
+    }
+
+    private static byte[] FlacOf(int seconds)
+    {
+        using var stream = new MemoryStream();
+        stream.Write("fLaC"u8);
+        stream.Write([0x80, 0x00, 0x00, 0x22]);
+        stream.Write([0x10, 0x00, 0x10, 0x00]);
+        stream.Write([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        const ulong sampleRate = 44100, channelsMinusOne = 1, bitsMinusOne = 15;
+        var packed = (sampleRate << 44) | (channelsMinusOne << 41) | (bitsMinusOne << 36) | (44100UL * (ulong)seconds);
+        for (var shift = 56; shift >= 0; shift -= 8) stream.WriteByte((byte)(packed >> shift));
+        stream.Write(new byte[16]);
+        return stream.ToArray();
+    }
+
     // ---- The Better quality page's endpoints ------------------------------------------------
 
     private static WebFactory Page(bool allowed = true, bool dryRun = false) => new(allowed, dryRun);
@@ -237,6 +282,8 @@ public sealed class UpgradeQueueTests : IDisposable
                 ["LibraryActions:AllowedUsers:0"] = allowed ? "admin" : "someone-else",
                 ["LibraryActions:Actions:0:Action"] = "BetterQuality",
                 ["LibraryActions:Actions:0:Enabled"] = "true",
+                ["Soulseek:Username"] = "slskd-user",
+                ["Soulseek:Password"] = "slskd-pass",
             }));
             b.ConfigureServices(services =>
             {

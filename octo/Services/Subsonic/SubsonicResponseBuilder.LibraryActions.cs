@@ -28,7 +28,8 @@ public partial class SubsonicResponseBuilder
     /// getLibraryActions: what this server lets the caller do. Always JSON. The field names are a
     /// contract with the Octo app.
     /// </summary>
-    public IActionResult CreateLibraryActionsResponse(LibraryActionSettings settings, string? username, int parallel = 1) =>
+    public IActionResult CreateLibraryActionsResponse(LibraryActionSettings settings, string? username, int parallel = 1,
+        bool upgradeReady = true) =>
         CreateJsonResponse(new Dictionary<string, object?>
         {
             ["status"] = "ok",
@@ -40,20 +41,22 @@ public partial class SubsonicResponseBuilder
                 ["enabled"] = settings.Enabled,
                 ["allowed"] = settings.IsAllowed(username),
                 ["dryRun"] = settings.DryRun,
-                ["actions"] = OfferedActions(settings),
+                ["actions"] = OfferedActions(settings, upgradeReady),
                 // 0 means kept until someone removes it by hand.
                 ["keepDays"] = settings.EffectiveQuarantineRetentionDays,
                 // How many upgrades run at once, which is how many downloads may.
                 ["parallel"] = parallel,
+                // Where an upgrade looks, for a client to say so rather than assume. Null when upgrade is not offered.
+                ["upgradeSource"] = upgradeReady ? LibraryActionExecutor.UpgradeSourceName : null,
             },
         });
 
-    private static string[] OfferedActions(LibraryActionSettings settings)
+    private static string[] OfferedActions(LibraryActionSettings settings, bool upgradeReady)
     {
         var enabled = settings.EffectiveActions().Where(action => action.Enabled).Select(action => action.Action).ToHashSet();
         var offered = new List<string>();
         if (enabled.Contains(LibraryAction.Delete)) offered.Add(RemoveAction);
-        if (enabled.Contains(LibraryAction.BetterQuality)) offered.Add(UpgradeAction);
+        if (enabled.Contains(LibraryAction.BetterQuality) && upgradeReady) offered.Add(UpgradeAction);
         return offered.ToArray();
     }
 

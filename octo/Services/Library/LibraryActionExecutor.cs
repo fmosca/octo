@@ -25,6 +25,12 @@ public sealed record LibraryActionOutcome(LibraryActionState State, string? Deta
     /// operator fixes whatever blocked it.
     /// </summary>
     public bool Consumed => State is LibraryActionState.Applied or LibraryActionState.Skipped;
+
+    /// <summary>For a replacement that went in: the new file, so a caller can say what it is.</summary>
+    public string? NewPath { get; init; }
+
+    /// <summary>For a replacement that went in: where the original waits in quarantine.</summary>
+    public string? QuarantinePath { get; init; }
 }
 
 public static class LibraryActionCodes
@@ -259,7 +265,7 @@ public sealed class LibraryActionExecutor
         if (outcome.State == LibraryActionState.Applied && replaced?.NewPath is { } newPath)
             using (ExecutionContext.SuppressFlow())
                 _ = Task.Run(() => ConfirmHistoryKeptAsync(request, resolved, newPath, key, carryStar));
-        return outcome;
+        return outcome with { NewPath = replaced?.NewPath, QuarantinePath = quarantinePath };
     }
 
     private async Task<Replaced> ReacquireAsync(LibraryActionRequest request, ResolvedSongFile original,
@@ -433,6 +439,25 @@ public sealed class LibraryActionExecutor
     /// </summary>
     internal static (DownloadSource? Source, bool UpgradeSearch) ReplacementPlan(LibraryAction action) =>
         action == LibraryAction.BetterQuality ? (DownloadSource.Soulseek, true) : (null, false);
+
+    /// <summary>Where Better quality looks for its copies, in words, read from the plan above so
+    /// the dashboard and the apps never name a source on their own.</summary>
+    public static string UpgradeSourceName => SourceName(ReplacementPlan(LibraryAction.BetterQuality).Source);
+
+    internal static string SourceName(DownloadSource? source) => source switch
+    {
+        DownloadSource.YouTube => "YouTube",
+        DownloadSource.Lidarr => "Lidarr",
+        _ => "Soulseek",
+    };
+
+    /// <summary>
+    /// Whether that source is set up at all. Better quality searches Soulseek, so an install with
+    /// no slskd (one that downloads through Lidarr, say) is not offered it: every job would fail.
+    /// </summary>
+    public static bool UpgradeSourceReady(SoulseekSettings soulseek) =>
+        !string.IsNullOrWhiteSpace(soulseek.BaseUrl)
+        && !string.IsNullOrWhiteSpace(soulseek.Username) && !string.IsNullOrWhiteSpace(soulseek.Password);
 
     /// <summary>Whether the person asking for a replacement had favourited the song. False when
     /// nothing will replace it, when the request carries no sign-in (playlist actions never

@@ -46,7 +46,29 @@ public sealed class UpgradeJob
     public DateTime QueuedUtc { get; set; }
     public DateTime UpdatedUtc { get; set; }
 
+    /// <summary>When it started running, for how long it took.</summary>
+    public DateTime? StartedUtc { get; set; }
+
+    /// <summary>What a finished job found and did, for a person to read.</summary>
+    public UpgradeResult? Result { get; set; }
+
     public UpgradeJob Copy() => (UpgradeJob)MemberwiseClone();
+}
+
+/// <summary>
+/// What an upgrade did, in words: the file before and after, the checks the new one passed,
+/// where the original is kept, and how long it took. Proof that "Upgraded" really means it.
+/// </summary>
+public sealed class UpgradeResult
+{
+    public string? Before { get; set; }
+    public long? BeforeBytes { get; set; }
+    public string? After { get; set; }
+    public long? AfterBytes { get; set; }
+    public string? NewFile { get; set; }
+    public string? KeptAt { get; set; }
+    public List<string> Checks { get; set; } = [];
+    public double? Seconds { get; set; }
 }
 
 /// <summary>A song to look for, with what the asker already knows about it.</summary>
@@ -177,6 +199,8 @@ public sealed class UpgradeQueue
             if (next is null) return null;
             next.State = UpgradeStates.Working;
             next.Detail = null;
+            next.StartedUtc = Clock();
+            next.Result = null;
             next.UpdatedUtc = Clock();
             Save();
             return next.Copy();
@@ -248,12 +272,15 @@ public sealed class UpgradeWorker : BackgroundService
     private readonly ILogger<UpgradeWorker> _logger;
     private readonly AcquisitionTracker? _tracker;
     private readonly QualityUpgradeStore? _attempts;
+    private readonly IOptionsMonitor<SoulseekSettings>? _soulseekSettings;
     private readonly List<Task> _running = [];
 
     public UpgradeWorker(UpgradeQueue queue, LibraryActionExecutor executor, NavidromeSongPathResolver resolver,
         ILogger<UpgradeWorker> logger, DownloadConcurrency? concurrency = null, ISoulseekLink? soulseek = null,
-        AcquisitionTracker? tracker = null, QualityUpgradeStore? attempts = null)
+        AcquisitionTracker? tracker = null, QualityUpgradeStore? attempts = null,
+        IOptionsMonitor<SoulseekSettings>? soulseekSettings = null)
     {
+        _soulseekSettings = soulseekSettings;
         _queue = queue;
         _logger = logger;
         _tracker = tracker;
@@ -323,10 +350,19 @@ public sealed class UpgradeWorker : BackgroundService
                 }), ct);
 
             var state = StateFor(outcome);
+            var result = state == UpgradeStates.Upgraded ? Report(outcome, job) : null;
             _queue.Update(job.NavidromeId, j =>
             {
                 j.State = state;
-                j.Detail = state == UpgradeStates.Waiting ? "Waiting for Soulseek" : outcome.Detail;
+                j.Result = result;
+                j.Detail = state switch
+                {
+                    UpgradeStates.Waiting => "Waiting for Soulseek",
+                    UpgradeStates.Upgraded when result?.After is { } after =>
+                        $"Now {after}{Size(result.AfterBytes)}, was {result.Before ?? job.Suffix?.ToUpperInvariant()}{Size(result.BeforeBytes)}.",
+                    UpgradeStates.NotFound => $"No lossless copy of this song on {LibraryActionExecutor.UpgradeSourceName} right now. Your copy is unchanged.",
+                    _ => outcome.Detail,
+                };
             });
             if (state == UpgradeStates.NotFound && job.AttemptKey is { } key)
                 _attempts?.Update(s => s.Attempts[key] = new QualityUpgradeAttempt(DateTime.UtcNow, outcome.State.ToString(), outcome.Detail));
@@ -339,6 +375,40 @@ public sealed class UpgradeWorker : BackgroundService
             _queue.Update(job.NavidromeId, j => { j.State = UpgradeStates.Failed; j.Detail = ex.Message; });
         }
     }
+
+    /// <summary>
+    /// The proof for a replacement that went in: both files described from their own headers, the
+    /// checks the new one passed to get there, and where the original waits. Never throws: a file
+    /// that cannot be read is simply not described.
+    /// </summary>
+    internal UpgradeResult Report(LibraryActionOutcome outcome, UpgradeJob job)
+    {
+        var settings = _soulseekSettings?.CurrentValue ?? new SoulseekSettings();
+        var result = new UpgradeResult
+        {
+            NewFile = outcome.NewPath is { } path ? Path.GetFileName(path) : null,
+            KeptAt = outcome.QuarantinePath is { } kept ? KeptFolder(kept) : null,
+            Seconds = job.StartedUtc is { } started ? Math.Round((DateTime.UtcNow - started).TotalSeconds) : null,
+        };
+        (result.After, result.AfterBytes) = AudioSummary.Describe(outcome.NewPath);
+        (result.Before, result.BeforeBytes) = AudioSummary.Describe(outcome.QuarantinePath);
+        // Every replacement is held to these before it may take the original's place.
+        result.Checks.Add("the same length");
+        if (settings.VerifyDownloads && !string.IsNullOrWhiteSpace(settings.AcoustIdApiKey))
+            result.Checks.Add("AcoustID: the same recording");
+        if (settings.DetectTranscodes) result.Checks.Add("the spectrum: really lossless, not a converted MP3");
+        return result;
+    }
+
+    // ".octo-trash/2026-10-03", the part of the quarantine path a person can find again.
+    private static string KeptFolder(string path)
+    {
+        var parts = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var trash = Array.FindIndex(parts, p => p.StartsWith('.') && p.Contains("trash", StringComparison.OrdinalIgnoreCase));
+        return trash >= 0 ? string.Join('/', parts[trash..^1]) : Path.GetDirectoryName(path) ?? path;
+    }
+
+    private static string Size(long? bytes) => bytes is > 0 ? $", {bytes.Value / 1048576.0:0.0} MB" : "";
 
     /// <summary>How an action's outcome reads as a job state. On the reason code, never the words.</summary>
     internal static string StateFor(LibraryActionOutcome outcome) => outcome switch
@@ -361,5 +431,32 @@ public sealed class UpgradeWorker : BackgroundService
             catch (Exception ex) { _logger.LogError(ex, "Upgrade queue tick failed"); }
             try { await Task.Delay(TickEvery, stoppingToken); } catch (OperationCanceledException) { break; }
         }
+    }
+}
+
+/// <summary>A file described from its own header: "FLAC 16-bit 44.1 kHz" or "MP3 320 kbps".</summary>
+public static class AudioSummary
+{
+    private static readonly HashSet<string> Lossless = new(StringComparer.OrdinalIgnoreCase)
+        { "flac", "wav", "aiff", "aif", "alac", "ape", "wv" };
+
+    public static (string? Text, long? Bytes) Describe(string? path)
+    {
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return (null, null);
+        var bytes = new FileInfo(path).Length;
+        var format = Path.GetExtension(path).TrimStart('.').ToUpperInvariant();
+        try
+        {
+            using var file = TagLib.File.Create(path);
+            var p = file.Properties;
+            if (Lossless.Contains(format) && p.BitsPerSample > 0 && p.AudioSampleRate > 0)
+                return ($"{format} {p.BitsPerSample}-bit {p.AudioSampleRate / 1000.0:0.#} kHz", bytes);
+            if (p.AudioBitrate > 0) return ($"{format} {p.AudioBitrate} kbps", bytes);
+        }
+        catch
+        {
+            // Unreadable: the format from the name is still worth saying.
+        }
+        return (format, bytes);
     }
 }

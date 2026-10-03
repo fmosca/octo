@@ -1705,7 +1705,7 @@
         <header class="page-header">
           <div>
             <h1>Better quality</h1>
-            <p>Songs in your library that are not lossless. Pick some, and Octo looks for a higher quality copy of each on Soulseek, several at a time.</p>
+            <p>Songs in your library that are not lossless. Pick some, and Octo looks for a higher quality copy of each, several at a time.</p>
           </div>
         </header>
 
@@ -1722,6 +1722,7 @@
               <button class="btn btn-ghost" type="button" id="lossy-refresh"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Refresh</span></button>
             </div>
             <div id="lossy-list"></div>
+            <div id="lossy-results"></div>
             <div class="cover-bar" id="lossy-bar">
               <span class="cover-count" id="lossy-count">Nothing picked</span>
               <span class="cover-hint"></span>
@@ -1733,7 +1734,7 @@
             </div>
             <details class="cover-how">
               <summary>How it works</summary>
-              <p>Each song goes through Better quality, exactly as the action playlist does it: a lossless copy is looked for on Soulseek, checked to be the same recording and really lossless, and put in the original's place, so the song keeps its plays, favourites and playlist places. The original waits in quarantine until its replacement passes. A song with no lossless copy anywhere stays as it is and is not looked for again by the weekly upgrade for 4 weeks. While Soulseek is not connected, songs wait for it.</p>
+              <p>Each song goes through Better quality, exactly as the action playlist does it: a lossless copy is looked for, checked to be the same recording and really lossless, and put in the original's place, so the song keeps its plays, favourites and playlist places. The original waits in quarantine until its replacement passes. A song with no lossless copy anywhere stays as it is and is not looked for again by the weekly upgrade for 4 weeks. Copies come from the source named above; while it is not connected, songs wait for it.</p>
             </details>
           </div>
         </div>
@@ -2145,6 +2146,21 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="signin-cancel">Cancel</button>
         <button type="button" class="btn btn-primary" id="signin-submit">Sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="ask-modal" hidden>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-desc">
+      <div class="modal-title" id="ask-title"></div>
+      <div class="modal-desc ask-desc" id="ask-desc"></div>
+      <div class="modal-fields" id="ask-fields" hidden>
+        <label class="ask-label" id="ask-label" for="ask-input"></label>
+        <input class="set-input" id="ask-input" type="text" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="ask-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ask-ok">OK</button>
       </div>
     </div>
   </div>

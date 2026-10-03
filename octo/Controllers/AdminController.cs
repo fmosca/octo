@@ -1313,22 +1313,36 @@ public class AdminController : ControllerBase
     {
         var user = BrowseUser(token);
         if (user is null) return Unauthorized(new { error = SignInFirst });
-        var progress = (_acquisitions?.All() ?? [])
+        var live = (_acquisitions?.All() ?? [])
             .GroupBy(row => $"{row.Provider}:{row.ExternalId}")
-            .ToDictionary(group => group.Key, group => group.First().Progress);
+            .ToDictionary(group => group.Key, group => group.First());
         var reading = _soulseekLink is null ? null : await _soulseekLink.ReadAsync(fresh: false, ct);
         var (up, warning, detail) = Octo.Services.Soulseek.SoulseekLink.Describe(reading, _soulseekOpts.CurrentValue.EffectiveOutageHoldHours);
         var settings = _libraryActionOpts.CurrentValue;
         return Ok(new
         {
-            jobs = (_upgradeQueue?.Snapshot() ?? []).Select(job => new
+            jobs = (_upgradeQueue?.Snapshot() ?? []).Select(job =>
             {
-                id = job.NavidromeId, job.Title, job.Artist, job.Album, job.Suffix, job.State, job.Detail, job.RequestedBy,
-                job.Origin, queuedUtc = job.QueuedUtc, updatedUtc = job.UpdatedUtc,
-                progress = job.AcquisitionKey is { } key && job.State == Octo.Services.Library.UpgradeStates.Working
-                    ? progress.GetValueOrDefault(key) : null,
+                // The replacement's own download row, while it runs: which stage, and how far.
+                var row = job.AcquisitionKey is { } key && job.State == Octo.Services.Library.UpgradeStates.Working
+                    ? live.GetValueOrDefault(key) : null;
+                return new
+                {
+                    id = job.NavidromeId, job.Title, job.Artist, job.Album, job.Suffix, job.State, job.Detail, job.RequestedBy,
+                    job.Origin, queuedUtc = job.QueuedUtc, updatedUtc = job.UpdatedUtc, startedUtc = job.StartedUtc,
+                    progress = row?.Progress,
+                    stage = row?.State.ToString(),
+                    source = row?.Source,
+                    bytesDone = row?.BytesDone,
+                    bytesTotal = row?.BytesTotal,
+                    note = row?.Note,
+                    result = job.Result,
+                };
             }),
             parallel = _downloadConcurrency?.Current ?? 1,
+            // Where an upgrade looks, and whether that source is set up, so the page never assumes.
+            source = Octo.Services.Library.LibraryActionExecutor.UpgradeSourceName,
+            sourceReady = Octo.Services.Library.LibraryActionExecutor.UpgradeSourceReady(_soulseekOpts.CurrentValue),
             why = _downloadConcurrency?.Why ?? "One at a time.",
             soulseek = new { ok = up, warning, detail },
             gate = new
@@ -1362,7 +1376,9 @@ public class AdminController : ControllerBase
         var settings = _libraryActionOpts.CurrentValue;
         if (!settings.IsAllowed(user))
             return StatusCode(403, new { error = $"{user} is not on the library actions allowed list, so Octo will not change files for them." });
-        var closed = !settings.Enabled ? "Turn on library actions first."
+        var closed = !Octo.Services.Library.LibraryActionExecutor.UpgradeSourceReady(_soulseekOpts.CurrentValue)
+                ? $"Better quality looks for copies on {Octo.Services.Library.LibraryActionExecutor.UpgradeSourceName}, which is not set up here."
+            : !settings.Enabled ? "Turn on library actions first."
             : !settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled) ? "Turn on the Better quality action first."
             : settings.DryRun ? "Library actions only rehearse while dry run is on; turn it off first."
             : null;

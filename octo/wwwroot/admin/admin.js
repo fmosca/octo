@@ -579,7 +579,7 @@ document.querySelectorAll('form[data-section]').forEach(form => {
     if (form.id === 'library-actions-form') {
       const dry = form.querySelector('[name="LibraryActions.DryRun"]');
       if (currentSettings?.LibraryActions?.DryRun && dry && !dry.checked
-          && !confirm('Turn off rehearsal mode? From the next check, a track added to an action playlist, or rated if ratings are on, moves a real file into quarantine.')) return;
+          && !(await askConfirm('Turn off rehearsal mode?', 'From the next check, a track added to an action playlist, or rated if ratings are on, moves a real file into quarantine.', 'Turn off rehearsal', true))) return;
     }
 
     if (form.id === 'lastfm-account-form' && !(await lastFmAccountMaySave(form))) return;
@@ -919,7 +919,7 @@ document.getElementById('rejected-peers-clear')?.addEventListener('click', async
   const button = event.currentTarget;
   const count = currentSettings?._meta?.RejectedPeerCount ?? 0;
   if (!count) return;
-  if (!confirm(`Forget ${count} rejected peer${count === 1 ? '' : 's'}? Those files become downloadable again.`)) return;
+  if (!(await askConfirm(`Forget ${count} rejected peer${count === 1 ? '' : 's'}?`, 'Those files become downloadable again.', 'Forget'))) return;
   try {
     const response = await api('/api/admin/soulseek/rejected-peers/clear', { method: 'POST' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1118,7 +1118,7 @@ genreMappingList?.addEventListener('dragend', event => {
 document.getElementById('genre-preset-broad')?.addEventListener('click', async () => {
   readGenreMappingRows();
   const existing = genreRules.filter(rule => rule.Pattern || rule.Genre).length;
-  if (existing > 0 && !confirm(`Replace your ${existing} rule${existing === 1 ? '' : 's'} with the broad preset? Nothing is saved until you press Save.`)) return;
+  if (existing > 0 && !(await askConfirm(`Replace your ${existing} rule${existing === 1 ? '' : 's'}?`, 'They are swapped for the broad preset. Nothing is saved until you press Save.', 'Replace rules'))) return;
   try {
     const response = await api('/api/admin/genre/presets');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1284,9 +1284,12 @@ async function startGenreBackfill(dryRun, scopeOverride = null) {
   if (scope === 'WholeLibrary' && !dryRun) {
     const current = await loadGenreBackfill();
     const expected = current?.musicPath ?? '';
-    confirmPath = prompt(
-      `This rewrites tags on every audio file under:\n\n${expected}\n\n` +
-      'including music Octo never downloaded. Type that path exactly to continue.');
+    confirmPath = await askDialog({
+      title: 'Write genres to your whole library?',
+      message: `This rewrites tags on every audio file under:\n${expected}\nincluding music Octo never downloaded. Type that path exactly to continue.`,
+      confirm: 'Write genres', danger: true,
+      input: { label: 'Music folder', placeholder: expected, mustEqual: expected },
+    });
     if (confirmPath === null) return;
   }
 
@@ -1313,7 +1316,7 @@ document.getElementById('genre-backfill-apply')?.addEventListener('click', async
   const run = await loadGenreBackfill();
   if (!run || run.settingsChanged) return;
   const scopeLabel = backfillScopeLabels[run.scope] ?? run.scope;
-  if (!confirm(`Write new genres to ${run.changed} file(s) in ${scopeLabel}? Only the genre is recorded for undo; anything else the tag library cannot round-trip is lost.`)) return;
+  if (!(await askConfirm(`Write new genres to ${run.changed} file${run.changed === 1 ? '' : 's'}?`, `In ${scopeLabel}. Only the genre is recorded for undo; anything else the tag library cannot round-trip is lost.`, 'Write genres', true))) return;
   // The previewed scope, not whatever the dropdown says by now.
   await startGenreBackfill(false, run.scope);
 });
@@ -1331,14 +1334,14 @@ document.getElementById('genre-backfill-resume')?.addEventListener('click', asyn
   const run = lastBackfillRun;
   // Resuming a preview writes nothing; resuming an apply writes tags, so it asks again.
   if (run && !run.dryRun
-      && !confirm(`Resume writing genres from file ${run.processed + 1} of ${run.total}?`)) return;
+      && !(await askConfirm('Resume writing genres?', `From file ${run.processed + 1} of ${run.total}.`, 'Resume'))) return;
   const response = await genreBackfillFetch('/api/admin/genre/backfill/resume', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { backfillNote(body.error || 'Could not resume.', 'error'); return; }
   await loadGenreBackfill();
 });
 document.getElementById('genre-backfill-undo')?.addEventListener('click', async () => {
-  if (!confirm('Put back the genre on every file changed since the last undo? Only the genre is restored, and files moved since then stay changed.')) return;
+  if (!(await askConfirm('Put back the genres?', 'Every file changed since the last undo gets its genre back. Only the genre is restored, and files moved since then stay changed.', 'Put back genres'))) return;
   const response = await genreBackfillFetch('/api/admin/genre/backfill/undo', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { backfillNote(body.error || 'Could not undo.', 'error'); return; }
@@ -1621,7 +1624,7 @@ coverEl('cover-go')?.addEventListener('click', async () => {
   if (!run || !ids.length) { coverNote('Pick at least one album first.', 'info'); return; }
   if (run.mode === 'Scan') { await startCovers('Preview', ids); return; }
   if (run.mode === 'Preview') {
-    if (!confirm(`Replace the cover of ${ids.length} album${ids.length === 1 ? '' : 's'}? Every old cover is kept, so Undo puts them back.`)) return;
+    if (!(await askConfirm(`Replace the cover of ${ids.length} album${ids.length === 1 ? '' : 's'}?`, 'Every old cover is kept, so Undo puts them back.', 'Replace covers'))) return;
     await startCovers('Apply', ids);
   }
 });
@@ -1638,7 +1641,7 @@ coverEl('cover-resume')?.addEventListener('click', async () => {
   await loadCoverUpgrade();
 });
 coverEl('cover-undo')?.addEventListener('click', async () => {
-  if (!confirm('Put back the old cover on every song the upgrades changed? Songs moved since then stay as they are.')) return;
+  if (!(await askConfirm('Put back the old covers?', 'Every song the upgrades changed gets its old cover back. Songs moved since then stay as they are.', 'Put back covers'))) return;
   const response = await genreBackfillFetch('/api/admin/covers/upgrade/undo', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { coverNote(body.error || 'Could not undo.', 'error'); return; }
@@ -1875,9 +1878,11 @@ document.getElementById('review-sweep-toggle')?.addEventListener('click', (event
   const start = button.dataset.paused === 'true';
   reviewSweepPost(button, `/api/admin/review-sweep/${start ? 'start' : 'pause'}`, start ? 'Carrying on.' : 'Paused.');
 });
-document.getElementById('review-sweep-reset')?.addEventListener('click', (event) => {
-  if (!confirm('Check every song again from the start? Questions you answered recently are not asked again.')) return;
-  reviewSweepPost(event.currentTarget, '/api/admin/review-sweep/reset', 'Starting over.');
+document.getElementById('review-sweep-reset')?.addEventListener('click', async (event) => {
+  // Taken before the question: once it is awaited the event no longer says which button it was.
+  const button = event.currentTarget;
+  if (!(await askConfirm('Check every song again?', 'From the start. Questions you answered recently are not asked again.', 'Start over'))) return;
+  reviewSweepPost(button, '/api/admin/review-sweep/reset', 'Starting over.');
 });
 loadReviewSweep();
 setInterval(() => { if (document.visibilityState === 'visible') loadReviewSweep(); }, 30000);
@@ -2052,7 +2057,7 @@ if (rawForm) {
       rawEditor.focus();
       return;
     }
-    if (!confirm('Replace settings.json with exactly this text? Every value shown here, including ones that came from environment variables, is written into the file and overrides .env from now on. Every settings card reloads afterwards.')) return;
+    if (!(await askConfirm('Replace settings.json?', 'With exactly this text. Every value shown here, including ones that came from environment variables, is written into the file and overrides .env from now on. Every settings card reloads afterwards.', 'Replace settings.json', true))) return;
 
     const submit = rawForm.querySelector('button[type="submit"]');
     submit.disabled = true;
@@ -2080,7 +2085,7 @@ if (rawForm) {
   });
 
   document.getElementById('raw-reload')?.addEventListener('click', async () => {
-    if (rawDirty && !confirm('Discard your edits and reload settings.json from disk?')) return;
+    if (rawDirty && !(await askConfirm('Discard your edits?', 'settings.json is read again from disk.', 'Discard edits', true))) return;
     await loadRawConfig(true);
     if (rawSavedStatus) rawSavedStatus.innerHTML = `${icon('i-check-circle-fill')}<span>Reloaded from disk</span>`;
   });
@@ -2127,7 +2132,7 @@ document.getElementById('restart-btn').addEventListener('click', async () => {
   const unsavedNote = unsavedCards
     ? `\n\nYou have unsaved changes on ${unsavedCards} card${unsavedCards === 1 ? '' : 's'}; restarting discards them.`
     : '';
-  if (!confirm(`Restart the Octo container? In-flight requests drop. Service comes back in 5-10s.${unsavedNote}`)) return;
+  if (!(await askConfirm('Restart Octo?', `Requests in flight are dropped, and Octo is back in 5 to 10 seconds.${unsavedNote}`, 'Restart', true))) return;
   const btn = document.getElementById('restart-btn');
   const label = btn.querySelector('span');
   btn.disabled = true;
@@ -2251,10 +2256,10 @@ document.getElementById('radio-discovery-list')?.addEventListener('change', even
   if (!event.target.matches('[data-radio-field="Enabled"]')) return;
   event.target.closest('.radio-discovery-row')?.classList.toggle('is-disabled', !event.target.checked);
 });
-document.getElementById('radio-discovery-list')?.addEventListener('click', event => {
+document.getElementById('radio-discovery-list')?.addEventListener('click', async event => {
   const button = event.target.closest('[data-radio-action]'); const row = button?.closest('.radio-discovery-row');
   if (!button || !row) return; readRadioDiscoveryRows(); const index = Number(row.dataset.index);
-  if (button.dataset.radioAction === 'remove') { if (!confirm(`Remove “${radioDiscoveryStations[index].Name}”? Listening history and downloaded music are untouched.`)) return; radioDiscoveryStations.splice(index, 1); }
+  if (button.dataset.radioAction === 'remove') { if (!(await askConfirm(`Remove “${radioDiscoveryStations[index].Name}”?`, 'Listening history and downloaded music are untouched.', 'Remove', true))) return; radioDiscoveryStations.splice(index, 1); }
   renderRadioDiscovery();
 });
 
@@ -2294,7 +2299,7 @@ async function loadRadioStatus() {
 }
 document.getElementById('radio-user')?.addEventListener('change', loadRadioStatus);
 document.getElementById('radio-reset')?.addEventListener('click', async event => {
-  const user = document.getElementById('radio-user')?.value; if (!user || !confirm(`Reset Radio history for “${user}”? Downloaded music will not be removed.`)) return;
+  const user = document.getElementById('radio-user')?.value; if (!user || !(await askConfirm(`Reset Radio history for “${user}”?`, 'Downloaded music is not removed.', 'Reset history', true))) return;
   const button = event.currentTarget;
   button.disabled = true;
   try { const response = await api(`/api/admin/lastfm/radio/history?user=${encodeURIComponent(user)}`, { method: 'DELETE' }); const data = await response.json();
@@ -2487,11 +2492,11 @@ async function lastFmScrobbleAction(action, user, button) {
     const url = lfmLastUsers.find(u => u.user.toLowerCase() === key)?.approvalUrl;
     if (!url) return;
     try { await navigator.clipboard.writeText(url); toast('Link copied. It works for an hour.', 'ok'); }
-    catch { prompt('Copy this link:', url); }
+    catch { await askDialog({ title: 'Copy this link', message: 'It works for an hour.', confirm: 'Done', cancel: null, input: { value: url, readOnly: true } }); }
     return;
   }
   if (action === 'disconnect'
-      && !confirm(`Stop scrobbling outside plays for “${user}”? Their Last.fm history is untouched.`)) return;
+      && !(await askConfirm(`Stop scrobbling outside plays for “${user}”?`, 'Their Last.fm history is untouched.', 'Stop scrobbling', true))) return;
   // The tab has to open inside the click or the browser blocks it; Last.fm's page goes into it
   // once Octo has the link.
   let tab = null;
@@ -2759,6 +2764,81 @@ function askCredentials() {
     modal.addEventListener('mousedown', onBackdrop);
   });
 }
+
+// The browser's own confirm(), alert() and prompt() boxes ignore the dashboard's look, so every
+// question goes through this one dialog: a title, the words, and buttons named for what they do.
+// A destructive question opens on Cancel and colours its button red. Resolves true or false, or,
+// with a typed answer, the text entered or null. `mustEqual` keeps the button off until it matches.
+function askDialog({ title, message = '', confirm = 'OK', cancel = 'Cancel', danger = false, input = null }) {
+  const modal = document.getElementById('ask-modal');
+  if (!modal) return Promise.resolve(input && !input.readOnly ? null : false);
+  const byId = id => document.getElementById(id);
+  const ok = byId('ask-ok');
+  const no = byId('ask-cancel');
+  const field = byId('ask-input');
+  const typed = !!input && !input.readOnly;
+  byId('ask-title').textContent = title;
+  byId('ask-desc').textContent = message;
+  ok.textContent = confirm;
+  ok.classList.toggle('btn-destructive', danger);
+  no.textContent = cancel ?? '';
+  no.hidden = cancel === null;
+  byId('ask-fields').hidden = !input;
+  if (input) {
+    byId('ask-label').textContent = input.label ?? '';
+    byId('ask-label').hidden = !input.label;
+    field.value = input.value ?? '';
+    field.placeholder = input.placeholder ?? '';
+    field.readOnly = !!input.readOnly;
+  }
+  const sync = () => { ok.disabled = input?.mustEqual != null && field.value.trim() !== input.mustEqual; };
+  sync();
+
+  const opener = document.activeElement;
+  const app = document.querySelector('.app');
+  if (app) app.inert = true;
+  modal.hidden = false;
+  const first = input ? field : (danger && cancel !== null ? no : ok);
+  first.focus();
+  if (document.activeElement !== first) setTimeout(() => first.focus(), 0);
+  if (input?.readOnly) field.select();
+
+  return new Promise(resolve => {
+    const close = value => {
+      modal.hidden = true;
+      if (app) app.inert = false;
+      if (opener && typeof opener.focus === 'function') opener.focus();
+      ok.removeEventListener('click', onOk);
+      no.removeEventListener('click', onNo);
+      modal.removeEventListener('keydown', onKey);
+      modal.removeEventListener('mousedown', onBackdrop);
+      field.removeEventListener('input', sync);
+      resolve(value);
+    };
+    const onOk = () => { if (!ok.disabled) close(typed ? field.value.trim() : true); };
+    const onNo = () => close(typed ? null : false);
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); onNo(); return; }
+      if (e.key === 'Enter' && (e.target === field || e.target === ok)) { e.preventDefault(); onOk(); return; }
+      if (e.key === 'Tab') {
+        const stops = Array.from(modal.querySelectorAll('input, button')).filter(el => !el.disabled && !el.hidden && el.offsetParent !== null);
+        const head = stops[0];
+        const tail = stops[stops.length - 1];
+        if (e.shiftKey && document.activeElement === head) { e.preventDefault(); tail.focus(); }
+        else if (!e.shiftKey && document.activeElement === tail) { e.preventDefault(); head.focus(); }
+      }
+    };
+    // Only the backdrop itself: a drag that starts inside the card is not an outside click.
+    const onBackdrop = e => { if (e.target === modal) onNo(); };
+    ok.addEventListener('click', onOk);
+    no.addEventListener('click', onNo);
+    modal.addEventListener('keydown', onKey);
+    modal.addEventListener('mousedown', onBackdrop);
+    field.addEventListener('input', sync);
+  });
+}
+
+const askConfirm = (title, message, confirm, danger = false) => askDialog({ title, message, confirm, danger });
 
 async function browseAuthenticate(result) {
   const creds = await askCredentials();
@@ -3878,7 +3958,7 @@ async function loadUpgrades() {
   const jobs = new Map((lossy.view.jobs || []).map(job => [job.id, job]));
   for (const row of lossy.rows) {
     const job = jobs.get(row.id);
-    if (job) row.job = { state: job.state, detail: job.detail, progress: job.progress };
+    if (job) row.job = job;
   }
   const open = (lossy.view.jobs || []).filter(isOpenJob).length;
   const finishedSome = lossy.open > 0 && open < lossy.open;
@@ -3907,18 +3987,44 @@ function lossyVisible() {
 function lossyGateClosed() {
   const gate = lossy.view?.gate;
   if (!gate) return 'Sign in with your Navidrome admin account to use this page.';
+  if (lossy.view.sourceReady === false) {
+    return `Better quality looks for copies on ${lossy.view.source}, which is not set up on this server.`;
+  }
   if (!gate.enabled || !gate.betterQuality || gate.dryRun || !gate.allowed) {
     return `Better quality needs library actions on, the Better quality action on, you (${gate.user}) on the allowed list, and rehearsal mode off.`;
   }
   return null;
 }
 
+// What a running upgrade is doing, from its download's own row.
+const stageWords = {
+  Queued: 'Waiting for a download slot', Searching: 'Searching', Downloading: 'Downloading',
+  Verifying: 'Checking it is the same song and really lossless', Importing: 'Swapping it in',
+};
+const mb = bytes => typeof bytes === 'number' && bytes > 0 ? `${(bytes / 1048576).toFixed(1)} MB` : '';
+
+function lossyStage(job) {
+  const pct = typeof job.progress === 'number' ? Math.round(job.progress * 100) : null;
+  let words = stageWords[job.stage] ?? 'Starting';
+  // The download's own source, never a name the page assumes.
+  const source = job.source ?? lossy.view?.source;
+  if (source && job.stage === 'Searching') words += ` ${source}`;
+  if (source && job.stage === 'Downloading') words += ` from ${source}`;
+  if (job.stage === 'Downloading' && pct !== null) {
+    words += ` ${pct}%`;
+    if (job.bytesTotal) words += `, ${mb(job.bytesDone)} of ${mb(job.bytesTotal)}`;
+  }
+  const meter = pct !== null ? `<span class="lossy-meter"><span style="width:${pct}%"></span></span>` : '';
+  return `<span class="dl-badge state">Working</span><span class="lossy-detail">${esc(words)}${job.note ? ` · ${esc(job.note)}` : ''}</span>${meter}`;
+}
+
 function lossyStatus(row) {
   if (row.job) {
+    if (row.job.state === 'working') return lossyStage(row.job);
     const word = upgradeWords[row.job.state] ?? row.job.state;
-    const pct = row.job.state === 'working' && typeof row.job.progress === 'number' ? ` ${Math.round(row.job.progress * 100)}%` : '';
     const tone = upgradeTone[row.job.state] ?? 'state';
-    return `<span class="dl-badge ${tone}" title="${esc(row.job.detail ?? '')}">${esc(word + pct)}</span>`;
+    const line = row.job.state === 'queued' ? '' : (row.job.detail ?? '');
+    return `<span class="dl-badge ${tone}">${esc(word)}</span>${line ? `<span class="lossy-detail">${esc(line)}</span>` : ''}`;
   }
   if (row.lastTried) {
     return `<span class="lossy-sub">Tried ${esc(new Date(row.lastTried.atUtc).toLocaleDateString())}: ${esc(row.lastTried.outcome)}</span>`;
@@ -3932,6 +4038,14 @@ function renderLossy() {
   const view = lossy.view;
   const youTube = lossy.rows.filter(row => row.fromYouTube).length;
   const parts = [`${lossy.rows.length} songs are not lossless${youTube ? `, ${youTube} of them from YouTube` : ''}.`];
+  const jobs = view?.jobs || [];
+  const count = state => jobs.filter(job => job.state === state).length;
+  const tally = [
+    [count('working'), 'running'], [count('queued'), 'waiting'], [count('waiting'), 'waiting for Soulseek'],
+    [count('upgraded'), 'upgraded'], [count('notFound'), 'with no copy found'], [count('failed'), 'failed'],
+  ].filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`);
+  if (tally.length) parts.push(`Queue: ${tally.join(', ')}.`);
+  if (view?.source) parts.push(`Copies come from ${view.source}.`);
   if (view) parts.push(`${view.why}`);
   if (view?.soulseek?.warning) parts.push(view.soulseek.detail);
   document.getElementById('lossy-status').textContent = parts.join(' ');
@@ -3994,7 +4108,35 @@ function renderLossy() {
   go.textContent = n ? `Find higher quality for ${n} ${n === 1 ? 'song' : 'songs'}` : 'Find higher quality';
   go.disabled = !n || !!closed;
   document.getElementById('lossy-cancel').hidden = !(view?.jobs || []).some(job => ['queued', 'waiting'].includes(job.state));
+  renderLossyResults();
   document.getElementById('lossy-clear').hidden = !(view?.jobs || []).some(job => job && !isOpenJob(job));
+}
+
+// Every finished job, newest first, with its proof. A song that became lossless leaves the list
+// above, so this is where its upgrade can still be read.
+function renderLossyResults() {
+  const holder = document.getElementById('lossy-results');
+  if (!holder) return;
+  const done = (lossy.view?.jobs || []).filter(job => !isOpenJob(job))
+    .sort((a, b) => Date.parse(b.updatedUtc) - Date.parse(a.updatedUtc));
+  if (!done.length) { holder.innerHTML = ''; return; }
+  const took = s => typeof s === 'number' ? (s >= 90 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`) : '';
+  holder.className = 'lossy-results';
+  holder.innerHTML = `<h4>Results</h4>${done.slice(0, 50).map(job => {
+    const r = job.result;
+    const facts = [];
+    if (r?.before || r?.after) facts.push(['Changed', `${esc(r.before ?? '?')}${r.beforeBytes ? `, ${mb(r.beforeBytes)}` : ''} → ${esc(r.after ?? '?')}${r.afterBytes ? `, ${mb(r.afterBytes)}` : ''}`]);
+    if (r?.newFile) facts.push(['New file', esc(r.newFile)]);
+    if (r?.checks?.length) facts.push(['Passed', esc(r.checks.join(', '))]);
+    if (r?.keptAt) facts.push(['Original kept in', esc(r.keptAt)]);
+    if (r?.seconds != null) facts.push(['Took', took(r.seconds)]);
+    if (!r && job.detail) facts.push(['Why', esc(job.detail)]);
+    return `<div class="lossy-result">
+      <div class="lossy-result-head"><strong>${esc(job.title ?? job.id)} <span class="lossy-sub" style="display:inline">${esc(job.artist ?? '')}</span></strong>
+        <span class="dl-badge ${upgradeTone[job.state] ?? 'state'}">${esc(upgradeWords[job.state] ?? job.state)}</span></div>
+      ${facts.length ? `<dl>${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>` : ''}
+    </div>`;
+  }).join('')}`;
 }
 
 document.getElementById('lossy-list')?.addEventListener('change', event => {
@@ -4026,7 +4168,7 @@ document.getElementById('lossy-go')?.addEventListener('click', async () => {
   const songs = lossy.rows.filter(row => lossy.picked.has(row.id));
   if (!songs.length) return;
   const n = songs.length;
-  if (!confirm(`Look for a higher quality copy of ${n} ${n === 1 ? 'song' : 'songs'}? Each original is kept in quarantine until its replacement passes.`)) return;
+  if (!(await askConfirm(`Find higher quality for ${n} ${n === 1 ? 'song' : 'songs'}?`, `Octo looks for a lossless copy of each on ${lossy.view?.source ?? 'the upgrade source'}. Each original is kept in quarantine until its replacement passes the checks.`, 'Find higher quality'))) return;
   const response = await lossyFetch('/api/admin/upgrades', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
