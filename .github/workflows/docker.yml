@@ -40,6 +40,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # A dated release must carry its own number in octo.csproj. Octo reports that
+      # number, and the dashboard's update check compares it with the newest tag, so a
+      # tag on a commit that was not bumped would leave every updated server offering
+      # the same update forever.
+      - name: Release tag matches the version
+        if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name, 'v')
+        run: |
+          version="$(sed -n 's:.*<InformationalVersion>\(.*\)</InformationalVersion>.*:\1:p' octo/octo.csproj | head -n 1)"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME, but octo/octo.csproj says $version. Bump InformationalVersion before tagging."
+            exit 1
+          fi
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
         with:

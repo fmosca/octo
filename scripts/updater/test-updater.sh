@@ -95,7 +95,7 @@ fresh; request 2026.10.01
 check "the same release is refused" failed 2026.10.01 "not older than"
 
 fresh; echo "<!-- edit -->" >> "$work/octo/octo/octo.csproj"; request 2026.10.04
-check "local changes to Octo's own files are left alone" failed 2026.10.01 "has changes to Octo's own files"
+check "local changes to Octo's own files are left alone" failed 2026.10.01 "(octo/octo.csproj)"
 
 fresh; echo "KEY=value" > "$work/octo/.env"; request 2026.10.04
 check "untracked files such as .env are fine" done 2026.10.04 ""

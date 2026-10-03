@@ -181,8 +181,13 @@ if [ "$mode" = image ]; then
 fi
 
 from="$(folder_version)"
-if [ -n "$(git_in_clone status --porcelain --untracked-files=no)" ]; then
-  fail "The Octo folder ($OCTO_DIR) has changes to Octo's own files, so the helper left it alone. 'git status' there lists them; commit or discard them and try again." "Checking the Octo folder"
+changed="$(git_in_clone status --porcelain --untracked-files=no)"
+if [ -n "$changed" ]; then
+  # awk reads every line, so a long list never cuts git off mid-write under pipefail.
+  changed="$(printf '%s\n' "$changed" | awk 'NR <= 5 { printf "%s%s", (NR > 1 ? ", " : ""), substr($0, 4) } END { if (NR > 5) printf ", and %d more", NR - 5 }')"
+  # Usually docker-compose.yml edited for ports or paths. Those belong in
+  # docker-compose.override.yml, which is the server's own and never blocks an update.
+  fail "Octo's own files were changed in $OCTO_DIR ($changed), so the helper left the folder alone. Move compose changes into docker-compose.override.yml and undo the edits (git checkout -- <file>), then try again." "Checking the Octo folder"
 fi
 
 write_status fetching "Fetching $tag from GitHub"
