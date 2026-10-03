@@ -92,9 +92,10 @@ public sealed class QualityUpgradeWorker : BackgroundService
     public QualityUpgradeWorker(QualityUpgradeStore store, LibraryActionExecutor executor,
         IAcquisitionActivity activity, NavidromePlaylistApi navidrome, NavidromeIdentityService identity,
         IOptionsMonitor<LibraryActionSettings> settings, ILogger<QualityUpgradeWorker> logger,
-        ISoulseekLink? soulseek = null, UpgradeQueue? upgrades = null)
+        ISoulseekLink? soulseek = null, UpgradeQueue? upgrades = null, UpgradeSources? sources = null)
     {
         _upgrades = upgrades;
+        SourceReady = () => sources?.Ready ?? true;
         _store = store;
         _settings = settings;
         _logger = logger;
@@ -102,8 +103,9 @@ public sealed class QualityUpgradeWorker : BackgroundService
         HasAdminIdentity = () => identity.HasAdminIdentity;
         Apply = (request, ct) => executor.ApplyAsync(request, ct);
         ListSongs = ct => WalkAsync(navidrome, ct);
-        SoulseekOffline = async ct => soulseek is not null
-            && (await soulseek.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
+        // Out only when every source is: a Soulseek outage leaves Lidarr when it is set up.
+        SoulseekOffline = async ct => sources is not null ? await sources.WaitingForSoulseekAsync(ct)
+            : soulseek is not null && (await soulseek.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
     }
 
     // Seams, the same way SoulseekClient exposes Clock and PollInterval.
@@ -113,6 +115,7 @@ public sealed class QualityUpgradeWorker : BackgroundService
     internal Func<LibraryActionRequest, CancellationToken, Task<LibraryActionOutcome>> Apply { get; set; }
     internal Func<CancellationToken, Task<(IReadOnlyList<LibrarySongRow> Songs, bool Complete)>> ListSongs { get; set; }
     internal Func<CancellationToken, Task<bool>> SoulseekOffline { get; set; }
+    internal Func<bool> SourceReady { get; set; }
 
     internal enum Tick { Off, NotDue, Busy, Offline, Unreachable, NothingToDo, Ran }
 
@@ -122,8 +125,10 @@ public sealed class QualityUpgradeWorker : BackgroundService
     internal static string? ActingUser(LibraryActionSettings s) =>
         (s.AllowedUsers ?? []).Select(u => u?.Trim()).FirstOrDefault(u => !string.IsNullOrEmpty(u));
 
-    internal static string? WhyOff(LibraryActionSettings s, bool hasAdmin) =>
+    internal static string? WhyOff(LibraryActionSettings s, bool hasAdmin, bool sourceReady = true) =>
         s.EffectiveUpgradePerWeek <= 0 ? "Off."
+        // Every try would fail and be stamped as tried for four weeks.
+        : !sourceReady ? "Better quality has no source set up: it needs slskd or Lidarr."
         : !s.Enabled ? "Library actions are off."
         : !s.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled) ? "Better quality is not switched on."
         : ActingUser(s) is null ? "Nobody is on the allowed list."
@@ -159,7 +164,7 @@ public sealed class QualityUpgradeWorker : BackgroundService
     internal async Task<Tick> TickAsync(CancellationToken ct)
     {
         var settings = _settings.CurrentValue;
-        if (WhyOff(settings, HasAdminIdentity()) is not null) return Tick.Off;
+        if (WhyOff(settings, HasAdminIdentity(), SourceReady()) is not null) return Tick.Off;
         var now = Clock();
         var state = _store.Snapshot();
         if (state.LastRunUtc is { } last && now - last < Interval(settings.EffectiveUpgradePerWeek)!.Value) return Tick.NotDue;
@@ -219,7 +224,7 @@ public sealed class QualityUpgradeWorker : BackgroundService
     {
         var settings = _settings.CurrentValue;
         var state = _store.Snapshot();
-        var off = WhyOff(settings, HasAdminIdentity());
+        var off = WhyOff(settings, HasAdminIdentity(), SourceReady());
         DateTime? next = off is null && Interval(settings.EffectiveUpgradePerWeek) is { } interval
             ? (state.LastRunUtc is { } last ? last + interval : Clock())
             : null;

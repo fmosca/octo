@@ -52,6 +52,12 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
     /// accepted, landed, done and failed from here.</summary>
     private readonly AcquisitionTracker? _tracker;
     private readonly MusicBrainzClient? _musicBrainz;
+    private readonly LidarrAlbumClaims? _claims;
+    // Resolved when used, like the download service does: the library action pieces sit on top
+    // of the acquisition queue that this class feeds.
+    private readonly IServiceProvider? _services;
+
+    internal TimeSpan ClaimPoll { get; set; } = TimeSpan.FromSeconds(10);
 
     public LidarrHeartAcquisitionService(
         LidarrClient client,
@@ -66,8 +72,12 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
         NotificationService notifications,
         ILogger<LidarrHeartAcquisitionService> logger,
         AcquisitionTracker? tracker = null,
-        MusicBrainzClient? musicBrainz = null)
+        MusicBrainzClient? musicBrainz = null,
+        LidarrAlbumClaims? claims = null,
+        IServiceProvider? services = null)
     {
+        _claims = claims;
+        _services = services;
         _tracker = tracker;
         _musicBrainz = musicBrainz;
         _client = client;
@@ -107,7 +117,7 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
                     Artist = studio.Artist,
                     Year = studio.Year,
                     Songs = new List<Song> { song },
-                }, requestedBy, studio);
+                }, requestedBy, studio, matchByNumber: false);
                 return;
             }
 
@@ -128,7 +138,7 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
                 CoverArtUrl = enriched?.AlbumCoverUrl,
                 Songs = new List<Song> { song },
             };
-            await QueueResolvedAlbumAsync(album, requestedBy);
+            await QueueResolvedAlbumAsync(album, requestedBy, matchByNumber: false);
         }, "track", provider, externalId, notifyFailure);
 
     public Task<bool> TryAcquireAlbumAsync(
@@ -158,8 +168,11 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
             ? set.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList()
             : null;
 
+    /// <param name="matchByNumber">Whether an imported file may be matched to a song by its track
+    /// number. Not for a track heart: its one song carries the number from whatever release it was
+    /// found on, often the single, where it is track 1, which on the album is another song.</param>
     private async Task QueueResolvedAlbumAsync(Album album, string? requestedBy = null,
-        LidarrAlbumCandidate? resolved = null)
+        LidarrAlbumCandidate? resolved = null, bool matchByNumber = true)
     {
         if (string.IsNullOrWhiteSpace(album.Artist) || string.IsNullOrWhiteSpace(album.Title))
             throw new InvalidOperationException("Lidarr requires an album artist and title.");
@@ -168,7 +181,7 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
         // Before GetOrAdd, so a caller that joins an existing job is still recorded.
         AddRequester(candidate.ForeignAlbumId, requestedBy);
         var lazy = _albumJobs.GetOrAdd(candidate.ForeignAlbumId,
-            _ => new Lazy<Task>(() => SubmitAndStartReconciliationAsync(candidate, album),
+            _ => new Lazy<Task>(() => SubmitAndStartReconciliationAsync(candidate, album, matchByNumber),
                 LazyThreadSafetyMode.ExecutionAndPublication));
         try
         {
@@ -186,12 +199,13 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
             .Where(s => !string.IsNullOrWhiteSpace(s.ExternalProvider) && !string.IsNullOrWhiteSpace(s.ExternalId))
             .Select(s => (s.ExternalProvider!, s.ExternalId!));
 
-    private void NoteLanded(Album album, LidarrImportedTrack track, string localPath, Dictionary<Song, string> landed)
+    private void NoteLanded(Album album, LidarrImportedTrack track, string localPath, Dictionary<Song, string> landed,
+        bool matchByNumber)
     {
         if (_tracker is null) return;
         try
         {
-            if (MatchSong(album, track) is not { } song) return;
+            if (MatchSong(album, track, matchByNumber) is not { } song) return;
             landed[song] = localPath;
             if (song is { ExternalProvider: { Length: > 0 } provider, ExternalId: { Length: > 0 } id })
                 _tracker.Stage(provider, id, AcquisitionState.Importing);
@@ -228,10 +242,31 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
     }
 
     private async Task SubmitAndStartReconciliationAsync(
-        LidarrAlbumCandidate candidate, Album album)
+        LidarrAlbumCandidate candidate, Album album, bool matchByNumber)
     {
         var snapshot = _settings.CurrentValue;
-        var albumId = await _client.EnsureAlbumAndSearchAsync(candidate);
+        var key = candidate.ForeignAlbumId;
+        // An upgrade borrowing this album deletes what its search brings in when it ends; the heart
+        // waits for it rather than lose its songs to that clean up.
+        var waitUntil = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Max(60, snapshot.ImportTimeoutSeconds));
+        while (_claims?.UpgradeBusy(key) == true && DateTime.UtcNow < waitUntil) await Task.Delay(ClaimPoll);
+        _claims?.HeartStarted(key);
+        LidarrSearchStarted started;
+        IReadOnlySet<int> before;
+        try
+        {
+            // The files Lidarr had before this search are the owner's; only new ones are ever deleted.
+            var existing = await _client.FindAlbumAsync(key);
+            before = existing is null ? new HashSet<int>()
+                : (await _client.GetAlbumTracksAsync(existing.Id)).Where(t => t.TrackFileId > 0).Select(t => t.TrackFileId).ToHashSet();
+            started = await _client.StartAlbumSearchAsync(candidate);
+        }
+        catch
+        {
+            _claims?.HeartEnded(key);
+            throw;
+        }
+        var albumId = started.AlbumId;
         _logger.LogInformation("Lidarr accepted AlbumSearch for '{Artist} - {Album}' ({ForeignId}, local id {Id})",
             album.Artist, album.Title, candidate.ForeignAlbumId, albumId);
         _notifications.Notify(new NotificationEvent
@@ -254,7 +289,7 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
         {
             try
             {
-                await ReconcileImportsAsync(albumId, album, snapshot, candidate.ForeignAlbumId);
+                await ReconcileImportsAsync(albumId, album, snapshot, candidate.ForeignAlbumId, matchByNumber, before);
             }
             catch (Exception ex)
             {
@@ -277,14 +312,27 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
             }
             finally
             {
+                // Octo moves every import into its own layout, so Lidarr's next rescan finds the
+                // files gone. An album Octo switched monitoring on for would then be fetched again
+                // and again, so it goes back to how it was.
+                if (!started.WasMonitored)
+                {
+                    try { await _client.SetAlbumsMonitoredAsync([albumId], false); }
+                    catch (Exception ex) { _logger.LogWarning("Could not stop monitoring Lidarr album {Id} again: {Message}", albumId, ex.Message); }
+                }
+                _claims?.HeartEnded(key);
                 _albumJobs.TryRemove(candidate.ForeignAlbumId, out _);
             }
         });
     }
 
     private async Task ReconcileImportsAsync(int albumId, Album album, LidarrSettings settings,
-        string albumKey)
+        string albumKey, bool matchByNumber = true, IReadOnlySet<int>? before = null)
     {
+        before ??= new HashSet<int>();
+        // Lidarr tracks dealt with: recorded, or dropped as already yours or removed. The album is
+        // done once every one of them is, since a dropped file no longer counts as Lidarr's.
+        var settled = new HashSet<int>();
         var timeout = TimeSpan.FromSeconds(Math.Max(1, settings.ImportTimeoutSeconds));
         var poll = TimeSpan.FromSeconds(Math.Clamp(settings.ImportTimeoutSeconds / 30, 1, 10));
         var deadline = DateTime.UtcNow + timeout;
@@ -310,15 +358,24 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
                 .ToList();
             foreach (var track in visible)
             {
+                if (settled.Contains(track.Id)) { visibleToOcto++; continue; }
                 var importedPath = TranslateImportedPath(track.Path!, settings.RootFolderPath, octoRoot);
                 if (!File.Exists(importedPath)) continue;
+                if (await ShouldDropAsync(album, track, importedPath, matchByNumber, albumKey) is { } reason)
+                {
+                    await DropAsync(track, importedPath, before, reason);
+                    settled.Add(track.Id);
+                    visibleToOcto++;
+                    continue;
+                }
                 var localPath = NormalizeImportedLayout(importedPath, album, track, octoRoot);
                 visibleToOcto++;
-                NoteLanded(album, track, localPath, landed);
+                settled.Add(track.Id);
+                NoteLanded(album, track, localPath, landed, matchByNumber);
                 if (!_recordedPaths.TryAdd(localPath, 0)) continue;
                 try
                 {
-                    await RecordImportAsync(album, track, localPath, RequestersFor(albumKey));
+                    await RecordImportAsync(album, track, localPath, RequestersFor(albumKey), matchByNumber);
                     imported++;
                 }
                 catch
@@ -328,7 +385,8 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
                 }
             }
 
-            if (state.IsComplete && visible.Count > 0 && visibleToOcto == visible.Count)
+            if ((state.IsComplete && visible.Count > 0 && visibleToOcto == visible.Count)
+                || (expected > 0 && settled.Count >= expected))
             {
                 if (imported > 0) await _library.TriggerLibraryScanAsync(force: true);
                 SettleTracked(album, landed, "Lidarr finished the album without this track.");
@@ -372,10 +430,84 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
         }
     }
 
-    private async Task RecordImportAsync(Album album, LidarrImportedTrack imported, string localPath,
-        IReadOnlyList<string>? requestedBy = null)
+    /// <summary>
+    /// Why an imported file should not join the library, or null when it should. A song removed
+    /// with a library action stays removed, and a song already in the library is not added twice,
+    /// the same rules as a Soulseek download. An owned lossy copy is queued for Better quality
+    /// instead, which swaps it in place and keeps its plays (W8).
+    /// </summary>
+    private async Task<string?> ShouldDropAsync(Album album, LidarrImportedTrack track, string importedPath,
+        bool matchByNumber, string albumKey)
     {
-        var song = MatchSong(album, imported) ?? new Song
+        var song = MatchSong(album, track, matchByNumber);
+        var artist = song?.Artist ?? track.Artist ?? album.Artist;
+        var title = string.IsNullOrWhiteSpace(track.Title) ? song?.Title : track.Title;
+        if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title)) return null;
+
+        if (_services?.GetService(typeof(Octo.Services.Library.LibraryActionJournal)) is Octo.Services.Library.LibraryActionJournal journal
+            && journal.IsNeverRequested(artist, title))
+            return "it was removed with a library action";
+
+        if (!_subsonicSettings.CurrentValue.SkipOwnedSongs
+            || _services?.GetService(typeof(Octo.Services.Library.LibraryOwnership)) is not Octo.Services.Library.LibraryOwnership ownership)
+            return null;
+        var owned = await ownership.FindAsync(artist, title, track.DurationSeconds ?? song?.Duration, album.Title);
+        // The import itself, once Navidrome has scanned it, is not a second copy.
+        if (owned is null || SamePath(owned.AbsolutePath, importedPath)) return null;
+        if (!owned.Lossless && LidarrTrackFetcher.IsLossless(track) && QueueUpgrade(owned, artist, title, album.Title, albumKey))
+            return $"you have it as {owned.Suffix.ToUpperInvariant()}, which is queued for a higher quality copy";
+        return $"it is already in your library ({owned.Suffix.ToUpperInvariant()})";
+    }
+
+    /// <summary>Queue Better quality for an owned lossy copy, when every gate of the action is open
+    /// for the person who hearted the album.</summary>
+    private bool QueueUpgrade(Octo.Services.Library.OwnedCopy owned, string artist, string title, string album, string albumKey)
+    {
+        if (owned.NavidromeId is null || RequestersFor(albumKey) is not { Count: > 0 } askers) return false;
+        if (_services?.GetService(typeof(Octo.Services.Library.UpgradeQueue)) is not Octo.Services.Library.UpgradeQueue queue
+            || _services.GetService(typeof(IOptionsMonitor<LibraryActionSettings>)) is not IOptionsMonitor<LibraryActionSettings> monitor)
+            return false;
+        var actions = monitor.CurrentValue;
+        if (!actions.Enabled || actions.DryRun || !actions.IsAllowed(askers[0])
+            || !actions.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled))
+            return false;
+        queue.Add([new Octo.Services.Library.UpgradeAsk(owned.NavidromeId, title, artist, album, owned.Suffix)], askers[0], "heart");
+        return true;
+    }
+
+    /// <summary>
+    /// Take an import back out. A file this heart's search brought in is deleted through Lidarr, so
+    /// Lidarr's own records stay true; one Lidarr had before is the owner's and is only left alone.
+    /// </summary>
+    private async Task DropAsync(LidarrImportedTrack track, string importedPath, IReadOnlySet<int> before, string reason)
+    {
+        if (track.TrackFileId > 0 && !before.Contains(track.TrackFileId))
+        {
+            try
+            {
+                await _client.DeleteTrackFileAsync(track.TrackFileId);
+                _logger.LogInformation("Lidarr brought '{Artist} - {Title}', but {Reason}; deleted it ({Path})",
+                    track.Artist, track.Title, reason, importedPath);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Could not delete Lidarr's '{Artist} - {Title}' ({Reason}): {Message}",
+                    track.Artist, track.Title, reason, ex.Message);
+            }
+        }
+        _logger.LogInformation("Lidarr has '{Artist} - {Title}', but {Reason}; left it out of the library records",
+            track.Artist, track.Title, reason);
+    }
+
+    private static bool SamePath(string a, string b) =>
+        string.Equals(Path.GetFullPath(a), Path.GetFullPath(b),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    private async Task RecordImportAsync(Album album, LidarrImportedTrack imported, string localPath,
+        IReadOnlyList<string>? requestedBy = null, bool matchByNumber = true)
+    {
+        var song = MatchSong(album, imported, matchByNumber) ?? new Song
         {
             Artist = imported.Artist ?? album.Artist,
             Title = imported.Title,
@@ -410,11 +542,11 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
     /// <summary>The album's song Lidarr imported: by title, read by <see cref="SongIdentity"/> so
     /// Deezer's "Song (feat. X)" is MusicBrainz's "Song" but never its "Song (Live)", then by
     /// track number.</summary>
-    internal static Song? MatchSong(Album album, LidarrImportedTrack track)
+    internal static Song? MatchSong(Album album, LidarrImportedTrack track, bool matchByNumber = true)
     {
         var byTitle = album.Songs.Where(s => SongIdentity.SameTitle(track.Title, s.Title, SongIdentity.StrictTitles).IsSame).ToList();
         if (byTitle.Count == 1) return byTitle[0];
-        if (track.TrackNumber is int number)
+        if (matchByNumber && track.TrackNumber is int number)
         {
             var byNumber = album.Songs.Where(s => s.Track == number).ToList();
             if (byNumber.Count == 1) return byNumber[0];

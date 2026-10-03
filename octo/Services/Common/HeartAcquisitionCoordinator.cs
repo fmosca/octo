@@ -182,7 +182,7 @@ public sealed class HeartAcquisitionCoordinator
             // Soulseek waits out an outage, before the step and again when slskd lost its login
             // partway through it. Every other source, and Soulseek once the wait is over, goes on
             // exactly as before.
-            var waitUntil = SoulseekDeadline(steps[index], heldSinceUtc);
+            var waitUntil = SoulseekDeadline(steps, index, heldSinceUtc);
             Exception failure;
             while (true)
             {
@@ -236,7 +236,7 @@ public sealed class HeartAcquisitionCoordinator
                 continue;
             }
 
-            var waitUntil = SoulseekDeadline(steps[index], heldSinceUtc);
+            var waitUntil = SoulseekDeadline(steps, index, heldSinceUtc);
             Exception? failure;
             while (true)
             {
@@ -291,10 +291,14 @@ public sealed class HeartAcquisitionCoordinator
             : DownloadSource.Soulseek;
     }
 
-    /// <summary>When a Soulseek step stops waiting for slskd, or null when it never waits: another
-    /// source, no link, or the wait switched off.</summary>
-    private DateTime? SoulseekDeadline(HeartDownloadSource step, DateTime? heldSinceUtc) =>
-        step == HeartDownloadSource.Soulseek && _soulseek is { } link && link.HoldLimit > TimeSpan.Zero
+    /// <summary>
+    /// When a Soulseek step stops waiting for slskd, or null when it never waits: another source,
+    /// no link, the wait switched off, or Lidarr later in the chain. The wait exists so an outage
+    /// does not turn a lossless heart into a YouTube MP3; Lidarr can bring a lossless copy now.
+    /// </summary>
+    private DateTime? SoulseekDeadline(IReadOnlyList<HeartDownloadSource> steps, int index, DateTime? heldSinceUtc) =>
+        steps[index] == HeartDownloadSource.Soulseek && _soulseek is { } link && link.HoldLimit > TimeSpan.Zero
+        && !steps.Skip(index + 1).Contains(HeartDownloadSource.Lidarr)
             ? (heldSinceUtc ?? link.UtcNow) + link.HoldLimit
             : null;
 

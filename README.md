@@ -568,6 +568,8 @@ Set `LIDARR_URL` and `LIDARR_API_KEY`, restart Octo, then open the **Lidarr** ad
 
 The selected Lidarr root and Octo's effective Navidrome library root must expose the same underlying files. Their container paths may differ: Octo translates the imported path relative to the selected Lidarr root. For example, Lidarr `/data/music/Artist/Album/file.flac` can map to Octo `/music/Artist/Album/file.flac` when both mounts point at the same host directory.
 
+A heart through Lidarr keeps the same promises as one through Soulseek. Lidarr brings the whole album, so a song already in your library is deleted from what it brought (an MP3 you own is queued for Better quality instead), a song removed with a library action stays removed, and an album Octo had Lidarr monitor goes back to unmonitored once it lands, so Lidarr does not fetch the songs Octo moved into its own layout again. Lidarr's imports are matched and tagged by Lidarr; Octo's AcoustID and spectrum checks run on Soulseek downloads, and on any copy Better quality takes from Lidarr.
+
 `LIDARR_COMPLETION_MODE=Accepted` (default) returns control after Lidarr accepts the album search. `Imported` makes completion/failure notifications reflect the actual import, bounded by `LIDARR_IMPORT_TIMEOUT_SECONDS` (default 1800). Neither mode blocks playback or later hearts; imported files are reconciled into download history and trigger a Navidrome scan in the background.
 
 ### Playback and acquisition
@@ -655,7 +657,7 @@ When a song is starred, Octo:
 
 Around 30 to 50% of Soulseek peer requests get rejected ("overwhelmed", queue full, banned). Single-peer-try downloads were too fragile; multi-peer is the difference between "downloads sometimes work" and "downloads reliably work."
 
-Before any of that, Octo checks whether the song is already in your library (Navidrome's own search, the same artist and title in the same version, a length within 8 seconds or the same album). A lossless copy is kept and nothing is downloaded; a lossy one is kept and queued for a higher quality copy when Soulseek is a source and Better quality is on for you (`SKIP_OWNED_SONGS`, on by default).
+Before any of that, Octo checks whether the song is already in your library (Navidrome's own search, the same artist and title in the same version, a length within 8 seconds or the same album). A lossless copy is kept and nothing is downloaded; a lossy one is kept and queued for a higher quality copy when Soulseek or Lidarr can look for one and Better quality is on for you (`SKIP_OWNED_SONGS`, on by default). A heart through Lidarr follows the same rule: Lidarr brings the whole album, and the songs you already have are deleted from what it brought.
 
 Each Soulseek download lands in a hidden folder of its own (`.octo-incoming/slskd/<id>` in slskd's downloads folder), so Octo always finds exactly its own file. Once slskd has shown it honours that folder, up to `SLSKD_PARALLEL_DOWNLOADS` (default 3, at most 6) downloads transfer at once; moving files into your library stays one at a time. An slskd without batch downloads, or one whose download subfolder setting is `{}`, keeps Octo at one at a time.
 
@@ -664,6 +666,8 @@ Starring an album searches the album once and takes one person's folder of it in
 When slskd is up but not logged in to the Soulseek network (Soulseek's server has maintenance now and then), the dashboard shows it as a warning, and hearts wait up to `SLSKD_OUTAGE_HOLD_HOURS` (default 6) for it before using the next source, so a maintenance window does not turn everything you heart into YouTube MP3s. Waiting hearts survive a restart.
 
 The dashboard's **Better quality** page lists every song in your library that is not lossless, including the ones Octo got from YouTube, and finds a higher quality copy of the ones you pick, several at a time. Octo's apps offer the same as **Find higher quality** on a song or an album. Both go through the Better quality library action, so they need library actions on, the Better quality action on, you on the allowed list, and rehearsal mode off.
+
+Copies come from Soulseek, from Lidarr, or from both: **Library actions → Where to look for a higher quality copy** (`LIBRARY_ACTIONS_UPGRADE_SOURCE`). Automatic, the default, asks Soulseek first and Lidarr for what Soulseek cannot find, using whichever is set up, and asks Lidarr alone while Soulseek is offline. Lidarr only fetches whole albums, so Octo borrows the album: it copies out the one song, which then goes through the same checks and the same in-place swap as a Soulseek copy, deletes the other files that search brought in, and puts the album's monitoring back as it was. A song whose file Lidarr itself manages is left to Lidarr, which upgrades it in place when its quality profile asks for lossless.
 
 > **Hearting is "fetch", then "favorite".** Navidrome has never seen Octo's IDs for music you don't own yet, so there is nothing on its side to mark as starred when you heart it. Once the files land and Navidrome shows them, Octo favourites them for whoever hearted them, unless the heart came from Octo's own apps (their heart means Add) or `STAR_DOWNLOADS_FOR_REQUESTER` is off.
 

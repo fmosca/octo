@@ -50,7 +50,7 @@ public sealed class LibraryActionOneAtATimeTests : IDisposable
     private string Revealed => Path.Combine(_root, FileName + ".flac");
 
     private LibraryActionExecutor Executor(bool keepOriginals = false,
-        Octo.Services.Soulseek.ISoulseekLink? soulseekLink = null)
+        Octo.Services.Soulseek.ISoulseekLink? soulseekLink = null, UpgradeSources? sources = null)
     {
         var settings = TestOptions.Monitor(new LibraryActionSettings
         {
@@ -76,7 +76,7 @@ public sealed class LibraryActionOneAtATimeTests : IDisposable
             new LibraryActionQuarantine(settings, NullLogger<LibraryActionQuarantine>.Instance),
             _journal, _library.Object, _ids, new RejectedPeerRegistry(), _queue, settings,
             TestOptions.Monitor(new SoulseekSettings()), subsonic, NullLogger<LibraryActionExecutor>.Instance,
-            soulseekLink: soulseekLink)
+            soulseekLink: soulseekLink, sources: sources)
         {
             HistoryPoll = TimeSpan.FromMilliseconds(1),
             HistoryAttempts = 1,
@@ -295,5 +295,101 @@ public sealed class LibraryActionOneAtATimeTests : IDisposable
         Assert.True(File.Exists(Revealed));
         Assert.False(File.Exists(_original));
         Assert.Single(Quarantined());
+    }
+
+    private static readonly SoulseekSettings SlskdSetUp = new() { BaseUrl = "http://slskd:5030", Username = "u", Password = "p" };
+    private static readonly LidarrSettings LidarrSetUp = new()
+    {
+        BaseUrl = "http://lidarr:8686", ApiKey = "k", RootFolderPath = "/music", QualityProfileId = 1, MetadataProfileId = 1,
+    };
+
+    private static UpgradeSources BothSources(Octo.Services.Soulseek.ISoulseekLink? link = null) =>
+        new(TestOptions.Monitor(new LibraryActionSettings()), TestOptions.Monitor(SlskdSetUp), TestOptions.Monitor(LidarrSetUp), link);
+
+    private static LibraryActionRequest BetterQuality() => new(LibraryAction.BetterQuality, "nd-1", "alice");
+
+    /// <summary>A lossless file larger than the original, as Better quality demands.</summary>
+    private string LosslessStaged() => Staged(new byte[_originalSize + 4096], ".flac");
+
+    [Fact]
+    public async Task BetterQuality_AsksLidarrWhenSoulseekFindsNothing()
+    {
+        var action = Executor(sources: BothSources()).ApplyAsync(BetterQuality());
+
+        var soulseek = await NextDownload();
+        Assert.Equal(DownloadSource.Soulseek, soulseek.SourceOverride);
+        Assert.True(soulseek.UpgradeSearch);
+        Fail(soulseek, new FileNotFoundException("no peer had it"));
+
+        var lidarr = await NextDownload();
+        Assert.Equal(DownloadSource.Lidarr, lidarr.SourceOverride);
+        Assert.True(lidarr.UpgradeSearch);
+        Finish(lidarr, await Reveal(lidarr, LosslessStaged()));
+        var outcome = await action.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LibraryActionState.Applied, outcome.State);
+        Assert.True(File.Exists(Revealed));
+        Assert.False(File.Exists(_original));
+    }
+
+    [Fact]
+    public async Task BetterQuality_AsksLidarrWhenSoulseeksCopyFailsTheChecks()
+    {
+        var action = Executor(sources: BothSources()).ApplyAsync(BetterQuality());
+
+        var soulseek = await NextDownload();
+        // An MP3 renamed: no larger than the original, so refused before it was ever placed.
+        var staged = Staged(new byte[10], ".flac");
+        Fail(soulseek, await Assert.ThrowsAsync<ReplacementRejectedException>(() => Reveal(soulseek, staged)));
+
+        var lidarr = await NextDownload();
+        Assert.Equal(DownloadSource.Lidarr, lidarr.SourceOverride);
+        Finish(lidarr, await Reveal(lidarr, LosslessStaged()));
+
+        Assert.Equal(LibraryActionState.Applied, (await action.WaitAsync(TimeSpan.FromSeconds(10))).State);
+        Assert.False(File.Exists(_original));
+    }
+
+    [Fact]
+    public async Task BetterQuality_DuringASoulseekOutage_GoesStraightToLidarr()
+    {
+        var action = Executor(soulseekLink: new OfflineLink(), sources: BothSources(new OfflineLink())).ApplyAsync(BetterQuality());
+
+        var download = await NextDownload();
+        Assert.Equal(DownloadSource.Lidarr, download.SourceOverride);
+        Finish(download, await Reveal(download, LosslessStaged()));
+
+        Assert.Equal(LibraryActionState.Applied, (await action.WaitAsync(TimeSpan.FromSeconds(10))).State);
+    }
+
+    [Fact]
+    public async Task BetterQuality_WhenEverySourceMisses_SaysWhatEachFound()
+    {
+        var action = Executor(sources: BothSources()).ApplyAsync(BetterQuality());
+
+        Fail(await NextDownload(), new FileNotFoundException("no peer had it"));
+        Fail(await NextDownload(), new FileNotFoundException("Lidarr found no lossless copy within 30 minutes."));
+        var outcome = await action.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LibraryActionState.Failed, outcome.State);
+        Assert.Equal(LibraryActionCodes.NoReplacement, outcome.Code);
+        Assert.Contains("Lidarr found no lossless copy", outcome.Detail);
+        Assert.Contains("Before that, Soulseek: no peer had it", outcome.Detail);
+        Assert.True(File.Exists(_original));
+        Assert.Empty(Quarantined());
+    }
+
+    [Fact]
+    public async Task BetterQuality_WithNoSourceSetUp_FailsWithoutDownloading()
+    {
+        var none = new UpgradeSources(TestOptions.Monitor(new LibraryActionSettings()),
+            TestOptions.Monitor(new SoulseekSettings()), TestOptions.Monitor(new LidarrSettings()));
+
+        var outcome = await Executor(sources: none).ApplyAsync(BetterQuality());
+
+        Assert.Equal(LibraryActionState.Failed, outcome.State);
+        Assert.Contains("no source set up", outcome.Detail);
+        Assert.True(_queue.IsIdle);
+        Assert.True(File.Exists(_original));
     }
 }

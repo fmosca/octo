@@ -842,6 +842,7 @@ public class AdminController : ControllerBase
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
                 ["UpgradePerWeek"] = actions.UpgradePerWeek,
+                ["UpgradeSource"] = actions.UpgradeSource.ToString(),
                 ["NoticeMaxTracks"] = actions.NoticeMaxTracks,
                 ["RatingsScope"] = actions.RatingsScope.ToString(),
                 ["AllowedUsers"] = actions.AllowedUsers ?? [],
@@ -1346,8 +1347,10 @@ public class AdminController : ControllerBase
             }),
             parallel = _downloadConcurrency?.Current ?? 1,
             // Where an upgrade looks, and whether that source is set up, so the page never assumes.
-            source = Octo.Services.Library.LibraryActionExecutor.UpgradeSourceName,
-            sourceReady = Octo.Services.Library.LibraryActionExecutor.UpgradeSourceReady(_soulseekOpts.CurrentValue),
+            source = UpgradeSourceName,
+            sourceReady = UpgradeSourceReady,
+            plan = UpgradeSourcesNow?.Plan().Select(Octo.Services.Library.UpgradeSources.Word).ToList()
+                ?? (UpgradeSourceReady ? ["Soulseek"] : []),
             why = _downloadConcurrency?.Why ?? "One at a time.",
             soulseek = new { ok = up, warning, detail },
             gate = new
@@ -1381,8 +1384,8 @@ public class AdminController : ControllerBase
         var settings = _libraryActionOpts.CurrentValue;
         if (!settings.IsAllowed(user))
             return StatusCode(403, new { error = $"{user} is not on the library actions allowed list, so Octo will not change files for them." });
-        var closed = !Octo.Services.Library.LibraryActionExecutor.UpgradeSourceReady(_soulseekOpts.CurrentValue)
-                ? $"Better quality looks for copies on {Octo.Services.Library.LibraryActionExecutor.UpgradeSourceName}, which is not set up here."
+        var closed = !UpgradeSourceReady
+                ? $"Better quality looks for copies on {UpgradeSourceName}, which is not set up here."
             : !settings.Enabled ? "Turn on library actions first."
             : !settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled) ? "Turn on the Better quality action first."
             : settings.DryRun ? "Library actions only rehearse while dry run is on; turn it off first."
@@ -1800,6 +1803,7 @@ public class AdminController : ControllerBase
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
                 ["UpgradePerWeek"] = actions.UpgradePerWeek,
+                ["UpgradeSource"] = actions.UpgradeSource.ToString(),
                 ["NoticeMaxTracks"] = actions.NoticeMaxTracks,
                 ["RatingsScope"] = actions.RatingsScope.ToString(),
                 ["AllowedUsers"] = JsonSerializer.SerializeToNode(actions.AllowedUsers ?? [])!,
@@ -2008,7 +2012,7 @@ public class AdminController : ControllerBase
             "LibraryActions:ReviewPlaylistName", "LibraryActions:NoticeMaxTracks",
             "LibraryActions:RatingsScope", "LibraryActions:DuplicatesEnabled",
             "LibraryActions:DuplicatesPlaylistName", "LibraryActions:DuplicatesScanHours",
-            "LibraryActions:UpgradePerWeek",
+            "LibraryActions:UpgradePerWeek", "LibraryActions:UpgradeSource",
             "LibraryActions:ReviewSweepPerHour", "LibraryActions:ReviewSweepOctoDownloads",
             "Soulseek:SubmitConfirmedFingerprints", "Soulseek:AcoustIdUserApiKey",
             "Genre:Enabled", "Genre:MaxGenres", "Genre:OnEmpty", "Genre:Fallback",
@@ -2369,6 +2373,15 @@ public class AdminController : ControllerBase
                 ["SessionKey"] = SecretPlaceholder,
                 ["LastFmUser"] = pair.Value.LastFmUser ?? "",
             })));
+
+    /// <summary>Where Better quality looks, from the one place that decides it.</summary>
+    private Octo.Services.Library.UpgradeSources? UpgradeSourcesNow =>
+        HttpContext?.RequestServices.GetService<Octo.Services.Library.UpgradeSources>();
+
+    private bool UpgradeSourceReady =>
+        UpgradeSourcesNow?.Ready ?? Octo.Services.Library.UpgradeSources.SoulseekSetUp(_soulseekOpts.CurrentValue);
+
+    private string UpgradeSourceName => UpgradeSourcesNow?.Name ?? "Soulseek";
 
     /// <summary>The Updates section as configured now; read when asked, so a save shows at once.</summary>
     private UpdateSettings UpdateOptions => _config.GetSection("Updates").Get<UpdateSettings>() ?? new UpdateSettings();

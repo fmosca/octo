@@ -466,7 +466,7 @@
               <div class="set-info">
                 <div class="set-info-t">Skip songs you already have</div>
                 <div class="set-info-d">A heart, an album or a play never downloads a second copy of a song in your library. On by default.</div>
-                <div class="set-info-more">An MP3 or other lossy copy is kept and queued for a higher quality one, when Soulseek is a source and Better quality is on for you. The same song means the same artist and title in the same version, and a length within 8 seconds or the same album.</div>
+                <div class="set-info-more">An MP3 or other lossy copy is kept and queued for a higher quality one, when Soulseek or Lidarr can look for it and Better quality is on for you. This holds for hearts through Lidarr too: the album's songs you already have are taken back out of what Lidarr brought. The same song means the same artist and title in the same version, and a length within 8 seconds or the same album.</div>
               </div>
               <label class="switch"><input type="checkbox" id="f-skip-owned-songs" name="Subsonic.SkipOwnedSongs" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
@@ -1509,7 +1509,7 @@
             <div class="set-row">
               <div class="set-info">
                 <div class="set-info-t"><svg class="icon brand" aria-hidden="true"><use href="#b-acoustid"/></svg>Verify downloads</div>
-                <div class="set-info-d">Fingerprints each download and asks AcoustID what it really is. Off by default.</div>
+                <div class="set-info-d">Fingerprints each Soulseek and YouTube download and asks AcoustID what it really is. Off by default.</div>
                 <div class="set-info-more"><p>Catches covers, karaoke versions, live takes and mislabelled compilation tracks, which all pass the length check. A peer that sends a different recording has that file remembered and never tried again.</p><p>A song AcoustID has never heard of is always kept. YouTube downloads are identified too but never rejected, since there is no second copy to try.</p></div>
               </div>
               <label class="switch"><input type="checkbox" name="Soulseek.VerifyDownloads" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
@@ -1742,7 +1742,7 @@
             </div>
             <details class="cover-how">
               <summary>How it works</summary>
-              <p>Each song goes through Better quality, exactly as the action playlist does it: a lossless copy is looked for, checked to be the same recording and really lossless, and put in the original's place, so the song keeps its plays, favourites and playlist places. The original waits in quarantine until its replacement passes. A song with no lossless copy anywhere stays as it is and is not looked for again by the weekly upgrade for 4 weeks. Copies come from the source named above; while it is not connected, songs wait for it.</p>
+              <p>Each song goes through Better quality, exactly as the action playlist does it: a lossless copy is looked for, checked to be the same recording and really lossless, and put in the original's place, so the song keeps its plays, favourites and playlist places. The original waits in quarantine until its replacement passes. A song with no lossless copy on any of them stays as it is and is not looked for again by the weekly upgrade for 4 weeks. Copies come from the sources named above, Soulseek first and then Lidarr; while every one of them is out, songs wait.</p>
             </details>
           </div>
         </div>
@@ -1922,6 +1922,14 @@
             <div class="set-row">
               <div class="set-info"><div class="set-info-t">Upgrade <span class="set-opt">songs a week</span></div><div class="set-info-d">Octo looks for a lossless copy of this many MP3 and other lossy songs a week, one at a time, spread across the week, and only while nothing else is downloading. It uses Better quality, so that action must be on, and a song is only replaced when the new file really is better. <strong>0 is off.</strong></div><div class="set-info-d" id="quality-upgrade-status"></div></div>
               <input class="set-input" name="LibraryActions.UpgradePerWeek" type="number" min="0" max="500" data-number="true" aria-label="Songs to upgrade a week" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info"><div class="set-info-t">Where to look for a higher quality copy</div><div class="set-info-d"><strong>Automatic</strong> asks Soulseek first, then Lidarr for what Soulseek cannot find, using whichever of the two is set up.</div><div class="set-info-more">Lidarr fetches whole albums, so Octo borrows the album: it copies out the one song, deletes the other files that search brought in, and puts the album's monitoring back as it was. A song Lidarr already manages is left to Lidarr. While Soulseek is offline, Lidarr is asked alone.</div></div>
+              <select class="set-input" name="LibraryActions.UpgradeSource">
+                <option value="Auto">Automatic</option>
+                <option value="Soulseek">Soulseek only</option>
+                <option value="Lidarr">Lidarr only</option>
+              </select>
             </div>
           </form>
         </div>

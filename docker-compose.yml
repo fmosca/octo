@@ -177,6 +177,8 @@ services:
       LibraryActions__DuplicatesEnabled: ${LIBRARY_ACTIONS_DUPLICATES:-false}
       LibraryActions__DuplicatesScanHours: ${LIBRARY_ACTIONS_DUPLICATES_SCAN_HOURS:-24}
       LibraryActions__UpgradePerWeek: ${LIBRARY_ACTIONS_UPGRADE_PER_WEEK:-0}
+      # Where Better quality looks: Auto (Soulseek, then Lidarr), Soulseek or Lidarr.
+      LibraryActions__UpgradeSource: ${LIBRARY_ACTIONS_UPGRADE_SOURCE:-Auto}
       LibraryActions__NoticeMaxTracks: ${LIBRARY_ACTIONS_NOTICE_MAX:-100}
       # Auto: stars only act on tracks in Octo's playlists while Review or Duplicates is on.
       LibraryActions__RatingsScope: ${LIBRARY_ACTIONS_RATINGS_SCOPE:-Auto}

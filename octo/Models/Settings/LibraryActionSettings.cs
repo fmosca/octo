@@ -19,6 +19,15 @@ public enum LibraryRatingScope { Auto, NoticeOnly, Global }
 /// <summary>The playlists Octo fills to ask a person something (#47, #53).</summary>
 public enum NoticeKind { Review, Duplicates }
 
+/// <summary>Where Better quality looks for a lossless copy.</summary>
+public enum UpgradeSourceChoice
+{
+    /// <summary>Every source that is set up: Soulseek first, then Lidarr for what Soulseek cannot find.</summary>
+    Auto,
+    Soulseek,
+    Lidarr,
+}
+
 public sealed class LibraryActionDefinition
 {
     public LibraryAction Action { get; set; }
@@ -209,6 +218,14 @@ public class LibraryActionSettings
     /// Environment variable: LIBRARY_ACTIONS_UPGRADE_PER_WEEK
     /// </summary>
     public int UpgradePerWeek { get; set; } = 0;
+
+    /// <summary>
+    /// Where Better quality looks for a lossless copy (default: Auto). Auto uses every source that
+    /// is set up, Soulseek first and then Lidarr for what Soulseek cannot find; Soulseek or Lidarr
+    /// uses only that one.
+    /// Environment variable: LIBRARY_ACTIONS_UPGRADE_SOURCE
+    /// </summary>
+    public UpgradeSourceChoice UpgradeSource { get; set; } = UpgradeSourceChoice.Auto;
 
     public int EffectiveUpgradePerWeek => Math.Clamp(UpgradePerWeek, 0, 500);
 

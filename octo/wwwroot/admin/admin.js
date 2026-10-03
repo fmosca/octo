@@ -4048,7 +4048,11 @@ function renderLossy() {
   if (tally.length) parts.push(`Queue: ${tally.join(', ')}.`);
   if (view?.source) parts.push(`Copies come from ${view.source}.`);
   if (view) parts.push(`${view.why}`);
-  if (view?.soulseek?.warning) parts.push(view.soulseek.detail);
+  // Soulseek's state matters only while Soulseek is one of the sources, and with Lidarr beside
+  // it an outage just means Lidarr is asked alone.
+  const plan = view?.plan || ['Soulseek'];
+  if (view?.soulseek?.warning && plan.includes('Soulseek'))
+    parts.push(plan.includes('Lidarr') ? `${view.soulseek.detail} Lidarr is asked alone until it is back.` : view.soulseek.detail);
   document.getElementById('lossy-status').textContent = parts.join(' ');
 
   const closed = lossyGateClosed();

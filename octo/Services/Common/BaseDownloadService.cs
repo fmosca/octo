@@ -99,6 +99,23 @@ public abstract class BaseDownloadService : IDownloadService
     /// <summary>For a subclass that needs an optional service without changing this constructor.</summary>
     protected T? OptionalService<T>() where T : class => _serviceProvider.GetService<T>();
 
+    // The library file the running replacement replaces. Flows with the call into
+    // DownloadTrackAsync, so a backend that can use it (Lidarr reads the album from its tags)
+    // sees it without a new parameter on every download.
+    private static readonly AsyncLocal<string?> ReplacingPathLocal = new();
+
+    /// <summary>The library file this download replaces, or null for an ordinary download.</summary>
+    protected static string? ReplacingPath => ReplacingPathLocal.Value;
+
+    /// <summary>
+    /// The source a backend fetched a song from, when the format alone does not say: a FLAC
+    /// can be Lidarr's as well as Soulseek's. Weak, so a finished song takes its entry with it.
+    /// </summary>
+    protected static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Song, string> FetchedFrom = new();
+
+    private static string SourceLabel(Song song, string ext) =>
+        FetchedFrom.TryGetValue(song, out var source) ? source : ext == "FLAC" ? "Soulseek" : "YouTube";
+
     /// <summary>
     /// Tell the live progress list where a download has got to. It only watches, so it is
     /// resolved per use through the provider like the settings above, and whatever it throws
@@ -328,7 +345,7 @@ public abstract class BaseDownloadService : IDownloadService
                 Album = album ?? string.Empty,
                 Path = localPath,
                 Format = string.IsNullOrEmpty(ext) ? "?" : ext,
-                Source = ext == "FLAC" ? "Soulseek" : "YouTube",
+                Source = SourceLabel(song, ext),
                 CoverArtUrl = cover,
                 SizeBytes = size,
                 TranscodedFrom = song.TranscodedFrom,
@@ -349,7 +366,7 @@ public abstract class BaseDownloadService : IDownloadService
                     Title = song.Title,
                     Album = album,
                     Format = string.IsNullOrEmpty(ext) ? "?" : ext,
-                    Source = ext == "FLAC" ? "Soulseek" : "YouTube",
+                    Source = SourceLabel(song, ext),
                     CoverArtUrl = cover,
                     SizeBytes = size,
                     // EnrichAsync and WriteMetadataAsync ran before this hook, so these are the
@@ -575,6 +592,7 @@ public abstract class BaseDownloadService : IDownloadService
                 slot = await concurrency.Transfers.EnterAsync(CancellationToken.None);
             }
             string landedPath;
+            ReplacingPathLocal.Value = replacement?.OriginalPath;
             try
             {
                 landedPath = await DownloadTrackAsync(
@@ -994,9 +1012,14 @@ public abstract class BaseDownloadService : IDownloadService
             UpgradingCount = upgrading,
         };
 
-    /// <summary>Whether this download's source can deliver a lossless copy at all.</summary>
+    /// <summary>
+    /// Whether a lossless copy can be looked for: an owned lossy copy is then queued for Better
+    /// quality rather than kept as it is. That runs through the upgrade sources (Soulseek, Lidarr),
+    /// whichever source this download uses. Without them, as before: this download's own source.
+    /// </summary>
     private bool SourceCanBeLossless(DownloadSource? sourceOverride) =>
-        (sourceOverride ?? SubsonicSettings.DownloadSource) is DownloadSource.Soulseek or DownloadSource.SoulseekThenYouTube;
+        OptionalService<Octo.Services.Library.UpgradeSources>()?.Ready
+        ?? (sourceOverride ?? SubsonicSettings.DownloadSource) is DownloadSource.Soulseek or DownloadSource.SoulseekThenYouTube;
 
     /// <summary>Whether Better quality may run for the person who asked: every gate of the action.</summary>
     private bool UpgradeAllowed(IReadOnlyList<string>? requestedBy) =>

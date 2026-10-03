@@ -29,7 +29,7 @@ public partial class SubsonicResponseBuilder
     /// contract with the Octo app.
     /// </summary>
     public IActionResult CreateLibraryActionsResponse(LibraryActionSettings settings, string? username, int parallel = 1,
-        bool upgradeReady = true) =>
+        bool upgradeReady = true, string upgradeSource = "Soulseek") =>
         CreateJsonResponse(new Dictionary<string, object?>
         {
             ["status"] = "ok",
@@ -47,7 +47,7 @@ public partial class SubsonicResponseBuilder
                 // How many upgrades run at once, which is how many downloads may.
                 ["parallel"] = parallel,
                 // Where an upgrade looks, for a client to say so rather than assume. Null when upgrade is not offered.
-                ["upgradeSource"] = upgradeReady ? LibraryActionExecutor.UpgradeSourceName : null,
+                ["upgradeSource"] = upgradeReady ? upgradeSource : null,
             },
         });
 

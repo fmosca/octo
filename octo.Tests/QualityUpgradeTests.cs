@@ -11,18 +11,11 @@ using Octo.Services.Soulseek;
 namespace Octo.Tests;
 
 /// <summary>
-/// Better quality looks for a lossless copy on Soulseek only, and searches the slow, wide way, and
-/// the weekly upgrade trickles lossy songs through it while nothing else is downloading (#70).
+/// Better quality searches the slow, wide way, and the weekly upgrade trickles lossy songs through
+/// it while nothing else is downloading (#70). Where it looks is UpgradeSourcesTests.
 /// </summary>
 public class QualityUpgradeTests
 {
-    [Fact]
-    public void BetterQualityIsSoulseekOnlyAndSearchesTheSlowWay()
-    {
-        Assert.Equal((DownloadSource.Soulseek, true), LibraryActionExecutor.ReplacementPlan(LibraryAction.BetterQuality));
-        Assert.Equal(((DownloadSource?)null, false), LibraryActionExecutor.ReplacementPlan(LibraryAction.WrongSong));
-    }
-
     [Fact]
     public async Task TheWorkerHandsTheSourceAndUpgradeSearchToTheDownload()
     {

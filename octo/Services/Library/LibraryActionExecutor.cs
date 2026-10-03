@@ -66,6 +66,7 @@ public sealed class LibraryActionExecutor
     private readonly Octo.Services.Fingerprint.SpectrumAnalyzer? _spectrum;
     private readonly StarOnArrival? _stars;
     private readonly ISoulseekLink? _soulseekLink;
+    private readonly UpgradeSources? _sources;
     private int _reconciled;
 
     // The songs a library action is working on right now, by the original's full path. The
@@ -96,9 +97,11 @@ public sealed class LibraryActionExecutor
         NoticeQueue? notices = null,
         Octo.Services.Fingerprint.SpectrumAnalyzer? spectrum = null,
         StarOnArrival? stars = null,
-        ISoulseekLink? soulseekLink = null)
+        ISoulseekLink? soulseekLink = null,
+        UpgradeSources? sources = null)
     {
         _soulseekLink = soulseekLink;
+        _sources = sources;
         _notices = notices;
         _spectrum = spectrum;
         _stars = stars;
@@ -184,12 +187,18 @@ public sealed class LibraryActionExecutor
             return new(LibraryActionState.Rehearsed, detail);
         }
 
-        // Better quality during a Soulseek outage could only fail, and before this it was journaled
-        // as "no FLAC found" every sweep. Not consumed, so the request stays and runs once slskd is
-        // back. Nothing is written and no file is touched.
-        if (request.Action == LibraryAction.BetterQuality && _soulseekLink is not null
-            && (await _soulseekLink.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn)
-            return new(LibraryActionState.Failed, SoulseekLink.OfflineText, LibraryActionCodes.SoulseekOffline);
+        // Better quality with every source out could only fail, and before this it was journaled as
+        // "no FLAC found" every sweep. Not consumed, so the request stays and runs once slskd is
+        // back. Nothing is written and no file is touched. With Lidarr also set up, a Soulseek
+        // outage just means Lidarr alone is asked.
+        if (request.Action == LibraryAction.BetterQuality)
+        {
+            var sources = await SourcesForAsync(request.Action, ct);
+            if (sources.Count == 0 && await WaitingForSoulseekAsync(ct))
+                return new(LibraryActionState.Failed, SoulseekLink.OfflineText, LibraryActionCodes.SoulseekOffline);
+            if (sources.Count == 0)
+                return new(LibraryActionState.Failed, "Better quality has no source set up: it needs slskd or Lidarr.");
+        }
 
         // Taken before the Pending entry is written: a second action on the same file content
         // has the same journal key and would overwrite the first one's entry.
@@ -280,6 +289,9 @@ public sealed class LibraryActionExecutor
         var startedLastWrite = File.GetLastWriteTimeUtc(original.AbsolutePath);
         string? quarantinePath = null;
         ReplacementHandoff? handoff = null;
+        // What each source tried before the last one said, for the words when all of them miss.
+        var misses = new List<string>();
+        string Earlier() => misses.Count == 0 ? "" : $" Before that, {string.Join("; ", misses)}.";
 
         // Judges the new file and, only when it passes, moves the original out. Called by the
         // download just before the replacement moves in, or here for one that ran without the
@@ -331,13 +343,35 @@ public sealed class LibraryActionExecutor
             // fetching. The handoff skips that, so only a download without one needs this.
             if (handoff is null) await _library.ForgetMappingAsync(original.AbsolutePath);
 
-            var plan = ReplacementPlan(request.Action);
-            var replacement = await _acquisitions.Enqueue(
-                SoulseekMetadataService.ProviderName, externalId, isStar: true,
-                triggerAlbumDownload: false, forcePermanent: true,
-                sourceOverride: plan.Source, notifyOnFailure: false,
-                requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy ? request.Username : null,
-                upgradeSearch: plan.UpgradeSearch, replacement: handoff);
+            // In order, and on to the next when one finds nothing or its copy fails the checks:
+            // Soulseek first, then Lidarr, for Better quality with both set up.
+            var sources = await SourcesForAsync(request.Action, ct);
+            var upgradeSearch = request.Action == LibraryAction.BetterQuality;
+            string? replacement = null;
+            for (var attempt = 0; ; attempt++)
+            {
+                var source = sources[attempt];
+                try
+                {
+                    replacement = await _acquisitions.Enqueue(
+                        SoulseekMetadataService.ProviderName, externalId, isStar: true,
+                        triggerAlbumDownload: false, forcePermanent: true,
+                        sourceOverride: source, notifyOnFailure: false,
+                        requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy ? request.Username : null,
+                        upgradeSearch: upgradeSearch, replacement: handoff);
+                    break;
+                }
+                catch (Exception ex) when (attempt < sources.Count - 1 && handoff?.RevealedPath is null
+                                           && ex is FileNotFoundException or ReplacementRejectedException
+                                               or InvalidOperationException)
+                {
+                    var why = ex is ReplacementRejectedException rejected ? rejected.Problem : ex.Message;
+                    misses.Add($"{UpgradeSources.Word(source ?? DownloadSource.Soulseek)}: {why}");
+                    _logger.LogInformation("Library action {Action}: {Source} had no copy of '{Artist} - {Title}' ({Why}); trying {Next}",
+                        request.Action, UpgradeSources.Word(source ?? DownloadSource.Soulseek), original.Artist, original.Title,
+                        why, UpgradeSources.Word(sources[attempt + 1] ?? DownloadSource.Soulseek));
+                }
+            }
 
             // A handoff that was never used: this joined a download of the same song already in
             // flight, whose file belongs to whoever started it. Judging it here could quarantine
@@ -358,11 +392,12 @@ public sealed class LibraryActionExecutor
             return new(new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(replacement)}."),
                 quarantinePath, replacement);
         }
+
         catch (ReplacementRejectedException rejected)
         {
             // Refused before it was ever in the library; the original never moved.
             LogRefused(request, original, rejected.Problem);
-            return new(new(LibraryActionState.Failed, $"The replacement {rejected.Problem}, so nothing changed."), null, null);
+            return new(new(LibraryActionState.Failed, $"The replacement {rejected.Problem}, so nothing changed.{Earlier()}"), null, null);
         }
         catch (Exception ex)
         {
@@ -378,7 +413,7 @@ public sealed class LibraryActionExecutor
             // A search that found nothing usable throws FileNotFoundException, passed through the
             // queue unchanged, and the upgrade queue reports exactly that case as "no FLAC found".
             if (quarantinePath is null)
-                return new(new(LibraryActionState.Failed, $"Could not find a replacement ({ex.Message}), so nothing changed.",
+                return new(new(LibraryActionState.Failed, $"Could not find a replacement ({ex.Message}), so nothing changed.{Earlier()}",
                     ex is FileNotFoundException ? LibraryActionCodes.NoReplacement : null), null, null);
             // Out, and nothing moved in: back to its exact path, whose row Navidrome still has.
             return new(RestoreOriginal(quarantinePath, $"Could not finish the replacement ({ex.Message}), so nothing changed."),
@@ -432,32 +467,30 @@ public sealed class LibraryActionExecutor
     }
 
     /// <summary>
-    /// Where a replacement may come from and how hard to look. Better quality is Soulseek only: the
-    /// YouTube fallback can only produce an MP3, which Unacceptable rejects as not lossless, so
-    /// falling back spent a whole download on a verdict known in advance. It also searches the slow
-    /// way, because nobody is waiting and the quick search is what found nothing (#70).
+    /// Where a replacement may come from, in the order tried. Better quality uses the upgrade
+    /// sources that are set up and can search now (never YouTube, whose MP3 a lossless check
+    /// refuses anyway), and searches the slow way, because nobody is waiting (#70). Wrong song and
+    /// wrong version use the download source, except that Lidarr there means Lidarr too: before,
+    /// those replacements went to Soulseek whatever was configured. A null entry is the default.
     /// </summary>
-    internal static (DownloadSource? Source, bool UpgradeSearch) ReplacementPlan(LibraryAction action) =>
-        action == LibraryAction.BetterQuality ? (DownloadSource.Soulseek, true) : (null, false);
-
-    /// <summary>Where Better quality looks for its copies, in words, read from the plan above so
-    /// the dashboard and the apps never name a source on their own.</summary>
-    public static string UpgradeSourceName => SourceName(ReplacementPlan(LibraryAction.BetterQuality).Source);
-
-    internal static string SourceName(DownloadSource? source) => source switch
+    internal async Task<IReadOnlyList<DownloadSource?>> SourcesForAsync(LibraryAction action, CancellationToken ct)
     {
-        DownloadSource.YouTube => "YouTube",
-        DownloadSource.Lidarr => "Lidarr",
-        _ => "Soulseek",
-    };
+        if (action == LibraryAction.BetterQuality)
+        {
+            // Without the plan (hosts that build the executor by hand): Soulseek, as it always was.
+            if (_sources is null) return await SoulseekOutAsync(ct) ? [] : [DownloadSource.Soulseek];
+            return (await _sources.AvailableAsync(ct)).Select(s => (DownloadSource?)s).ToList();
+        }
+        var lidarrHearts = _subsonicSettings.CurrentValue.DownloadSource == DownloadSource.Lidarr
+                           && _sources?.Plan().Contains(DownloadSource.Lidarr) == true;
+        return lidarrHearts ? [DownloadSource.Lidarr, null] : [null];
+    }
 
-    /// <summary>
-    /// Whether that source is set up at all. Better quality searches Soulseek, so an install with
-    /// no slskd (one that downloads through Lidarr, say) is not offered it: every job would fail.
-    /// </summary>
-    public static bool UpgradeSourceReady(SoulseekSettings soulseek) =>
-        !string.IsNullOrWhiteSpace(soulseek.BaseUrl)
-        && !string.IsNullOrWhiteSpace(soulseek.Username) && !string.IsNullOrWhiteSpace(soulseek.Password);
+    private async Task<bool> WaitingForSoulseekAsync(CancellationToken ct) =>
+        _sources is not null ? await _sources.WaitingForSoulseekAsync(ct) : await SoulseekOutAsync(ct);
+
+    private async Task<bool> SoulseekOutAsync(CancellationToken ct) =>
+        _soulseekLink is not null && (await _soulseekLink.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
 
     /// <summary>Whether the person asking for a replacement had favourited the song. False when
     /// nothing will replace it, when the request carries no sign-in (playlist actions never

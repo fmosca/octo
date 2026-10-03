@@ -219,6 +219,8 @@ builder.Services.AddSingleton<Octo.Services.Library.NavidromeSongPathResolver>()
 // Recovery before anything that needs recovering from: the quarantine and the journal land
 // with the settings, and only then does anything act on a library file.
 builder.Services.AddSingleton<Octo.Services.Library.LibraryActionQuarantine>();
+// Where Better quality looks: Soulseek, Lidarr, or both in that order.
+builder.Services.AddSingleton<Octo.Services.Library.UpgradeSources>();
 builder.Services.AddSingleton<Octo.Services.Library.LibraryActionExecutor>();
 // Scoped, because SubsonicProxyService is: it depends on IHttpContextAccessor.
 builder.Services.AddScoped<Octo.Services.Library.LibraryActionPlaylistProvisioner>();
@@ -336,6 +338,10 @@ builder.Services.AddSingleton<IMusicMetadataService, SoulseekMetadataService>();
 builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
 builder.Services.AddSingleton<LidarrClient>();
 builder.Services.AddSingleton<ILidarrHeartAcquisitionService, LidarrHeartAcquisitionService>();
+// Lidarr as a source for one song at a time (Better quality, wrong song), and which albums a
+// heart or an upgrade is working on, so the two never share one.
+builder.Services.AddSingleton<Octo.Services.Lidarr.LidarrAlbumClaims>();
+builder.Services.AddSingleton<Octo.Services.Lidarr.ILidarrTrackFetcher, Octo.Services.Lidarr.LidarrTrackFetcher>();
 builder.Services.AddSingleton<HeartAcquisitionCoordinator>();
 builder.Services.AddHostedService<Octo.Services.Common.SoulseekHoldResumer>();
 

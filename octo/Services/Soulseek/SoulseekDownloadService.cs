@@ -172,6 +172,11 @@ public class SoulseekDownloadService : BaseDownloadService
                 $"Cannot download '{song.Artist} - {song.Title}': missing artist/title in external id");
         var profile = upgradeSearch ? SearchProfile.Upgrade(_settings) : SearchProfile.Interactive(_settings);
 
+        // Only ever asked for by name: a library action's replacement. DownloadSource set to
+        // Lidarr means hearts go to Lidarr, and every other download still uses Soulseek below.
+        if (sourceOverride == DownloadSource.Lidarr)
+            return await DownloadViaLidarrAsync(routing, song, upgradeSearch, cancellationToken);
+
         // DownloadOnStar decides WHETHER to download; DownloadSource decides FROM WHERE.
         switch (sourceOverride ?? SubsonicSettings.DownloadSource)
         {
@@ -213,6 +218,24 @@ public class SoulseekDownloadService : BaseDownloadService
     /// skips the library-action quarantine.
     /// </summary>
     internal const string IncomingFolderName = ".octo-incoming";
+
+    /// <summary>
+    /// One song through Lidarr, copied into a job folder under the incoming dot folder, which no
+    /// scan looks at. From there it is identified, checked and swapped in like any download.
+    /// </summary>
+    private async Task<string> DownloadViaLidarrAsync(SoulseekRouting routing, Song song, bool losslessOnly,
+        CancellationToken cancellationToken)
+    {
+        var fetcher = OptionalService<Octo.Services.Lidarr.ILidarrTrackFetcher>()
+            ?? throw new InvalidOperationException("Lidarr is not available on this server.");
+        if (song is { ExternalProvider: { Length: > 0 } provider, ExternalId: { Length: > 0 } id })
+            Track(t => t.Stage(provider, id, AcquisitionState.Searching, "Lidarr", "Lidarr is searching the album"));
+        var jobDir = Path.Combine(DownloadPath, IncomingFolderName, "lidarr", Guid.NewGuid().ToString("N"));
+        FetchedFrom.AddOrUpdate(song, "Lidarr");
+        return await fetcher.FetchAsync(new Octo.Services.Lidarr.LidarrTrackRequest(
+            routing.Artist!, routing.Title!, routing.Album, routing.Duration ?? song.Duration, losslessOnly, ReplacingPath),
+            jobDir, cancellationToken);
+    }
 
     // Lossy MP3 via the yt-dlp shim's /download. The shim writes <dest>.mp3 into the staging
     // folder with clean tags and a cover; PlaceInLibraryAsync moves it once the tags are settled.

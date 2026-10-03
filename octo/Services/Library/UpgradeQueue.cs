@@ -278,9 +278,10 @@ public sealed class UpgradeWorker : BackgroundService
     public UpgradeWorker(UpgradeQueue queue, LibraryActionExecutor executor, NavidromeSongPathResolver resolver,
         ILogger<UpgradeWorker> logger, DownloadConcurrency? concurrency = null, ISoulseekLink? soulseek = null,
         AcquisitionTracker? tracker = null, QualityUpgradeStore? attempts = null,
-        IOptionsMonitor<SoulseekSettings>? soulseekSettings = null)
+        IOptionsMonitor<SoulseekSettings>? soulseekSettings = null, UpgradeSources? sources = null)
     {
         _soulseekSettings = soulseekSettings;
+        SourceName = () => sources?.Name ?? "Soulseek";
         _queue = queue;
         _logger = logger;
         _tracker = tracker;
@@ -288,8 +289,9 @@ public sealed class UpgradeWorker : BackgroundService
         Apply = (request, ct) => executor.ApplyAsync(request, ct);
         Describe = async (id, ct) => await resolver.ResolveAsync(id, ct);
         Width = () => Math.Max(1, concurrency?.Current ?? 1);
-        SoulseekOffline = async ct => soulseek is not null
-            && (await soulseek.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
+        // Waiting only when every source is out: with Lidarr set up, a Soulseek outage leaves Lidarr.
+        SoulseekOffline = async ct => sources is not null ? await sources.WaitingForSoulseekAsync(ct)
+            : soulseek is not null && (await soulseek.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
     }
 
     // Seams, the same way the weekly upgrade exposes them.
@@ -297,6 +299,7 @@ public sealed class UpgradeWorker : BackgroundService
     internal Func<string, CancellationToken, Task<ResolvedSongFile?>> Describe { get; set; }
     internal Func<int> Width { get; set; }
     internal Func<CancellationToken, Task<bool>> SoulseekOffline { get; set; }
+    internal Func<string> SourceName { get; set; }
 
     /// <summary>Jobs this worker is running now.</summary>
     internal int Running
@@ -360,7 +363,7 @@ public sealed class UpgradeWorker : BackgroundService
                     UpgradeStates.Waiting => "Waiting for Soulseek",
                     UpgradeStates.Upgraded when result?.After is { } after =>
                         $"Now {after}{Size(result.AfterBytes)}, was {result.Before ?? job.Suffix?.ToUpperInvariant()}{Size(result.BeforeBytes)}.",
-                    UpgradeStates.NotFound => $"No lossless copy of this song on {LibraryActionExecutor.UpgradeSourceName} right now. Your copy is unchanged.",
+                    UpgradeStates.NotFound => $"No lossless copy of this song on {SourceName()} right now. Your copy is unchanged.",
                     _ => outcome.Detail,
                 };
             });

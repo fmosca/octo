@@ -76,10 +76,14 @@ public class SubsonicController : ControllerBase
     private readonly Octo.Services.Library.UpgradeQueue? _upgradeQueue;
     private readonly DownloadConcurrency? _downloadConcurrency;
     private readonly IOptionsMonitor<SoulseekSettings>? _soulseekSettings;
+    private readonly Octo.Services.Library.UpgradeSources? _upgradeSources;
 
-    /// <summary>Whether the source Better quality searches is set up here at all.</summary>
-    private bool UpgradeReady => _soulseekSettings is null
-        || Octo.Services.Library.LibraryActionExecutor.UpgradeSourceReady(_soulseekSettings.CurrentValue);
+    /// <summary>Whether a source Better quality searches (Soulseek, Lidarr) is set up here at all.</summary>
+    private bool UpgradeReady => _upgradeSources?.Ready
+        ?? (_soulseekSettings is null || Octo.Services.Library.UpgradeSources.SoulseekSetUp(_soulseekSettings.CurrentValue));
+
+    /// <summary>Where Better quality looks, in words: "Soulseek", "Lidarr", or "Soulseek or Lidarr".</summary>
+    private string UpgradeSourceName => _upgradeSources?.Name ?? "Soulseek";
     private readonly SearchSongOrderCache _searchSongOrders;
     private readonly RequestIdentity _requestIdentity;
     private readonly RecentScrobbles _recentScrobbles;
@@ -132,9 +136,11 @@ public class SubsonicController : ControllerBase
         StarOnArrival? starOnArrival = null,
         Octo.Services.Library.UpgradeQueue? upgradeQueue = null,
         DownloadConcurrency? downloadConcurrency = null,
-        IOptionsMonitor<SoulseekSettings>? soulseekSettings = null)
+        IOptionsMonitor<SoulseekSettings>? soulseekSettings = null,
+        Octo.Services.Library.UpgradeSources? upgradeSources = null)
     {
         _soulseekSettings = soulseekSettings;
+        _upgradeSources = upgradeSources;
         _upgradeQueue = upgradeQueue;
         _downloadConcurrency = downloadConcurrency;
         _starOnArrival = starOnArrival;
@@ -2606,7 +2612,7 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         if (await CheckCallerAsync(parameters) is { } refused) return refused;
         return _responseBuilder.CreateLibraryActionsResponse(_libraryActionSettings.CurrentValue,
-            parameters.GetValueOrDefault("u"), _downloadConcurrency?.Current ?? 1, UpgradeReady);
+            parameters.GetValueOrDefault("u"), _downloadConcurrency?.Current ?? 1, UpgradeReady, UpgradeSourceName);
     }
 
     /// <summary>
@@ -2694,7 +2700,7 @@ public class SubsonicController : ControllerBase
             : !settings.IsAllowed(username) ? $"{username} is not on the library actions allowed list."
             : !settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled) ? "Better quality is not switched on."
             : settings.DryRun ? "Library actions only rehearse while dry run is on, so nothing would change."
-            : !UpgradeReady ? $"Better quality looks for copies on {Octo.Services.Library.LibraryActionExecutor.UpgradeSourceName}, which is not set up on this server."
+            : !UpgradeReady ? $"Better quality looks for copies on {UpgradeSourceName}, which is not set up on this server."
             : null;
         if (refusal is not null) return _responseBuilder.CreateLibraryActionResponse(id, "skipped", refusal, action);
 
@@ -2702,7 +2708,7 @@ public class SubsonicController : ControllerBase
         if (jobs.Count == 0) return _responseBuilder.CreateLibraryActionResponse(id, "skipped", full, action);
         _logger.LogInformation("Higher quality for {Id} asked by {User} from the app: {State}", id, username, jobs[0].State);
         return _responseBuilder.CreateLibraryActionResponse(id, "queued",
-            $"Looking for a higher quality copy on {Octo.Services.Library.LibraryActionExecutor.UpgradeSourceName}.", action);
+            $"Looking for a higher quality copy on {UpgradeSourceName}.", action);
     }
 
     /// <summary>
