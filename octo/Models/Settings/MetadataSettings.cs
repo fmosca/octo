@@ -69,25 +69,53 @@ public class MetadataSettings
     public bool FetchLyrics { get; set; } = false;
 
     /// <summary>
-    /// Lyrics sources, in order: kugou (word-timed, deep catalogue, an unofficial API), lrclib
-    /// (open, line-synced), netease (synced and deep on non-Western and older music, but an
-    /// unofficial API, so it only runs when listed), lyricsovh (plain text). Timed beats plain,
-    /// so a later source is only asked while nothing earlier had timing. Leaving a source out
-    /// switches it off.
+    /// Lyrics sources, in order: song (the lyrics the song already has, in its tags or a file
+    /// beside it, as Navidrome serves them), kugou (word-timed, deep catalogue, an unofficial
+    /// API), lrclib (open, line-synced), netease (synced and deep on non-Western and older music,
+    /// but an unofficial API, so it only runs when listed), lyricsovh (plain text). Timed beats
+    /// plain, so a later source is only asked while nothing earlier had timing. Leaving a source
+    /// out switches it off, except song, which cannot be switched off: left out, it is first.
     /// Environment variable: LYRICS_SOURCES
     /// </summary>
     public string LyricsSources { get; set; } = DefaultLyricsSources;
 
-    public const string DefaultLyricsSources = "kugou,lrclib,lyricsovh";
+    public const string DefaultLyricsSources = "song,kugou,lrclib,lyricsovh";
 
-    public static readonly string[] KnownLyricsSources = ["kugou", "lrclib", "netease", "lyricsovh"];
+    /// <summary>The song's own lyrics as a place in the order: in its tags or a file beside it.</summary>
+    public const string SongLyricsSource = "song";
 
-    public IReadOnlyList<string> EffectiveLyricsSources =>
-        (LyricsSources ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(source => source.ToLowerInvariant())
-            .Where(source => KnownLyricsSources.Contains(source))
-            .Distinct()
-            .ToList();
+    public static readonly string[] KnownLyricsSources = [SongLyricsSource, "kugou", "lrclib", "netease", "lyricsovh"];
+
+    /// <summary>The sources in order, the song's own always among them (first when the saved
+    /// order leaves it out, as every order saved before it was a choice does).</summary>
+    public IReadOnlyList<string> EffectiveLyricsSources
+    {
+        get
+        {
+            var listed = (LyricsSources ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(source => source.ToLowerInvariant())
+                .Where(source => KnownLyricsSources.Contains(source))
+                .Distinct()
+                .ToList();
+            if (!listed.Contains(SongLyricsSource)) listed.Insert(0, SongLyricsSource);
+            return listed;
+        }
+    }
+
+    /// <summary>
+    /// Where lyrics Octo finds for a song are saved: beside (a .lrc or .txt next to the song, the
+    /// default), inside (in the song's own tags), or both. Inside rewrites the audio file, which
+    /// on a cloud mount uploads it again, and Navidrome sees it only after a scan, which Octo
+    /// asks for. Octo marks what it writes either way, and never replaces lyrics it did not write.
+    /// Environment variable: LYRICS_SAVE_TO
+    /// </summary>
+    public string SaveLyricsTo { get; set; } = LyricsSaveTo.Beside;
+
+    /// <summary>Whether found lyrics go in a file beside the song.</summary>
+    public bool SavesLyricsBeside => LyricsSaveTo.Normalize(SaveLyricsTo) != LyricsSaveTo.Inside;
+
+    /// <summary>Whether found lyrics go in the song's own tags.</summary>
+    public bool SavesLyricsInside => LyricsSaveTo.Normalize(SaveLyricsTo) != LyricsSaveTo.Beside;
 
     /// <summary>
     /// Word-timed lyrics beat line-timed ones from an earlier source: with this on, a source that
@@ -166,4 +194,20 @@ public class MetadataSettings
     /// Environment variable: TAG_REHEARSAL
     /// </summary>
     public bool TagRehearsal { get; set; } = false;
+}
+
+/// <summary>The places found lyrics can be saved to: <see cref="MetadataSettings.SaveLyricsTo"/>.</summary>
+public static class LyricsSaveTo
+{
+    public const string Beside = "beside";
+    public const string Inside = "inside";
+    public const string Both = "both";
+
+    /// <summary>One of the three; anything else is beside, the one that never touches a song.</summary>
+    public static string Normalize(string? value) => (value ?? "").Trim().ToLowerInvariant() switch
+    {
+        Inside => Inside,
+        Both => Both,
+        _ => Beside,
+    };
 }

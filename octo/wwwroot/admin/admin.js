@@ -3539,6 +3539,7 @@ document.getElementById('setup-summary')?.addEventListener('click', () => {
 // The order is the saved LYRICS_SOURCES string: the sources that are on, top first. A source
 // that is off keeps its place on the page until the next load, where it goes to the bottom.
 const lyricsSourceMeta = {
+  song: { title: "The song’s own lyrics", detail: 'Already in its tags or a file beside it. Always on; rank it to decide when they win.', fixed: true },
   kugou: { title: 'KuGou', detail: 'Word-timed lyrics for most songs. An unofficial API that can change without notice.' },
   lrclib: { title: 'LRCLIB', detail: 'Open and keyless. Timed line by line, now and then word by word.' },
   netease: { title: 'NetEase', detail: 'Deep on non-Western and older music. An unofficial API.' },
@@ -3551,7 +3552,8 @@ function renderLyricsSources(saved) {
   if (!list) return;
   if (saved !== undefined) {
     const on = String(saved ?? '').split(',').map(name => name.trim().toLowerCase()).filter(name => lyricsSourceMeta[name]);
-    const unique = [...new Set(on)];
+    // The song's own lyrics are always in the order: first when an older saved order leaves them out.
+    const unique = [...new Set(on.includes('song') ? on : ['song', ...on])];
     lyricsSources = [
       ...unique.map(name => ({ name, on: true })),
       ...Object.keys(lyricsSourceMeta).filter(name => !unique.includes(name)).map(name => ({ name, on: false })),
@@ -3571,10 +3573,10 @@ function renderLyricsSources(saved) {
           <span class="source-title">${esc(meta.title)}</span>
           <span class="source-detail">${esc(meta.detail)}</span>
         </span>
-        <label class="switch source-kind-switch">
+        ${meta.fixed ? '' : `<label class="switch source-kind-switch">
           <input type="checkbox" data-lyrics-source-on aria-label="Use ${esc(meta.title)}" ${source.on ? 'checked' : ''} />
           <span class="sw-track"></span><span class="sw-thumb"></span>
-        </label>
+        </label>`}
       </div>`;
   }).join('');
   syncLyricsSourcesInput();
@@ -3588,9 +3590,10 @@ function syncLyricsSourcesInput() {
     input.value = value;
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
+  const looksUp = lyricsSources.some(source => source.on && !lyricsSourceMeta[source.name].fixed);
   if (help) {
-    help.hidden = value.length > 0;
-    help.textContent = value.length ? '' : 'Every source is off, so no lyrics will be found.';
+    help.hidden = looksUp;
+    help.textContent = looksUp ? '' : 'Every source is off, so only the lyrics songs already have will show.';
   }
 }
 

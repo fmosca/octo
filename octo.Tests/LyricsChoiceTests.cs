@@ -73,10 +73,14 @@ public sealed class LyricsChoiceTests : IDisposable
     {
         public int Pings;
 
+        /// <summary>Whether each lyrics call to Navidrome asked for word cues.</summary>
+        public readonly System.Collections.Concurrent.ConcurrentQueue<bool> LyricsAskedEnhanced = new();
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var uri = request.RequestUri!;
             var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+            if (uri.AbsolutePath == "/rest/getLyricsBySongId") LyricsAskedEnhanced.Enqueue(query["enhanced"] == "true");
             var good = query["t"] == "good";
             var json = query["f"] == "json";
             const string refused = """{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}""";
@@ -114,6 +118,11 @@ public sealed class LyricsChoiceTests : IDisposable
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "octo-lyrics-choice-web-" + Guid.NewGuid());
         public FakeNavidrome Navidrome { get; } = new();
 
+        /// <summary>LYRICS_SOURCES, when not just the sources given, in their order.</summary>
+        public string? Order { get; init; }
+
+        public bool PreferWords { get; init; } = true;
+
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             Directory.CreateDirectory(_directory);
@@ -126,7 +135,8 @@ public sealed class LyricsChoiceTests : IDisposable
                     ["YouTube:ShimUrl"] = "http://127.0.0.1:1",
                     ["Library:DownloadPath"] = _directory,
                     ["Metadata:FetchLyrics"] = fetch ? "true" : "false",
-                    ["Metadata:LyricsSources"] = string.Join(',', sources.Select(source => source.Key)),
+                    ["Metadata:LyricsSources"] = Order ?? string.Join(',', sources.Select(source => source.Key)),
+                    ["Metadata:PreferWordTimedLyrics"] = PreferWords ? "true" : "false",
                 }));
             builder.ConfigureServices(services =>
             {
@@ -321,6 +331,93 @@ public sealed class LyricsChoiceTests : IDisposable
         var body = await client.GetStringAsync($"/rest/getLyricsBySongId?id=lib1&f=json&{Auth()}");
 
         Assert.Equal(FakeNavidrome.LibraryLyricsJson, body);
+    }
+
+    // ---- The song's own lyrics, ranked (the lyrics finder had to be used every time) --------
+
+    private static ChoosableSource WordTimedKugou()
+    {
+        var source = Kugou();
+        source.Answer = () => new LyricsLookup(new LyricsResult("KuGou", "[00:01.00]<00:01.00>kugou <00:01.50>words<00:02.00>", null, false), false);
+        return source;
+    }
+
+    /// <summary>Navidrome has line-timed lyrics for the song (in its tags), KuGou word-timed ones,
+    /// and word timing is preferred: the app gets KuGou's, words and all.</summary>
+    [Fact]
+    public async Task LibrarySong_LineTimedOwnLyrics_LoseToWordTimedOnesWhenWordsArePreferred()
+    {
+        await using var factory = new Factory(fetch: true, WordTimedKugou());
+        using var client = factory.CreateClient();
+
+        var response = await GetJson(client, $"/rest/getLyricsBySongId?id=lib1&f=json&enhanced=true&{Auth()}");
+
+        var lyrics = response.GetProperty("lyricsList").GetProperty("structuredLyrics")[0];
+        Assert.Equal("kugou words", lyrics.GetProperty("line")[0].GetProperty("value").GetString());
+        Assert.Equal(["kugou ", "words"], lyrics.GetProperty("cueLine")[0].GetProperty("cue").EnumerateArray()
+            .Select(cue => cue.GetProperty("value").GetString()));
+    }
+
+    /// <summary>Word timing not preferred and the song first: its own line-timed lyrics stand,
+    /// and no source is asked.</summary>
+    [Fact]
+    public async Task LibrarySong_OwnLyricsFirst_StandWithoutAskingASource()
+    {
+        var kugou = WordTimedKugou();
+        await using var factory = new Factory(fetch: true, kugou) { Order = "song,kugou", PreferWords = false };
+        using var client = factory.CreateClient();
+
+        var body = await client.GetStringAsync($"/rest/getLyricsBySongId?id=lib1&f=json&enhanced=true&{Auth()}");
+
+        Assert.Contains("navidrome's own", body);
+        Assert.Equal(0, kugou.Finds);
+    }
+
+    /// <summary>KuGou ranked above the song: its lyrics win even at the same timing.</summary>
+    [Fact]
+    public async Task LibrarySong_SourceRankedAboveTheSong_Wins()
+    {
+        await using var factory = new Factory(fetch: true, Kugou()) { Order = "kugou,song", PreferWords = false };
+        using var client = factory.CreateClient();
+
+        var body = await client.GetStringAsync($"/rest/getLyricsBySongId?id=lib1&f=json&{Auth()}");
+
+        Assert.Contains("automatic words", body);
+        Assert.DoesNotContain("navidrome's own", body);
+    }
+
+    /// <summary>Navidrome is always asked for word cues, so the song's own timing is known, and a
+    /// client that did not ask for them still gets Navidrome's answer without.</summary>
+    [Fact]
+    public async Task LibrarySong_NavidromeIsAskedForCues_ButAStrictClientGetsNone()
+    {
+        await using var factory = new Factory(fetch: true, Kugou()) { Order = "song,kugou", PreferWords = false };
+        using var client = factory.CreateClient();
+
+        var body = await client.GetStringAsync($"/rest/getLyricsBySongId?id=lib1&f=json&{Auth()}");
+
+        Assert.Equal([true], factory.Navidrome.LyricsAskedEnhanced);
+        Assert.DoesNotContain("cueLine", body);
+    }
+
+    /// <summary>A pin made when the song had another id (its file was replaced by a better copy)
+    /// still answers for it, found by artist and title, and Automatic clears it for good.</summary>
+    [Fact]
+    public async Task Pin_FollowsTheSongToItsNewId_AndAutomaticClearsIt()
+    {
+        await using var factory = new Factory(fetch: true, Kugou());
+        using var client = factory.CreateClient();
+        var store = factory.Services.GetRequiredService<LyricsChoiceStore>();
+        store.Set(new LyricsPin("old-id", "kugou:1.a", "KuGou", "[00:01.00]<00:01.00>pinned <00:01.50>words", null,
+            "Some Artist", "Library Song", "alice", DateTime.UtcNow));
+
+        var pinned = await client.GetStringAsync($"/rest/getLyricsBySongId?id=lib1&f=json&{Auth()}");
+        var listed = await GetJson(client, $"/rest/getLyricsCandidates?id=lib1&{Auth()}");
+        await GetJson(client, $"/rest/setLyricsChoice?id=lib1&candidate=auto&{Auth()}");
+
+        Assert.Contains("pinned words", pinned);
+        Assert.Equal("kugou:1.a", listed.GetProperty("lyricsCandidates").GetProperty("choice").GetString());
+        Assert.Empty(store.All());
     }
 
     /// <summary>A source that takes longer than the interactive budget to answer.</summary>

@@ -22,7 +22,8 @@ public sealed class LyricsLibraryRun
     /// songs" was on when the run started.</summary>
     public string Scope { get; set; } = "OctoDownloads";
 
-    /// <summary>Also look again for word timing where Octo wrote line-timed lyrics.</summary>
+    /// <summary>Also look again where a song's lyrics are weaker than the sources would choose
+    /// now: plain, or line-timed while word timing is preferred.</summary>
     public bool Upgrade { get; set; }
 
     public DateTime? StartedUtc { get; set; }
@@ -154,7 +155,9 @@ public sealed record LyricsLibraryRequest(bool Upgrade, bool Resume = false);
 
 /// <summary>
 /// "Find lyrics for the library": walks the songs that have no lyrics file and no lyrics in
-/// their tags, and writes a lyrics file beside each one the sources have. One song at a time
+/// their tags, and saves lyrics for each one the sources have (LYRICS_SAVE_TO says where). With
+/// the upgrade box ticked, songs whose lyrics are weaker than the sources would choose are looked
+/// up again too. One song at a time
 /// with a pause between, so a library of thousands never floods a lyrics service; stoppable
 /// from the dashboard, and resumable after a stop or a restart from where it was.
 ///
@@ -339,7 +342,10 @@ public sealed class LyricsLibraryWorker : BackgroundService
                         run.Written++;
                         if (write.Result?.Timing == LyricsTiming.Word) run.WordTimed++;
                         break;
-                    case LyricsWriteOutcome.Upgraded: run.Upgraded++; run.WordTimed++; break;
+                    case LyricsWriteOutcome.Upgraded:
+                        run.Upgraded++;
+                        if (write.Result?.Timing == LyricsTiming.Word) run.WordTimed++;
+                        break;
                     case LyricsWriteOutcome.AlreadyThere: run.AlreadyHad++; break;
                     case LyricsWriteOutcome.NotFound: run.NotFound++; break;
                     case LyricsWriteOutcome.Instrumental: run.Instrumental++; break;

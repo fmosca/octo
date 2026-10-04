@@ -1075,7 +1075,7 @@
               <div class="set-info">
                 <div class="set-info-t" id="lyrics-source-order-label">Sources <span class="set-opt">in order</span></div>
                 <div class="set-info-d">Asked from the top down. A source that is off is never contacted.</div>
-                <div class="set-info-more">Drag a source to reorder, or use the arrow keys on its handle.</div>
+                <div class="set-info-more">Drag a source to reorder, or use the arrow keys on its handle. &ldquo;The song&rsquo;s own lyrics&rdquo; are the ones already in its tags or in a file beside it; they cannot be switched off, only ranked.</div>
               </div>
               <div class="source-priority-list" id="lyrics-source-order" aria-labelledby="lyrics-source-order-label"></div>
               <input type="hidden" id="f-lyrics-sources" name="Metadata.LyricsSources" />
@@ -1088,6 +1088,18 @@
                 <div class="set-info-more">Off, the first timed lyrics win, which asks fewer services per song.</div>
               </div>
               <label class="switch"><input type="checkbox" name="Metadata.PreferWordTimedLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Save found lyrics</div>
+                <div class="set-info-d"><strong>Beside the song</strong> writes a <code>.lrc</code> or <code>.txt</code> next to it, which Navidrome serves at once.</div>
+                <div class="set-info-more"><strong>Inside the song</strong> writes them into the song&rsquo;s own tags, which rewrites the audio file (on a cloud mount it uploads again) and shows after a Navidrome scan, which Octo asks for. Some other players show word timing as <code>&lt;00:12.34&gt;</code> in the text. Lyrics Octo did not write are never replaced: when a song&rsquo;s tags already hold someone else&rsquo;s, better ones go beside it instead.</div>
+              </div>
+              <select class="set-input" name="Metadata.SaveLyricsTo" aria-label="Save found lyrics">
+                <option value="beside">Beside the song</option>
+                <option value="inside">Inside the song</option>
+                <option value="both">Both</option>
+              </select>
             </div>
             <div class="set-row">
               <div class="set-info">
@@ -1108,8 +1120,9 @@
           <div class="set-card">
             <div class="set-row">
               <div class="set-info">
-                <div class="set-info-t">Also look for word timing</div>
-                <div class="set-info-d">Octo's own line-timed files are looked up again, and replaced when word-timed lyrics turn up.</div>
+                <div class="set-info-t">Also upgrade weaker lyrics</div>
+                <div class="set-info-d">Songs whose lyrics are plain, or timed by line while word timing is preferred, are looked up again, and better ones are saved.</div>
+                <div class="set-info-more">Octo replaces only lyrics it wrote. Better lyrics for a song with someone else&rsquo;s go beside it as a <code>.lrc</code>, which Navidrome serves first, and the originals stay as they are.</div>
               </div>
               <label class="switch"><input type="checkbox" id="lyrics-library-upgrade" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>

@@ -212,9 +212,10 @@ services:
       # for songs as they play. kugou and netease are unofficial APIs; netease only
       # runs if listed, and leaving kugou out switches it off.
       Metadata__FetchLyrics: ${LYRICS_FETCH:-false}
-      Metadata__LyricsSources: ${LYRICS_SOURCES:-kugou,lrclib,lyricsovh}
+      Metadata__LyricsSources: ${LYRICS_SOURCES:-song,kugou,lrclib,lyricsovh}
       Metadata__PreferWordTimedLyrics: ${LYRICS_PREFER_WORD_TIMED:-true}
       Metadata__WriteLyricsBesideAllSongs: ${LYRICS_WRITE_BESIDE_ALL:-false}
+      Metadata__SaveLyricsTo: ${LYRICS_SAVE_TO:-beside}
 
       # ----- Notifications (ntfy / Discord webhook) — both optional -----
       Notifications__NtfyUrl: ${NTFY_URL:-}

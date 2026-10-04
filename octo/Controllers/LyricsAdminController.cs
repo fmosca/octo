@@ -164,7 +164,7 @@ public sealed class LyricsAdminController : ControllerBase
                 artist = Str(song, "artist"),
                 album = Str(song, "album"),
                 duration = song.TryGetProperty("duration", out var d) && d.TryGetInt32(out var s) ? s : (int?)null,
-                choice = _choices.ChoiceFor(Str(song, "id") ?? ""),
+                choice = _choices.ChoiceFor(Str(song, "id") ?? "", Str(song, "artist"), Str(song, "title")),
             }).ToList<object>()
             : [];
         return Ok(new { songs });
@@ -201,7 +201,7 @@ public sealed class LyricsAdminController : ControllerBase
             song.Title,
             song.Album,
             duration = song.Duration,
-            choice = song.Id is null ? LyricsPin.Auto : _choices.ChoiceFor(song.Id),
+            choice = song.Id is null ? LyricsPin.Auto : _choices.ChoiceFor(song.Id, song.Artist, song.Title),
             candidates,
         });
     }
@@ -226,7 +226,7 @@ public sealed class LyricsAdminController : ControllerBase
 
         if (candidate.Equals(LyricsPin.Auto, StringComparison.OrdinalIgnoreCase))
         {
-            if (song.Id is not null) _choices.Clear(song.Id);
+            if (song.Id is not null) _choices.Clear(song.Id, song.Artist, song.Title);
             return Ok(new { id = song.Id, choice = LyricsPin.Auto });
         }
         if (candidate.Equals(LyricsPin.Hidden, StringComparison.OrdinalIgnoreCase))

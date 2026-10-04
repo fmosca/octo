@@ -3248,11 +3248,15 @@ public class SubsonicController : ControllerBase
     // OpenSubsonic getLyricsBySongId. Feishin fetches this every time a song plays. An external
     // track has no lyrics in Navidrome, so relaying one returned code 70 "data not found" per
     // play; it now gets real lyrics when LYRICS_FETCH is on (#52), and an empty-but-ok list
-    // otherwise. A library song Navidrome has no lyrics for gets the same live lookup.
+    // otherwise. A library song's own lyrics (what Navidrome has, in its tags or beside it) rank
+    // among the sources as "song": they are served when they win, and the live lookup's when it
+    // does, so a song whose tags hold line-timed lyrics still plays word-timed ones from a source
+    // above it, or from any source when word timing is preferred.
     //
     // A song someone pinned lyrics for (setLyricsChoice, or the dashboard) answers with those,
-    // for every client; one set to "none" answers with none. Word cues go only to a client that
-    // asked with enhanced=true; anyone else gets the lines exactly as before.
+    // for every client, found by the song's artist and title when its id has changed since; one
+    // set to "none" answers with none. Word cues go only to a client that asked with
+    // enhanced=true; anyone else gets the lines exactly as before.
     [HttpGet, HttpPost]
     [Route("rest/getLyricsBySongId")]
     [Route("rest/getLyricsBySongId.view")]
@@ -3271,6 +3275,7 @@ public class SubsonicController : ControllerBase
             var routing = _idRegistry.Lookup(id) ?? SoulseekMetadataService.TryDecodeExternalId(id);
             string artist = routing is { HasArtistTitle: true } ? routing.Artist! : "";
             string title = routing is { HasArtistTitle: true } ? routing.Title! : "";
+            pin ??= _lyricsChoices?.PinFor(id, artist, title);
             if (pin is not null)
                 return _responseBuilder.CreateLyricsListResponse(format, pin.Lyrics, pin.Artist ?? artist, pin.Title ?? title, enhanced);
 
@@ -3283,26 +3288,39 @@ public class SubsonicController : ControllerBase
             return _responseBuilder.CreateLyricsListResponse(format, found, artist, title, enhanced);
         }
 
-        var relay = await _proxyService.RelaySafeAsync("rest/getLyricsBySongId", parameters);
+        // Asked with word cues whenever the answer is JSON, so how the song's own lyrics are timed
+        // is known; a client that did not ask gets them without (see WithoutCues).
+        var json = format.Equals("json", StringComparison.OrdinalIgnoreCase);
+        var asking = json && !enhanced
+            ? new Dictionary<string, string>(parameters) { ["enhanced"] = "true" }
+            : parameters;
+        var relay = await _proxyService.RelaySafeAsync("rest/getLyricsBySongId", asking);
         if (relay.Success && relay.Body != null)
         {
             // Navidrome answering ok is also what says the caller may see this song.
-            if (pin is not null && IsSuccessfulSubsonicResponse(relay.Body, format))
-                return _responseBuilder.CreateLyricsListResponse(format, pin.Lyrics, pin.Artist ?? "", pin.Title ?? "", enhanced);
+            var allowed = IsSuccessfulSubsonicResponse(relay.Body, format);
+            var own = json && allowed ? NavidromeLyricsTiming(relay.Body) : null;
+            var song = allowed && ((fetching && own is not null) || (pin is null && _lyricsChoices?.AnyPins == true))
+                ? await LibrarySongAsync(parameters, id)
+                : null;
+            pin ??= song is null ? null : _lyricsChoices?.PinFor(id, song.Artist, song.Title);
+            if (pin is not null && allowed)
+                return _responseBuilder.CreateLyricsListResponse(format, pin.Lyrics,
+                    pin.Artist ?? song?.Artist ?? "", pin.Title ?? song?.Title ?? "", enhanced);
 
-            // Navidrome answered, but with nothing: look the song up live, read-only. Nothing is
-            // written beside a file Octo did not download.
-            if (fetching && format.Equals("json", StringComparison.OrdinalIgnoreCase)
-                && HasNoStructuredLyrics(relay.Body)
-                && await LibrarySongAsync(parameters, id) is { } song)
+            // Read-only: nothing is written beside a file Octo did not download.
+            if (fetching && own is { } timing && song is not null)
             {
-                var (found, stillLooking) = await LiveLyricsAsync(song.Artist, song.Title, song.Album, song.Duration);
-                if (found is not null)
+                var (found, stillLooking) = await LiveLyricsAsync(song.Artist, song.Title, song.Album, song.Duration, timing);
+                // The lookup ranked the song's own among the sources, so anything else it found won;
+                // only "instrumental" never outranks lyrics the song has.
+                if (found is { IsSongsOwn: false } && (timing == Octo.Services.Lyrics.LyricsTiming.None || !found.Instrumental))
                     return _responseBuilder.CreateLyricsListResponse(format, found, song.Artist, song.Title, enhanced);
-                if (stillLooking && DrawsItsOwnMarks(parameters))
+                if (timing == Octo.Services.Lyrics.LyricsTiming.None && stillLooking && DrawsItsOwnMarks(parameters))
                     return StillLookingForLyrics(format);
             }
-            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+            var body = json && !enhanced ? WithoutCues(relay.Body) : relay.Body;
+            return File(body, relay.ContentType ?? $"application/{format}");
         }
         return _responseBuilder.CreateResponse(format, "lyricsList", new { });
     }
@@ -3385,7 +3403,7 @@ public class SubsonicController : ControllerBase
         budget.CancelAfter(CandidatesBudget);
         var candidates = await _lyricsChoices.CandidatesAsync(new Octo.Services.Lyrics.LyricsQuery(
             artist, Octo.Services.Lyrics.LyricsText.QueryTitle(title, artist), song.Album, song.Duration), budget.Token);
-        return _responseBuilder.CreateLyricsCandidatesResponse(id, _lyricsChoices.ChoiceFor(id), candidates);
+        return _responseBuilder.CreateLyricsCandidatesResponse(id, _lyricsChoices.ChoiceFor(id, song.Artist, song.Title), candidates);
     }
 
     /// <summary>
@@ -3409,14 +3427,14 @@ public class SubsonicController : ControllerBase
             return _responseBuilder.CreateError(format, 10, "Required parameter is missing: id and candidate");
 
         var who = NativeUsername(parameters);
+        var song = await SongForLyricsAsync(parameters, id);
         if (candidate.Equals(Octo.Services.Lyrics.LyricsPin.Auto, StringComparison.OrdinalIgnoreCase))
         {
-            _lyricsChoices.Clear(id);
+            _lyricsChoices.Clear(id, song?.Artist, song?.Title);
             return _responseBuilder.CreateLyricsChoiceResponse(id, Octo.Services.Lyrics.LyricsPin.Auto);
         }
 
-        if (await SongForLyricsAsync(parameters, id) is not { } song)
-            return _responseBuilder.CreateError(format, 70, "Song not found");
+        if (song is null) return _responseBuilder.CreateError(format, 70, "Song not found");
         if (candidate.Equals(Octo.Services.Lyrics.LyricsPin.Hidden, StringComparison.OrdinalIgnoreCase))
         {
             _lyricsChoices.Hide(id, song.Artist, song.Title, who);
@@ -3488,13 +3506,14 @@ public class SubsonicController : ControllerBase
     /// service has the answer cached for the next ask; the caller learns it is still looking.
     /// </summary>
     private async Task<(Octo.Services.Lyrics.LyricsResult? Found, bool StillLooking)> LiveLyricsAsync(
-        string artist, string title, string? album, int? duration)
+        string artist, string title, string? album, int? duration,
+        Octo.Services.Lyrics.LyricsTiming songsOwn = Octo.Services.Lyrics.LyricsTiming.None)
     {
         var query = new Octo.Services.Lyrics.LyricsQuery(
             artist, Octo.Services.Lyrics.LyricsText.QueryTitle(title, artist), album, duration);
         // Not tied to the request: a client that stops waiting must not stop the lookup.
         var limit = new CancellationTokenSource(BackgroundLyricsLimit);
-        var lookup = _lyricsService!.FindAsync(query, limit.Token);
+        var lookup = _lyricsService!.FindAsync(query, limit.Token, songsOwn);
         _ = lookup.ContinueWith(_ => limit.Dispose(), TaskScheduler.Default);
         try
         {
@@ -3519,16 +3538,50 @@ public class SubsonicController : ControllerBase
     private IActionResult StillLookingForLyrics(string format) =>
         _responseBuilder.CreateError(format, 0, "Still looking for lyrics; ask again shortly");
 
-    private static bool HasNoStructuredLyrics(byte[] body)
+    /// <summary>
+    /// How the lyrics Navidrome sent are timed, the best entry's: word cues, timed lines, plain,
+    /// or None when it has none. Null when the answer is not one Octo can read.
+    /// </summary>
+    internal static Octo.Services.Lyrics.LyricsTiming? NavidromeLyricsTiming(byte[] body)
     {
         try
         {
             var lyrics = JsonNode.Parse(body)?["subsonic-response"]?["lyricsList"]?["structuredLyrics"];
-            return lyrics is null || (lyrics is JsonArray array && array.Count == 0);
+            if (lyrics is null) return Octo.Services.Lyrics.LyricsTiming.None;
+            if (lyrics is not JsonArray entries) return null;
+            var best = Octo.Services.Lyrics.LyricsTiming.None;
+            foreach (var entry in entries)
+            {
+                if (entry?["line"] is not JsonArray { Count: > 0 }) continue;
+                var timing = entry["cueLine"] is JsonArray { Count: > 0 } ? Octo.Services.Lyrics.LyricsTiming.Word
+                    : entry["synced"]?.GetValueKind() == JsonValueKind.True ? Octo.Services.Lyrics.LyricsTiming.Line
+                    : Octo.Services.Lyrics.LyricsTiming.Plain;
+                if (timing > best) best = timing;
+            }
+            return best;
         }
         catch
         {
-            return false;
+            return null;
+        }
+    }
+
+    /// <summary>Navidrome's lyrics as a client that did not ask for word cues gets them: without
+    /// the cue lines and the kind that came with them. Unchanged when they cannot be read.</summary>
+    internal static byte[] WithoutCues(byte[] body)
+    {
+        try
+        {
+            var root = JsonNode.Parse(body);
+            if (root?["subsonic-response"]?["lyricsList"]?["structuredLyrics"] is not JsonArray entries) return body;
+            var changed = false;
+            foreach (var entry in entries.OfType<JsonObject>())
+                changed |= entry.Remove("cueLine") | entry.Remove("kind");
+            return changed ? Encoding.UTF8.GetBytes(root.ToJsonString()) : body;
+        }
+        catch
+        {
+            return body;
         }
     }
 

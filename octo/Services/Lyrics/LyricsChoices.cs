@@ -65,6 +65,28 @@ public sealed class LyricsChoiceStore
         lock (_lock) return _pins.Values.OrderByDescending(pin => pin.SetUtc).ToList();
     }
 
+    /// <summary>Whether any song has a pin, so a caller can skip looking one up by name.</summary>
+    public bool Any
+    {
+        get { lock (_lock) return _pins.Count > 0; }
+    }
+
+    /// <summary>Removes every pin for the song with this artist and title, whatever its id.</summary>
+    public bool RemoveByName(string? artist, string? title)
+    {
+        if (SongIdentity.Key(artist).Length == 0 || SongIdentity.Key(title).Length == 0) return false;
+        var want = SongIdentity.MatchKey(artist, title);
+        lock (_lock)
+        {
+            var ids = _pins.Values.Where(pin => SongIdentity.MatchKey(pin.Artist, pin.Title) == want)
+                .Select(pin => pin.SongId).ToList();
+            if (ids.Count == 0) return false;
+            foreach (var id in ids) _pins.Remove(id);
+            Save();
+            return true;
+        }
+    }
+
     public void Set(LyricsPin pin)
     {
         lock (_lock)
@@ -150,8 +172,23 @@ public sealed class LyricsChoiceService
 
     public LyricsPin? PinFor(string artist, string title) => _store.FindByName(artist, title);
 
+    /// <summary>
+    /// The song's pin: by its id, or else by its artist and title. Navidrome gives a song a new id
+    /// when its file is replaced (a better copy, a move), and the pin follows the song.
+    /// </summary>
+    public LyricsPin? PinFor(string songId, string? artist, string? title) =>
+        _store.Get(songId)
+        ?? (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title) ? null : _store.FindByName(artist, title));
+
+    /// <summary>Whether any song has a pin.</summary>
+    public bool AnyPins => _store.Any;
+
     /// <summary>"auto" when nothing is chosen, "none" when hidden, else the candidate id.</summary>
     public string ChoiceFor(string songId) => _store.Get(songId)?.Choice ?? LyricsPin.Auto;
+
+    /// <summary>The song's choice, found by its id or else by its artist and title.</summary>
+    public string ChoiceFor(string songId, string? artist, string? title) =>
+        PinFor(songId, artist, title)?.Choice ?? LyricsPin.Auto;
 
     public IReadOnlyList<LyricsPin> All() => _store.All();
 
@@ -250,4 +287,9 @@ public sealed class LyricsChoiceService
     }
 
     public bool Clear(string songId) => _store.Remove(songId);
+
+    /// <summary>Back to automatic: the song's pin by id, and any it has by its artist and title,
+    /// so a pin made under an older id does not come back.</summary>
+    public bool Clear(string songId, string? artist, string? title) =>
+        _store.Remove(songId) | _store.RemoveByName(artist, title);
 }
