@@ -98,6 +98,10 @@
             <svg class="icon" aria-hidden="true"><use href="#i-image-square"/></svg>
             <span>Cover art</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="lyrics">
+            <svg class="icon" aria-hidden="true"><use href="#i-microphone-stage"/></svg>
+            <span>Lyrics</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="libraryactions">
             <svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg>
             <span>Library actions</span>
@@ -1059,132 +1063,6 @@
 
         <div class="set-section">
           <div class="set-head">
-            <h3 class="set-title">Lyrics</h3>
-            <p class="set-desc">A lyrics file beside each download, and lyrics for any song as it plays, in every app.</p>
-          </div>
-          <form data-section="lyrics" class="set-card">
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Fetch lyrics</div>
-                <div class="set-info-d">Looked up in the background after each download, so a slow lyrics service never holds up the next one.</div>
-                <div class="set-info-more">Synced lyrics go in a <code>.lrc</code>, plain ones in a <code>.txt</code>; lyrics timed word by word are still a normal <code>.lrc</code> that any player shows line by line. Navidrome serves the file without a rescan. A song that already has lyrics is never touched, and a song with none still gets lyrics as it plays.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.FetchLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row stack source-priority-setting">
-              <div class="set-info">
-                <div class="set-info-t" id="lyrics-source-order-label">Sources <span class="set-opt">in order</span></div>
-                <div class="set-info-d">Asked from the top down. A source that is off is never contacted.</div>
-                <div class="set-info-more">Drag a source to reorder, or use the arrow keys on its handle. &ldquo;The song&rsquo;s own lyrics&rdquo; are the ones already in its tags or in a file beside it; they cannot be switched off, only ranked.</div>
-              </div>
-              <div class="source-priority-list" id="lyrics-source-order" aria-labelledby="lyrics-source-order-label"></div>
-              <input type="hidden" id="f-lyrics-sources" name="Metadata.LyricsSources" />
-              <div class="set-info-d" id="lyrics-source-order-help" role="status" aria-live="polite" hidden></div>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Prefer word-timed lyrics</div>
-                <div class="set-info-d">Lyrics timed word by word win over line-timed ones from a source higher up.</div>
-                <div class="set-info-more">Off, the first timed lyrics win, which asks fewer services per song.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.PreferWordTimedLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row stack">
-              <div class="set-info">
-                <div class="set-info-t">Save found lyrics</div>
-                <div class="set-info-d"><strong>Beside the song</strong> writes a <code>.lrc</code> or <code>.txt</code> next to it, which Navidrome serves at once.</div>
-                <div class="set-info-more"><strong>Inside the song</strong> writes them into the song&rsquo;s own tags, which rewrites the audio file (on a cloud mount it uploads again) and shows after a Navidrome scan, which Octo asks for. Some other players show word timing as <code>&lt;00:12.34&gt;</code> in the text. Lyrics Octo did not write are never replaced: when a song&rsquo;s tags already hold someone else&rsquo;s, better ones go beside it instead.</div>
-              </div>
-              <select class="set-input" name="Metadata.SaveLyricsTo" aria-label="Save found lyrics">
-                <option value="beside">Beside the song</option>
-                <option value="inside">Inside the song</option>
-                <option value="both">Both</option>
-              </select>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Write lyrics files beside all library songs</div>
-                <div class="set-info-d">Lets &ldquo;Find lyrics for the library&rdquo; write beside your own rips and purchases too.</div>
-                <div class="set-info-more">Off, it only writes beside songs Octo downloaded. Existing lyrics files, and lyrics inside a song, are never replaced either way.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.WriteLyricsBesideAllSongs" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-          </form>
-        </div>
-
-        <div class="set-section">
-          <div class="set-head">
-            <h3 class="set-title">Find lyrics for the library</h3>
-            <p class="set-desc">Looks up lyrics for songs that have none, one song at a time. Stop whenever you like and carry on later.</p>
-          </div>
-          <div class="set-card">
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Also upgrade weaker lyrics</div>
-                <div class="set-info-d">Songs whose lyrics are plain, or timed by line while word timing is preferred, are looked up again, and better ones are saved.</div>
-                <div class="set-info-more">Octo replaces only lyrics it wrote. Better lyrics for a song with someone else&rsquo;s go beside it as a <code>.lrc</code>, which Navidrome serves first, and the originals stay as they are.</div>
-              </div>
-              <label class="switch"><input type="checkbox" id="lyrics-library-upgrade" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info"><div class="set-info-t" id="lyrics-library-scope">Songs Octo downloaded</div><div class="set-info-d" id="lyrics-library-scope-d">Turn on &ldquo;Write lyrics files beside all library songs&rdquo; above to include the rest.</div></div>
-              <div class="genre-preset-actions">
-                <button class="btn" type="button" id="lyrics-library-start">Find lyrics</button>
-                <button class="btn btn-ghost" type="button" id="lyrics-library-resume" hidden>Resume</button>
-                <button class="btn btn-ghost" type="button" id="lyrics-library-cancel" hidden>Stop</button>
-              </div>
-            </div>
-            <div id="lyrics-library-status" class="set-row stack"></div>
-            <div id="lyrics-review" class="set-row stack" hidden>
-              <div class="set-info">
-                <div class="set-info-t">Review</div>
-                <div class="set-info-d">Lyrics written where the match was not certain, most often because the length could not be checked.</div>
-                <div class="set-info-more">Choose other lyrics, or confirm the ones that are right.</div>
-              </div>
-              <div id="lyrics-review-list" class="config-table"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="set-section">
-          <div class="set-head">
-            <h3 class="set-title">Fix a song's lyrics</h3>
-            <p class="set-desc">Wrong lyrics, or none? Choose others, hide them, or go back to automatic. It applies in every app.</p>
-          </div>
-          <div class="set-card">
-            <div class="set-row stack">
-              <div class="set-info"><div class="set-info-t">Song</div><div class="set-info-d">Search your library by title or artist.</div></div>
-              <div class="lyrics-search">
-                <input class="set-input" id="lyrics-song-search" type="search" placeholder="Title or artist" maxlength="120" />
-                <button class="btn btn-ghost" type="button" id="lyrics-song-search-go"><svg class="icon" aria-hidden="true"><use href="#i-magnifying-glass"/></svg><span>Search</span></button>
-              </div>
-              <div id="lyrics-song-results" class="config-table"></div>
-            </div>
-            <div id="lyrics-picker" class="set-row stack" hidden>
-              <div class="set-info">
-                <div class="set-info-t" id="lyrics-picker-title"></div>
-                <div class="set-info-d" id="lyrics-picker-state"></div>
-              </div>
-              <div class="lyrics-search">
-                <input class="set-input" id="lyrics-picker-artist" placeholder="Artist" maxlength="120" />
-                <input class="set-input" id="lyrics-picker-song" placeholder="Title" maxlength="120" />
-                <button class="btn btn-ghost" type="button" id="lyrics-picker-search">Search again</button>
-              </div>
-              <div id="lyrics-candidates" class="config-table"></div>
-              <div class="genre-preset-actions">
-                <button class="btn btn-ghost" type="button" id="lyrics-picker-hide">Show no lyrics</button>
-                <button class="btn btn-ghost" type="button" id="lyrics-picker-auto">Back to automatic</button>
-              </div>
-            </div>
-            <div id="lyrics-choices" class="set-row stack" hidden>
-              <div class="set-info"><div class="set-info-t">Chosen lyrics</div><div class="set-info-d">Songs whose lyrics someone chose or hid, here or in the Octo app.</div></div>
-              <div id="lyrics-choices-list" class="config-table"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="set-section">
-          <div class="set-head">
             <h3 class="set-title">Genre normalization</h3>
             <p class="set-desc">Turns messy genre tags on new downloads into a short list you can browse.</p>
           </div>
@@ -1720,6 +1598,170 @@
             </div>
           </form>
         </div>
+      </section>
+
+      <section data-pane="lyrics">
+        <header class="page-header">
+          <div>
+            <h1>Lyrics</h1>
+            <p>Where lyrics come from, where they are saved, and a list of the songs that could have better ones.</p>
+          </div>
+        </header>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Better lyrics</h3>
+            <p class="set-desc">Find songs with no lyrics, or lyrics that are not timed word by word, and give them better ones.</p>
+          </div>
+          <div class="set-card cover-tool lyrics-tool">
+            <div class="cover-toolbar">
+              <div class="cover-chips">
+                <select class="seg-src" id="lyrics-scope" aria-label="Which songs" hidden>
+                  <option value="OctoDownloads">Octo's downloads</option>
+                  <option value="WholeLibrary">Whole library</option>
+                </select>
+                <div class="seg" data-seg-for="lyrics-scope"><span class="seg-thumb"></span></div>
+                <span class="cover-chip-group">
+                  <span class="cover-chip-label" id="lyrics-show-label">Show</span>
+                  <select class="seg-src" id="lyrics-show" aria-label="Which songs to list" hidden>
+                    <option value="weaker">No lyrics or weaker</option>
+                    <option value="none">No lyrics</option>
+                  </select>
+                  <div class="seg" data-seg-for="lyrics-show"><span class="seg-thumb"></span></div>
+                </span>
+              </div>
+              <div class="cover-toolbar-end">
+                <button class="btn btn-ghost" type="button" id="lyrics-scan"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Scan</span></button>
+              </div>
+            </div>
+
+            <div class="cover-summary">
+              <div class="cover-summary-text"><span class="cover-head" id="lyrics-head"></span><span class="cover-sub" id="lyrics-sub"></span></div>
+              <div class="cover-select" id="lyrics-select" hidden>
+                <button type="button" class="link-btn" id="lyrics-all">Select all</button>
+                <span aria-hidden="true">&middot;</span>
+                <button type="button" class="link-btn" id="lyrics-none">Clear</button>
+              </div>
+            </div>
+            <div class="cover-progress" id="lyrics-progress" hidden><span id="lyrics-progress-fill"></span></div>
+
+            <div class="cover-empty" id="lyrics-empty">
+              <svg class="icon" aria-hidden="true"><use href="#i-microphone-stage"/></svg>
+              <div class="set-info-t">Find songs that need better lyrics</div>
+              <div class="set-info-d">A scan only reads your songs: it looks nothing up and changes nothing.</div>
+              <button class="btn btn-primary" type="button" id="lyrics-scan-first">Scan</button>
+            </div>
+            <div class="lyrics-list config-table" id="lyrics-list" role="list"></div>
+            <p class="cover-more" id="lyrics-more" hidden></p>
+
+            <div class="cover-bar" id="lyrics-bar" hidden>
+              <span class="cover-count" id="lyrics-count"></span>
+              <span class="cover-hint" id="lyrics-hint"></span>
+              <button class="btn btn-ghost" type="button" id="lyrics-undo" hidden>Undo</button>
+              <button class="btn btn-ghost" type="button" id="lyrics-stop" hidden>Stop</button>
+              <button class="btn btn-ghost" type="button" id="lyrics-resume" hidden>Resume</button>
+              <button class="btn btn-primary" type="button" id="lyrics-go" hidden></button>
+            </div>
+
+            <details class="cover-how">
+              <summary>How it works</summary>
+              <p>A scan reads each song's tags and the files beside it, and lists the ones with no lyrics, plain lyrics, or lyrics timed only by line. Find better lyrics asks the sources above, in their order, about a second and a half apart, and shows what it found; nothing is written yet. Save writes them where &ldquo;Save found lyrics&rdquo; says. Octo replaces only lyrics it wrote: a song whose tags or files hold someone else&rsquo;s gets the better lyrics beside it as a <code>.lrc</code>, which Navidrome serves first, and its own stay as they are. Everything Save writes over is kept, so Undo puts it back. A song you pick is saved whatever &ldquo;Write lyrics files beside all library songs&rdquo; says.</p>
+            </details>
+          </div>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Lyrics</h3>
+            <p class="set-desc">A lyrics file beside each download, and lyrics for any song as it plays, in every app.</p>
+          </div>
+          <form data-section="lyrics" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Fetch lyrics</div>
+                <div class="set-info-d">Looked up in the background after each download, so a slow lyrics service never holds up the next one.</div>
+                <div class="set-info-more">Synced lyrics go in a <code>.lrc</code>, plain ones in a <code>.txt</code>; lyrics timed word by word are still a normal <code>.lrc</code> that any player shows line by line. Navidrome serves the file without a rescan. A song that already has lyrics is never touched, and a song with none still gets lyrics as it plays.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.FetchLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack source-priority-setting">
+              <div class="set-info">
+                <div class="set-info-t" id="lyrics-source-order-label">Sources <span class="set-opt">in order</span></div>
+                <div class="set-info-d">Asked from the top down. A source that is off is never contacted.</div>
+                <div class="set-info-more">Drag a source to reorder, or use the arrow keys on its handle. &ldquo;The song&rsquo;s own lyrics&rdquo; are the ones already in its tags or in a file beside it; they cannot be switched off, only ranked.</div>
+              </div>
+              <div class="source-priority-list" id="lyrics-source-order" aria-labelledby="lyrics-source-order-label"></div>
+              <input type="hidden" id="f-lyrics-sources" name="Metadata.LyricsSources" />
+              <div class="set-info-d" id="lyrics-source-order-help" role="status" aria-live="polite" hidden></div>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Prefer word-timed lyrics</div>
+                <div class="set-info-d">Lyrics timed word by word win over line-timed ones from a source higher up.</div>
+                <div class="set-info-more">Off, the first timed lyrics win, which asks fewer services per song.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.PreferWordTimedLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Save found lyrics</div>
+                <div class="set-info-d"><strong>Beside the song</strong> writes a <code>.lrc</code> or <code>.txt</code> next to it, which Navidrome serves at once.</div>
+                <div class="set-info-more"><strong>Inside the song</strong> writes them into the song&rsquo;s own tags, which rewrites the audio file (on a cloud mount it uploads again) and shows after a Navidrome scan, which Octo asks for. Some other players show word timing as <code>&lt;00:12.34&gt;</code> in the text. Lyrics Octo did not write are never replaced: when a song&rsquo;s tags already hold someone else&rsquo;s, better ones go beside it instead.</div>
+              </div>
+              <select class="set-input" name="Metadata.SaveLyricsTo" aria-label="Save found lyrics">
+                <option value="beside">Beside the song</option>
+                <option value="inside">Inside the song</option>
+                <option value="both">Both</option>
+              </select>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Write lyrics files beside all library songs</div>
+                <div class="set-info-d">Lets a library walk started through the API save lyrics for your own rips and purchases too.</div>
+                <div class="set-info-more">Songs you pick under Better lyrics are saved either way. Lyrics Octo did not write are never replaced.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.WriteLyricsBesideAllSongs" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Fix a song's lyrics</h3>
+            <p class="set-desc">Wrong lyrics, or none? Choose others, hide them, or go back to automatic. It applies in every app.</p>
+          </div>
+          <div class="set-card">
+            <div class="set-row stack">
+              <div class="set-info"><div class="set-info-t">Song</div><div class="set-info-d">Search your library by title or artist.</div></div>
+              <div class="lyrics-search">
+                <input class="set-input" id="lyrics-song-search" type="search" placeholder="Title or artist" maxlength="120" />
+                <button class="btn btn-ghost" type="button" id="lyrics-song-search-go"><svg class="icon" aria-hidden="true"><use href="#i-magnifying-glass"/></svg><span>Search</span></button>
+              </div>
+              <div id="lyrics-song-results" class="config-table"></div>
+            </div>
+            <div id="lyrics-picker" class="set-row stack" hidden>
+              <div class="set-info">
+                <div class="set-info-t" id="lyrics-picker-title"></div>
+                <div class="set-info-d" id="lyrics-picker-state"></div>
+              </div>
+              <div class="lyrics-search">
+                <input class="set-input" id="lyrics-picker-artist" placeholder="Artist" maxlength="120" />
+                <input class="set-input" id="lyrics-picker-song" placeholder="Title" maxlength="120" />
+                <button class="btn btn-ghost" type="button" id="lyrics-picker-search">Search again</button>
+              </div>
+              <div id="lyrics-candidates" class="config-table"></div>
+              <div class="genre-preset-actions">
+                <button class="btn btn-ghost" type="button" id="lyrics-picker-hide">Show no lyrics</button>
+                <button class="btn btn-ghost" type="button" id="lyrics-picker-auto">Back to automatic</button>
+              </div>
+            </div>
+            <div id="lyrics-choices" class="set-row stack" hidden>
+              <div class="set-info"><div class="set-info-t">Chosen lyrics</div><div class="set-info-d">Songs whose lyrics someone chose or hid, here or in the Octo app.</div></div>
+              <div id="lyrics-choices-list" class="config-table"></div>
+            </div>
+          </div>
+        </div>
+
       </section>
 
       <section data-pane="lossy">

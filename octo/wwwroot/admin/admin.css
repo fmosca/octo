@@ -1603,6 +1603,33 @@ form.set-card.unsaved { border-color: var(--warn-line); box-shadow: inset 0 1px 
 .lyrics-search .set-input { flex: 1 1 180px; min-width: 0; }
 .lyrics-search .btn { height: auto; min-height: var(--h-field); }
 .lyrics-progress { width: 100%; height: 6px; accent-color: var(--accent); }
+
+/* ── Better lyrics: the soft covers wall's steps, as a list of songs ── */
+.lyrics-list { display: flex; flex-direction: column; }
+.lyrics-list:empty { display: none; }
+.lyrics-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-m); border-top: 1px solid var(--hairline); }
+.lyrics-item:first-child { border-top: 0; }
+.lyrics-pick { all: unset; box-sizing: border-box; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 4px; cursor: pointer; border-radius: 8px; min-width: 0; }
+.lyrics-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lyrics-pick[aria-disabled="true"] { cursor: default; }
+.lyrics-check { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid rgba(255, 255, 255, 0.45); display: flex; align-items: center; justify-content: center; }
+.lyrics-check .icon { width: 12px; height: 12px; opacity: 0; color: #0c0c0d; }
+.lyrics-pick[aria-checked="true"] .lyrics-check { background: var(--accent); border-color: var(--accent); }
+.lyrics-pick[aria-checked="true"] .lyrics-check .icon { opacity: 1; }
+.lyrics-pick[aria-disabled="true"] .lyrics-check { visibility: hidden; }
+.lyrics-song { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lyrics-song .set-info-d { margin: 0; }
+.lyrics-title { color: var(--ink); overflow-wrap: anywhere; }
+.lyrics-badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.lyrics-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1; padding: 4px 6px; border-radius: 6px; background: rgba(255, 255, 255, 0.06); color: var(--ink-2); white-space: nowrap; }
+.lyrics-badge .icon { width: 11px; height: 11px; }
+.lyrics-badge.good { background: var(--accent-wash); color: var(--ink); }
+.lyrics-badge.done { background: var(--accent); color: #0c0c0d; }
+.lyrics-badge.warn { background: var(--warn); color: #0c0c0d; }
+@media (max-width: 640px) {
+  .lyrics-pick { grid-template-columns: 22px minmax(0, 1fr); }
+  .lyrics-badges { grid-column: 2; justify-content: flex-start; }
+}
 @media (max-width: 600px) { .lyrics-row { grid-template-columns: minmax(0, 1fr); } }
 
 /* ── Re-tag: why Apply is not offered ── */

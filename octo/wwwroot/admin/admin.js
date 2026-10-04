@@ -1394,7 +1394,7 @@ function coverTile(run, row) {
   if (row.result === 'soft') badge = `<span class="cover-badge">${esc(px(row.fromSide))}</span>`;
   else if (row.result === 'found' && row.looksSame === false) badge = `<span class="cover-badge warn" title="This cover does not look like the one the album has now. It may be another edition, or another album with the same name.">Different art · ${esc(px(row.toSide))}</span>`;
   else if (row.result === 'found') badge = `<span class="cover-badge">${esc(px(row.fromSide))} → ${esc(px(row.toSide))}</span>`;
-  else if (row.result === 'upgraded') badge = `<span class="cover-badge done">${icon('check')} ${esc(px(row.toSide))}</span>`;
+  else if (row.result === 'upgraded') badge = `<span class="cover-badge done">${icon('i-check')} ${esc(px(row.toSide))}</span>`;
   else badge = '<span class="cover-badge">Nothing larger</span>';
   const art = showFound
     ? `<img loading="lazy" alt="" src="${found}" onerror="this.src='${now}';this.onerror=null"><img class="cover-was" loading="lazy" alt="" src="${now}" onerror="this.remove()">`
@@ -1406,7 +1406,7 @@ function coverTile(run, row) {
   return `<button type="button" class="cover-tile" role="${pickable ? 'checkbox' : 'listitem'}" data-cover-id="${esc(row.id)}"
       ${pickable ? `aria-checked="${picked}"` : ''} ${!pickable && (row.result === 'none') ? 'aria-disabled="true"' : ''}
       aria-label="${esc(name)}" title="${esc(row.folder)}">
-    <span class="cover-art">${art}${pickable ? `<span class="cover-check">${icon('check')}</span>` : ''}${badge}</span>
+    <span class="cover-art">${art}${pickable ? `<span class="cover-check">${icon('i-check')}</span>` : ''}${badge}</span>
     <span class="cover-title">${esc(row.album || '(no album)')}</span>
     <span class="cover-artist">${esc(sub)}</span>
   </button>`;
@@ -3677,7 +3677,7 @@ function finishLyricsDrag() {
 
 let lyricsLibraryPoll = null;
 
-async function lyricsFetch(url, options = {}, retry = true, holderId = 'lyrics-library-status') {
+async function lyricsFetch(url, options = {}, retry = true, holderId = 'lyrics-bar') {
   const response = await api(url, options);
   if (response.status === 401 && retry) {
     const holder = document.getElementById(holderId);
@@ -3690,68 +3690,220 @@ async function lyricsError(response) {
   try { return (await response.json()).error || `HTTP ${response.status}`; } catch { return `HTTP ${response.status}`; }
 }
 
-function renderLyricsLibrary(run) {
-  const status = document.getElementById('lyrics-library-status');
-  if (!status) return;
+// ---- Better lyrics ------------------------------------------------------
+//
+// The soft covers wall's steps, for lyrics: Scan lists the songs with no lyrics or weaker ones and
+// changes nothing, Find better lyrics looks the picked ones up and changes nothing, Save writes
+// what was found, and Undo puts back everything Save wrote over.
+
+let lyricsRun = null;
+let lyricsPickedRows = new Set();
+let lyricsListRunId = null;
+let lyricsShowAll = false;
+let lyricsControlsSet = false;
+let lyricsPace = null;
+const LYRICS_ROW_CAP = 400;
+const lyricsEl = id => document.getElementById(id);
+const lyricsHasLabel = { none: 'No lyrics', plain: 'Not timed', line: 'Timed by line', word: 'Word by word' };
+const lyricsKindLabel = { word: 'Word by word', line: 'Timed by line', plain: 'Not timed', instrumental: 'Instrumental' };
+const lyricsSaveLabel = { beside: 'beside each song', inside: 'inside each song', both: 'beside and inside each song' };
+
+function lyricsNote(message, kind = 'ok') {
+  note(lyricsEl('lyrics-bar'), message, kind);
+}
+
+// A scan lists every song it found wanting (the Show chip can narrow it to songs with none);
+// later steps list the songs they worked on.
+function lyricsRows(run) {
+  let rows = run?.rows || [];
+  if (run?.mode && run.mode !== 'Scan') rows = rows.filter(row => row.result !== 'weak');
+  if (lyricsEl('lyrics-show')?.value === 'none') rows = rows.filter(row => row.has === 'none');
+  return rows;
+}
+
+function lyricsPickable(run, row) {
+  if (!run || run.status === 'Running' || run.mode === 'Undo') return false;
+  if (run.mode === 'Scan') return true;
+  if (run.mode === 'Preview') return row.result === 'found';
+  return false;
+}
+
+function lyricsItem(run, row) {
+  const pickable = lyricsPickable(run, row);
+  const picked = pickable && lyricsPickedRows.has(row.id);
+  const badges = [`<span class="lyrics-badge">${esc(lyricsHasLabel[row.has] || row.has)}</span>`];
+  const kind = lyricsKindLabel[row.kind] || row.kind || '';
+  if (row.result === 'found') {
+    badges.push(row.doubt
+      ? `<span class="lyrics-badge warn" title="${esc(row.doubt)}">${esc(kind)} · ${esc(row.source)} · not certain</span>`
+      : `<span class="lyrics-badge good">${esc(kind)} · ${esc(row.source)}</span>`);
+  } else if (row.result === 'saved') badges.push(`<span class="lyrics-badge done">${icon('i-check')} ${esc(kind)} · saved</span>`);
+  else if (row.result === 'none') badges.push(`<span class="lyrics-badge">${row.kind === 'instrumental' ? 'Instrumental' : 'Nothing better'}</span>`);
+  else if (row.result === 'busy') badges.push('<span class="lyrics-badge warn">No answer, try again</span>');
+  else if (row.result === 'kept') badges.push('<span class="lyrics-badge">Already as good</span>');
+  else if (row.result === 'blocked') badges.push('<span class="lyrics-badge warn" title="Its lyrics file is one Octo did not write, so Octo leaves it alone.">Has lyrics Octo will not replace</span>');
+  else if (row.result === 'failed') badges.push('<span class="lyrics-badge warn">Could not read the file</span>');
+  const preview = row.preview?.length && ['found', 'saved'].includes(row.result)
+    ? `<span class="lyrics-preview">${row.preview.map(esc).join(' / ')}</span>` : '';
+  return `<div class="lyrics-item" role="listitem">
+    <button type="button" class="lyrics-pick" data-lyrics-row="${esc(row.id)}" title="${esc(row.path)}"
+        ${pickable ? `role="checkbox" aria-checked="${picked}"` : 'aria-disabled="true"'}
+        aria-label="${esc(`${row.title} by ${row.artist}`)}">
+      <span class="lyrics-check">${icon('i-check')}</span>
+      <span class="lyrics-song">
+        <span class="lyrics-title">${esc(row.title)}</span>
+        <span class="set-info-d">${esc([row.artist, row.album].filter(Boolean).join(' · '))}</span>
+        ${preview}
+      </span>
+      <span class="lyrics-badges">${badges.join('')}</span>
+    </button>
+    <button type="button" class="link-btn" data-lyrics-choose="${esc(row.path)}">Choose</button>
+  </div>`;
+}
+
+function renderLyricsBar(run) {
+  const rows = lyricsRows(run);
   const running = run.status === 'Running';
-  document.getElementById('lyrics-library-cancel').hidden = !running;
-  document.getElementById('lyrics-library-resume').hidden = running || !run.canResume;
-  document.getElementById('lyrics-library-start').disabled = running;
+  const pickableRows = rows.filter(row => lyricsPickable(run, row));
+  const count = pickableRows.filter(row => lyricsPickedRows.has(row.id)).length;
+  const go = lyricsEl('lyrics-go');
+  const hint = lyricsEl('lyrics-hint');
+  const countEl = lyricsEl('lyrics-count');
 
-  const scope = document.getElementById('lyrics-library-scope');
-  const scopeHint = document.getElementById('lyrics-library-scope-d');
-  if (scope) scope.textContent = run.writesBesideAll ? 'Every song in the library' : 'Songs Octo downloaded';
-  if (scopeHint) scopeHint.textContent = run.writesBesideAll
-    ? 'Lyrics files are written beside every song that has none, your own rips and purchases included.'
-    : 'Turn on "Write lyrics files beside all library songs" above to include the rest.';
+  lyricsEl('lyrics-stop').hidden = !running || run.mode === 'Undo';
+  // A scan is quick to start over; lookups and saves are worth resuming.
+  lyricsEl('lyrics-resume').hidden = running || !run.canResume || run.mode === 'Scan';
+  lyricsEl('lyrics-undo').hidden = running || !run.canUndo;
+  lyricsEl('lyrics-select').hidden = pickableRows.length === 0;
+  go.hidden = true;
+  countEl.textContent = '';
+  hint.textContent = '';
 
-  if (run.status === 'Idle') {
-    status.innerHTML = '';
+  if (running) {
+    hint.textContent = {
+      Scan: 'Reading your songs. Nothing is looked up or changed.',
+      Preview: 'Looking up each picked song, a couple of seconds apiece. Nothing changes yet.',
+      Save: 'Saving lyrics. Whatever they replace is kept, so you can undo.',
+      Undo: 'Putting the old lyrics back.',
+    }[run.mode] || 'Working.';
+  } else if (run.mode === 'Scan' && pickableRows.length) {
+    countEl.textContent = `${count} selected`;
+    hint.textContent = 'Looks up better lyrics for each. Nothing changes yet.';
+    go.textContent = 'Find better lyrics';
+    go.hidden = false;
+  } else if (run.mode === 'Preview' && pickableRows.length) {
+    countEl.textContent = `${count} selected`;
+    hint.textContent = `Saved ${lyricsSaveLabel[run.saveTo] || 'beside each song'}. Whatever they replace is kept, so you can undo.`;
+    go.textContent = `Save ${count} lyric${count === 1 ? '' : 's'}`;
+    go.hidden = false;
+  } else if (run.mode === 'Save' && run.status === 'Completed') {
+    hint.textContent = !run.written ? 'Nothing needed saving.'
+      : run.saveTo === 'beside' ? 'Every app shows them now.' : 'Navidrome picks up lyrics inside songs at its next scan, which Octo asked for.';
+  } else if (run.mode === 'Undo' && run.status === 'Completed') {
+    hint.textContent = run.reason || 'The old lyrics are back.';
+  } else if (run.status === 'Cancelled' || run.status === 'Interrupted') {
+    hint.textContent = run.mode === 'Scan' ? 'Stopped part way. Scan again to see every song.' : (run.reason || 'Stopped.');
+  }
+  lyricsEl('lyrics-bar').hidden = run.status === 'Idle'
+    || (go.hidden && lyricsEl('lyrics-stop').hidden && lyricsEl('lyrics-resume').hidden && lyricsEl('lyrics-undo').hidden && !hint.textContent);
+}
+
+function renderLyricsLibrary(run) {
+  if (!lyricsEl('lyrics-list')) return;
+  const rows = lyricsRows(run);
+  const running = run.status === 'Running';
+
+  // A fresh list from a finished step: pick everything worth carrying on. Lyrics the sources
+  // were not sure of are shown, not pre-picked.
+  if (!running && run.runId && run.runId !== lyricsListRunId) {
+    lyricsListRunId = run.runId;
+    lyricsShowAll = false;
+    lyricsPickedRows = new Set(rows.filter(row => lyricsPickable(run, row) && !row.doubt).map(row => row.id));
+  }
+
+  const progress = lyricsEl('lyrics-progress');
+  progress.hidden = !running;
+  const starting = running && (run.starting || !run.total);
+  progress.classList.toggle('starting', starting);
+  if (running && !starting) lyricsEl('lyrics-progress-fill').style.width = `${run.total ? Math.min(100, Math.round(100 * run.processed / run.total)) : 0}%`;
+
+  const plural = (n, one, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+  const all = run.rows || [];
+  const countHas = has => all.filter(row => row.has === has).length;
+  let head = '';
+  let sub = '';
+  if (run.status === 'Idle') head = '';
+  else if (starting) {
+    head = 'Getting started';
+    sub = 'Listing your songs';
+  } else if (running) {
+    head = { Scan: 'Scanning', Preview: 'Finding better lyrics', Save: 'Saving lyrics', Undo: 'Putting lyrics back', Walk: 'Finding lyrics' }[run.mode] || 'Working';
+    sub = `${run.processed.toLocaleString()} of ${plural(run.total, 'song')}`;
+    if (run.mode === 'Preview') {
+      if (lyricsPace?.runId !== run.runId) lyricsPace = { runId: run.runId, at: Date.now(), done: run.processed };
+      const moved = run.processed - lyricsPace.done;
+      if (moved >= 3) {
+        const left = (Date.now() - lyricsPace.at) / moved * Math.max(0, run.total - run.processed) / 1000;
+        if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
+      }
+    }
+  } else if (run.mode === 'Scan') {
+    head = all.length ? plural(all.length, 'song could have better lyrics', 'songs could have better lyrics') : 'Every song has word-by-word lyrics';
+    sub = [countHas('none') ? `${countHas('none')} with none` : '', countHas('plain') ? `${countHas('plain')} not timed` : '',
+      countHas('line') ? `${countHas('line')} timed by line` : '', run.wordAlready ? `${run.wordAlready} already word by word` : '']
+      .filter(Boolean).join(' · ');
+  } else if (run.mode === 'Preview') {
+    const found = all.filter(row => row.result === 'found');
+    head = found.length ? `Better lyrics found for ${plural(found.length, 'song')}` : 'No better lyrics found';
+    const unsure = found.filter(row => row.doubt).length;
+    sub = [run.notFound ? `${run.notFound} with nothing better` : '', unsure ? `${unsure} not certain, left unpicked` : '',
+      run.busy ? `${run.busy} not answered` : ''].filter(Boolean).join(' · ');
+  } else if (run.mode === 'Save') {
+    head = run.written ? `Lyrics saved for ${plural(run.written, 'song')}` : 'Nothing saved';
+    sub = [run.alreadyHad ? `${run.alreadyHad} already as good` : '', run.skipped ? `${run.skipped} with lyrics Octo will not replace` : '',
+      run.failed ? `${run.failed} failed` : ''].filter(Boolean).join(' · ');
+  } else if (run.mode === 'Undo') {
+    head = run.written ? `Old lyrics put back for ${plural(run.written, 'file')}` : 'Nothing put back';
   } else {
-    const label = { Running: 'Finding lyrics', Completed: 'Finished', Cancelled: 'Stopped', Interrupted: 'Paused', Failed: 'Stopped' }[run.status] ?? run.status;
-    const counts = [
-      `${run.processed} of ${run.total} songs`,
-      `${run.written} written${run.wordTimed ? ` (${run.wordTimed} word-timed)` : ''}`,
-      run.upgraded ? `${run.upgraded} upgraded` : null,
-      run.alreadyHad ? `${run.alreadyHad} already had lyrics` : null,
-      run.notFound ? `${run.notFound} not found` : null,
-      run.instrumental ? `${run.instrumental} instrumental` : null,
-      run.busy ? `${run.busy} not answered` : null,
-      run.failed ? `${run.failed} failed` : null,
-    ].filter(Boolean).join(' · ');
-    status.innerHTML = `
-      <div class="set-info">
-        <div class="set-info-t">${esc(label)}</div>
-        <div class="set-info-d">${esc(counts)}${run.reason ? `. ${esc(run.reason)}` : ''}</div>
-      </div>
-      ${run.total ? `<progress class="lyrics-progress" max="${run.total}" value="${run.processed}"></progress>` : ''}`;
+    head = 'Library walk';
+    sub = `${run.written} written · ${run.notFound} not found`;
   }
+  if (!running && ['Cancelled', 'Interrupted', 'Failed'].includes(run.status)) head = `${head || 'Stopped'} (${run.status.toLowerCase()})`;
+  lyricsEl('lyrics-head').textContent = head;
+  lyricsEl('lyrics-sub').textContent = sub;
 
-  const review = document.getElementById('lyrics-review');
-  const list = document.getElementById('lyrics-review-list');
-  if (review && list) {
-    review.hidden = !run.review?.length;
-    list.innerHTML = (run.review ?? []).slice(0, 100).map(entry => `
-      <div class="config-row lyrics-row">
-        <span class="lyrics-song">
-          <strong>${esc(entry.title)}</strong> <span class="set-opt">${esc(entry.artist)}</span>
-          <span class="set-info-d">${esc(entry.source)}, ${esc(entry.kind)}: ${esc(entry.reason)}</span>
-        </span>
-        <span class="genre-preset-actions">
-          <button class="btn btn-ghost" type="button" data-review-choose="${esc(entry.path)}">Choose other lyrics</button>
-          <button class="btn btn-ghost" type="button" data-review-dismiss="${esc(entry.path)}">They're right</button>
-        </span>
-      </div>`).join('');
-  }
+  lyricsEl('lyrics-empty').hidden = run.status !== 'Idle';
+  const shown = lyricsShowAll ? rows : rows.slice(0, LYRICS_ROW_CAP);
+  lyricsEl('lyrics-list').innerHTML = shown.map(row => lyricsItem(run, row)).join('');
+  const more = lyricsEl('lyrics-more');
+  const lastError = run.errors?.length ? run.errors[run.errors.length - 1] : '';
+  more.hidden = !(rows.length > shown.length || lastError);
+  more.innerHTML = [
+    rows.length > shown.length ? `Showing ${shown.length} of ${rows.length}. <button type="button" class="link-btn" id="lyrics-show-all">Show all</button> Select all includes the rest.` : '',
+    lastError ? `<span class="field-error">${esc(lastError)}</span>` : '',
+  ].filter(Boolean).join(' ');
+  lyricsEl('lyrics-scan').disabled = running;
+  renderLyricsBar(run);
 }
 
 async function loadLyricsLibrary(retry = false) {
   const response = await lyricsFetch('/api/admin/lyrics/library', {}, retry);
   if (!response.ok) return null;
   const run = await response.json();
+  // Accepted but not started yet: shown as starting, so the page keeps watching.
+  if (run.busy && run.status !== 'Running') Object.assign(run, { status: 'Running', starting: true });
+  const previous = lyricsRun;
+  lyricsRun = run;
+  if (!lyricsControlsSet && run.status !== 'Idle' && run.scope) {
+    lyricsEl('lyrics-scope').value = run.scope;
+    document.querySelectorAll('.seg[data-seg-for="lyrics-scope"]').forEach(seg => syncSegment(seg, false));
+  }
+  lyricsControlsSet = true;
   renderLyricsLibrary(run);
+  if (previous?.status === 'Running' && run.status === 'Failed') lyricsNote(run.reason || 'The run stopped.', 'error');
+
   if (run.status === 'Running') {
-    if (!lyricsLibraryPoll) lyricsLibraryPoll = setInterval(() => loadLyricsLibrary(), 2000);
+    if (!lyricsLibraryPoll) lyricsLibraryPoll = setInterval(() => loadLyricsLibrary(), 1500);
   } else if (lyricsLibraryPoll) {
     clearInterval(lyricsLibraryPoll);
     lyricsLibraryPoll = null;
@@ -3759,25 +3911,79 @@ async function loadLyricsLibrary(retry = false) {
   return run;
 }
 
-async function lyricsLibraryAction(url, body) {
-  const response = await lyricsFetch(url, {
+async function startLyrics(mode, picked = null) {
+  const scope = picked ? lyricsRun?.scope : lyricsEl('lyrics-scope').value;
+  const response = await lyricsFetch('/api/admin/lyrics/library', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+    body: JSON.stringify({ mode, scope, picked }),
   });
-  if (!response.ok) note(document.getElementById('lyrics-library-cancel'), await lyricsError(response), 'error');
+  if (!response.ok) {
+    lyricsNote(await lyricsError(response), 'error');
+    return;
+  }
   await loadLyricsLibrary();
 }
 
-document.getElementById('lyrics-library-start')?.addEventListener('click', () =>
-  lyricsLibraryAction('/api/admin/lyrics/library', { upgrade: !!document.getElementById('lyrics-library-upgrade')?.checked }));
-document.getElementById('lyrics-library-resume')?.addEventListener('click', () => lyricsLibraryAction('/api/admin/lyrics/library/resume'));
-document.getElementById('lyrics-library-cancel')?.addEventListener('click', () => lyricsLibraryAction('/api/admin/lyrics/library/cancel'));
-document.getElementById('lyrics-review-list')?.addEventListener('click', event => {
-  const choose = event.target.closest('[data-review-choose]');
-  if (choose) openLyricsPicker({ path: choose.dataset.reviewChoose });
-  const dismiss = event.target.closest('[data-review-dismiss]');
-  if (dismiss) lyricsLibraryAction('/api/admin/lyrics/review/dismiss', { path: dismiss.dataset.reviewDismiss });
+function lyricsPickedIds() {
+  return lyricsRows(lyricsRun).filter(row => lyricsPickable(lyricsRun, row) && lyricsPickedRows.has(row.id)).map(row => row.id);
+}
+
+lyricsEl('lyrics-scan')?.addEventListener('click', () => startLyrics('Scan'));
+lyricsEl('lyrics-scan-first')?.addEventListener('click', () => startLyrics('Scan'));
+lyricsEl('lyrics-show')?.addEventListener('change', () => { if (lyricsRun) renderLyricsLibrary(lyricsRun); });
+lyricsEl('lyrics-list')?.addEventListener('click', event => {
+  const choose = event.target.closest('[data-lyrics-choose]');
+  if (choose) {
+    openLyricsPicker({ path: choose.dataset.lyricsChoose });
+    document.getElementById('lyrics-picker')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  const item = event.target.closest('.lyrics-pick[role="checkbox"]');
+  if (!item || !lyricsRun) return;
+  const id = item.dataset.lyricsRow;
+  if (lyricsPickedRows.has(id)) lyricsPickedRows.delete(id); else lyricsPickedRows.add(id);
+  item.setAttribute('aria-checked', String(lyricsPickedRows.has(id)));
+  renderLyricsBar(lyricsRun);
+});
+lyricsEl('lyrics-more')?.addEventListener('click', event => {
+  if (event.target.id !== 'lyrics-show-all' || !lyricsRun) return;
+  lyricsShowAll = true;
+  renderLyricsLibrary(lyricsRun);
+});
+lyricsEl('lyrics-all')?.addEventListener('click', () => {
+  lyricsPickedRows = new Set(lyricsRows(lyricsRun).filter(row => lyricsPickable(lyricsRun, row)).map(row => row.id));
+  renderLyricsLibrary(lyricsRun);
+});
+lyricsEl('lyrics-none')?.addEventListener('click', () => {
+  lyricsPickedRows = new Set();
+  renderLyricsLibrary(lyricsRun);
+});
+lyricsEl('lyrics-go')?.addEventListener('click', async () => {
+  const run = lyricsRun;
+  const ids = lyricsPickedIds();
+  if (!run || !ids.length) { lyricsNote('Pick at least one song first.', 'info'); return; }
+  if (run.mode === 'Scan') { await startLyrics('Preview', ids); return; }
+  if (run.mode === 'Preview') {
+    if (!(await askConfirm(`Save lyrics for ${ids.length} song${ids.length === 1 ? '' : 's'}?`,
+      'Octo replaces only lyrics it wrote, and keeps what it replaces, so Undo puts it back.', 'Save lyrics'))) return;
+    await startLyrics('Save', ids);
+  }
+});
+lyricsEl('lyrics-stop')?.addEventListener('click', async () => {
+  const response = await lyricsFetch('/api/admin/lyrics/library/cancel', { method: 'POST' });
+  if (!response.ok) { lyricsNote('Could not stop.', 'error'); return; }
+  lyricsNote('Stopping after the current song.', 'info');
+  await loadLyricsLibrary();
+});
+lyricsEl('lyrics-resume')?.addEventListener('click', async () => {
+  const response = await lyricsFetch('/api/admin/lyrics/library/resume', { method: 'POST' });
+  if (!response.ok) { lyricsNote(await lyricsError(response), 'error'); return; }
+  await loadLyricsLibrary();
+});
+lyricsEl('lyrics-undo')?.addEventListener('click', async () => {
+  if (!(await askConfirm('Put back the old lyrics?', 'Every lyrics file and tag Save wrote goes back to what it was. Anything changed since is left alone.', 'Put back lyrics'))) return;
+  await startLyrics('Undo');
 });
 
 // ---- Fix a song's lyrics -------------------------------------------------

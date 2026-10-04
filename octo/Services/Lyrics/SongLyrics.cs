@@ -17,7 +17,13 @@ public sealed record SongLyrics(SongLyricsPlace Where, LyricsTiming Timing, bool
     /// <summary>Lyrics files Navidrome or another player may read beside a song, besides .lrc and .txt.</summary>
     private static readonly string[] OtherExtensions = [".ttml", ".elrc", ".srt", ".yaml", ".yml"];
 
-    public static SongLyrics Of(string audioPath)
+    public static SongLyrics Of(string audioPath) => Of(audioPath, null, readTags: true);
+
+    /// <summary>The same, with the lyrics in the song's tags already read (a scan reads every tag
+    /// once).</summary>
+    public static SongLyrics Of(string audioPath, string? tagLyrics) => Of(audioPath, tagLyrics, readTags: false);
+
+    private static SongLyrics Of(string audioPath, string? tagLyrics, bool readTags)
     {
         var stem = Stem(audioPath);
         if (File.Exists(stem + ".lrc"))
@@ -26,7 +32,7 @@ public sealed record SongLyrics(SongLyricsPlace Where, LyricsTiming Timing, bool
             return new(SongLyricsPlace.Beside, TimingOf(ReadQuietly(stem + ".txt")), false, false);
         if (OtherExtensions.Any(extension => File.Exists(stem + extension)))
             return new(SongLyricsPlace.Beside, LyricsTiming.None, false, true);
-        var inside = TagLyrics(audioPath);
+        var inside = readTags ? TagLyrics(audioPath) : tagLyrics;
         if (string.IsNullOrWhiteSpace(inside)) return Nothing;
         return new(SongLyricsPlace.Inside, TimingOf(inside), IsOctosText(inside), false);
     }

@@ -62,7 +62,9 @@ public sealed class LyricsAdminController : ControllerBase
 
     // ---- Find lyrics for the library ------------------------------------------------------
 
-    public sealed record LibraryStartRequest(bool Upgrade);
+    /// <summary>Upgrade is for a walk. Mode is a step of the lyrics page (Scan, Preview, Save,
+    /// Undo), Scope is for a scan, Picked the rows for Preview and Save.</summary>
+    public sealed record LibraryStartRequest(bool Upgrade, string? Mode = null, string? Scope = null, List<string>? Picked = null);
 
     [HttpGet("library")]
     public IActionResult GetLibraryRun([FromHeader(Name = "X-Octo-Browse-Token")] string? token)
@@ -92,6 +94,18 @@ public sealed class LyricsAdminController : ControllerBase
             run.Reason,
             run.Errors,
             canResume = run.CanResume,
+            mode = run.Mode.ToString(),
+            run.WordAlready,
+            picked = run.Picked?.Count,
+            // What a preview found stays here; the dashboard gets the first lines.
+            rows = run.Rows.Select(row => new
+            {
+                row.Id, row.Path, row.Artist, row.Title, row.Album, row.Has, row.Result,
+                row.Source, row.Kind, row.CandidateId, row.Doubt, row.Preview,
+            }),
+            busy = _job.IsRunning,
+            canUndo = _job.CanUndo,
+            saveTo = LyricsSaveTo.Normalize(_metadata.CurrentValue.SaveLyricsTo),
             review = run.Review.OrderByDescending(entry => entry.AtUtc).ToList(),
             writesBesideAll = _metadata.CurrentValue.WriteLyricsBesideAllSongs,
             fetching = _metadata.CurrentValue.FetchLyrics,
@@ -103,11 +117,18 @@ public sealed class LyricsAdminController : ControllerBase
         [FromHeader(Name = "X-Octo-Browse-Token")] string? token)
     {
         if (!Signed(token)) return SignIn();
-        if (!_metadata.CurrentValue.FetchLyrics)
+        if (!Enum.TryParse<LyricsLibraryMode>(request.Mode, ignoreCase: true, out var mode)) mode = LyricsLibraryMode.Walk;
+        // A scan and an undo look nothing up.
+        if (!_metadata.CurrentValue.FetchLyrics && mode is LyricsLibraryMode.Walk or LyricsLibraryMode.Preview)
             return BadRequest(new { error = "Turn on Fetch lyrics first, or a run would find nothing." });
-        if (!_job.TryEnqueue(new LyricsLibraryRequest(request.Upgrade)))
+        if (mode is LyricsLibraryMode.Preview or LyricsLibraryMode.Save && request.Picked is not { Count: > 0 })
+            return BadRequest(new { error = "Pick at least one song." });
+        if (mode == LyricsLibraryMode.Undo && !_job.CanUndo)
+            return BadRequest(new { error = "There is nothing to undo." });
+        if (!_job.TryEnqueue(new LyricsLibraryRequest(request.Upgrade, Mode: mode, Scope: request.Scope, Picked: request.Picked)))
             return Conflict(new { error = "Lyrics are already being found for the library." });
-        _logger.LogInformation("Finding lyrics for the library requested (upgrade {Upgrade})", request.Upgrade);
+        _logger.LogInformation("Lyrics for the library requested: {Mode}, scope {Scope}, {Picked} (upgrade {Upgrade})",
+            mode, request.Scope ?? "default", request.Picked is null ? "no pick" : $"{request.Picked.Count} picked", request.Upgrade);
         return Accepted(new { started = true });
     }
 
@@ -124,7 +145,7 @@ public sealed class LyricsAdminController : ControllerBase
     {
         if (!Signed(token)) return SignIn();
         if (!_job.Current.CanResume) return BadRequest(new { error = "There is nothing to resume." });
-        if (!_job.TryEnqueue(new LyricsLibraryRequest(_job.Current.Upgrade, Resume: true)))
+        if (!_job.TryEnqueue(new LyricsLibraryRequest(_job.Current.Upgrade, Resume: true, Mode: _job.Current.Mode)))
             return Conflict(new { error = "Lyrics are already being found for the library." });
         return Accepted(new { resumed = true });
     }

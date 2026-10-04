@@ -141,6 +141,12 @@ public sealed class LyricsSidecarWriter : BackgroundService
         }
     }
 
+    /// <summary>What the sources find for a song, its own lyrics ranked among them, without
+    /// saving anything: the lyrics page's preview.</summary>
+    internal Task<LyricsLookup> LookUpAsync(LyricsJob job, LyricsTiming songsOwn, CancellationToken ct) =>
+        _lyrics.FindAsync(new LyricsQuery(job.Artist, job.Title, job.Album, job.DurationSeconds ?? ReadDuration(job.AudioPath)),
+            ct, songsOwn);
+
     /// <summary>
     /// Replace a song's lyrics with lyrics someone chose. Only where Octo may write: where the
     /// song has no lyrics, or only Octo's; lyrics the owner put there are never touched.
@@ -158,24 +164,83 @@ public sealed class LyricsSidecarWriter : BackgroundService
     /// allowed (inside a song whose tags hold someone else's lyrics), they go beside it instead,
     /// which takes nothing away. False when there was nowhere to put them.
     /// </summary>
-    private async Task<bool> SaveAsync(string audioPath, LyricsResult found, CancellationToken ct)
+    private async Task<bool> SaveAsync(string audioPath, LyricsResult found, CancellationToken ct,
+        Action<string, string, string?>? record = null)
     {
         var stem = Stem(audioPath);
         var saveTo = SaveTo;
         var inside = saveTo != LyricsSaveTo.Beside && SongLyrics.MayWriteInside(audioPath);
         var beside = saveTo != LyricsSaveTo.Inside || !inside;
         var saved = false;
-        if (inside && WriteInside(audioPath, found))
+        if (inside)
         {
-            saved = true;
-            ScanSoon();
+            record?.Invoke(audioPath, LyricsUndoJournal.Inside, ReadTagLyrics(audioPath));
+            if (WriteInside(audioPath, found))
+            {
+                saved = true;
+                ScanSoon();
+            }
         }
         if (beside && SongLyrics.MayWriteBeside(stem, found.HasSynced))
         {
+            var target = stem + (found.HasSynced ? ".lrc" : ".txt");
+            record?.Invoke(target, LyricsUndoJournal.Beside, File.Exists(target) ? await File.ReadAllTextAsync(target, ct) : null);
             await WriteFileAsync(stem, found, ct);
             saved = true;
         }
         return saved;
+    }
+
+    /// <summary>
+    /// Save lyrics someone picked on the lyrics page, where LYRICS_SAVE_TO says and Octo may
+    /// write, telling <paramref name="record"/> what each write replaces (path, kind, what was
+    /// there) before it happens. False when there was nowhere Octo may write.
+    /// </summary>
+    internal Task<bool> SaveChosenAsync(string audioPath, LyricsResult found, Action<string, string, string?> record,
+        CancellationToken ct) => SaveAsync(audioPath, found, ct, record);
+
+    /// <summary>
+    /// Put back what one Save replaced. A file Octo added is removed, and only while it is still
+    /// Octo's; lyrics in a song's tags go back only while the tags hold Octo's. False when the
+    /// file has changed since, and was left alone.
+    /// </summary>
+    internal bool Restore(LyricsUndoJournal.Entry entry)
+    {
+        try
+        {
+            if (entry.Kind == LyricsUndoJournal.Inside)
+            {
+                if (!File.Exists(entry.Path) || !SongLyrics.MayWriteInside(entry.Path)) return false;
+                using var file = TagLib.File.Create(entry.Path);
+                file.Tag.Lyrics = entry.Before;
+                file.Save();
+                ScanSoon();
+                return true;
+            }
+            var ours = entry.Path.EndsWith(".lrc", StringComparison.OrdinalIgnoreCase) ? IsOctos(entry.Path) : File.Exists(entry.Path);
+            if (!ours) return false;
+            if (entry.Before is null) File.Delete(entry.Path);
+            else File.WriteAllText(entry.Path, entry.Before, Utf8NoBom);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not put back the lyrics of {Path}: {M}", entry.Path, ex.Message);
+            return false;
+        }
+    }
+
+    private static string? ReadTagLyrics(string audioPath)
+    {
+        try
+        {
+            using var file = TagLib.File.Create(audioPath);
+            return string.IsNullOrEmpty(file.Tag.Lyrics) ? null : file.Tag.Lyrics;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task WriteFileAsync(string stem, LyricsResult found, CancellationToken ct)

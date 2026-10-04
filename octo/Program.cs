@@ -471,6 +471,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Lyri
 builder.Services.AddSingleton(sp => new Octo.Services.Lyrics.LyricsLibraryStore(
     System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "lyrics-library.json"),
     sp.GetRequiredService<ILogger<Octo.Services.Lyrics.LyricsLibraryStore>>()));
+// What the lyrics page's Save wrote over, so Undo can put it back.
+builder.Services.AddSingleton(new Octo.Services.Lyrics.LyricsUndoJournal(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "lyrics-undo.jsonl")));
 builder.Services.AddSingleton<Octo.Services.Lyrics.LyricsLibraryWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Lyrics.LyricsLibraryWorker>());
 
