@@ -95,6 +95,12 @@ public sealed class LidarrHeartProtectionTests : IDisposable
             Title = title, Artist = "Massive Attack", Album = "Mezzanine", Track = track,
             ExternalProvider = "soulseek", ExternalId = Id(title),
         };
+        // A track heart: Deezer found Teardrop on its single, where it is track 1.
+        metadata.Setup(m => m.GetSongAsync("soulseek", "teardrop-heart")).ReturnsAsync(() => new Song
+        {
+            Title = "Teardrop", Artist = "Massive Attack", Album = "Mezzanine", Track = 1,
+            ExternalProvider = "soulseek", ExternalId = Id("Teardrop"),
+        });
         metadata.Setup(m => m.GetAlbumAsync("soulseek", "mezzanine")).ReturnsAsync(() => new Album
         {
             Title = "Mezzanine", Artist = "Massive Attack", Songs = [Song("Angel", 1), Song("Teardrop", 3)],
@@ -118,7 +124,12 @@ public sealed class LidarrHeartProtectionTests : IDisposable
             .AddSingleton(_downloads.Object)
             .AddSingleton<IOptionsMonitor<LibraryActionSettings>>(TestOptions.Monitor(actions ?? new LibraryActionSettings()))
             .BuildServiceProvider();
-        return new LidarrHeartAcquisitionService(new LidarrClient(factory, lidarr), metadata.Object, null!, lidarr, subsonic,
+        // Deezer answers nothing here, so a track heart files the song under its own album.
+        var offline = new Mock<IHttpClientFactory>();
+        offline.Setup(f => f.CreateClient(It.IsAny<string>())).Returns(() => new HttpClient(new Unreachable()));
+        var deezer = new Octo.Services.Metadata.DeezerMetadataService(offline.Object, TestOptions.Monitor(new MetadataSettings()),
+            NullLogger<Octo.Services.Metadata.DeezerMetadataService>.Instance);
+        return new LidarrHeartAcquisitionService(new LidarrClient(factory, lidarr), metadata.Object, deezer, lidarr, subsonic,
             config, identity,
             new NotificationService([], TestOptions.Monitor(new NotificationSettings()), NullLogger<NotificationService>.Instance),
             NullLogger<LidarrHeartAcquisitionService>.Instance, claims: _claims, services: services, imports: _imports, ids: _ids)
@@ -199,6 +210,26 @@ public sealed class LidarrHeartProtectionTests : IDisposable
         Assert.Single(_lidarr.Deleted);
     }
 
+    /// <summary>
+    /// A song heart: Lidarr still brings the whole album, the hearted song lands with its own
+    /// notice, the other song lands quietly, and Angel (track 1 on the album) is never taken
+    /// for Teardrop, which is track 1 on the single Deezer found it on.
+    /// </summary>
+    [Fact]
+    public async Task ASongHeartLandsItsSongWithANoticeAndTheRestQuietly()
+    {
+        _lidarr.OnSearch = () => { _lidarr.Import(1, "Angel", "FLAC"); _lidarr.Import(3, "Teardrop", "FLAC"); };
+
+        Assert.True(await Service().TryAcquireTrackAsync("soulseek", "teardrop-heart", requestedBy: "alice")
+            .WaitAsync(TimeSpan.FromSeconds(20)));
+
+        Assert.Equal(["Angel", "Teardrop"], Taken());
+        Assert.False(_taken.Single(t => t.Title == "Teardrop").Quiet);
+        Assert.True(_taken.Single(t => t.Title == "Angel").Quiet);
+        Assert.Equal(Id("Teardrop"), _taken.Single(t => t.Title == "Teardrop").Id);
+        Assert.NotEqual(Id("Teardrop"), _taken.Single(t => t.Title == "Angel").Id);
+    }
+
     [Fact]
     public async Task NothingArrivingInTimeIsAMissForTheNextSource()
     {
@@ -239,5 +270,11 @@ public sealed class LidarrHeartProtectionTests : IDisposable
 
         Assert.Null(LidarrHeartAcquisitionService.MatchSong(heart, angel, matchByNumber: false));
         Assert.Same(heart.Songs[0], LidarrHeartAcquisitionService.MatchSong(heart, angel));
+    }
+
+    private sealed class Unreachable : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            throw new HttpRequestException("offline in this test");
     }
 }

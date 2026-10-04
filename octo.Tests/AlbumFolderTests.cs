@@ -196,6 +196,10 @@ public sealed class AlbumFolderTests : IDisposable
 
         public void Length(string remote, int seconds) => _lengths[remote] = seconds;
 
+        /// <summary>What a peer lists for one folder of its share, by user and folder; null lists nothing.</summary>
+        public Func<string, string, object?>? Folders { get; set; }
+        public readonly ConcurrentQueue<(string User, string Folder)> Browses = new();
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var path = request.RequestUri!.AbsolutePath;
@@ -218,6 +222,16 @@ public sealed class AlbumFolderTests : IDisposable
             }
             if (path.StartsWith("/api/v0/searches/"))
                 return Json("""{"state":"Completed, ResponseLimitReached","endedAt":"2026-10-03T12:00:00Z","responseCount":1}""");
+            if (path.StartsWith("/api/v0/users/") && path.EndsWith("/directory") && request.Method == HttpMethod.Post)
+            {
+                var user = Uri.UnescapeDataString(path.Split('/')[4]);
+                using var doc = JsonDocument.Parse(body);
+                var folder = doc.RootElement.GetProperty("directory").GetString()!;
+                Browses.Enqueue((user, folder));
+                return Folders?.Invoke(user, folder) is { } listing
+                    ? Json(JsonSerializer.Serialize(listing))
+                    : new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
             if (path == "/api/v0/transfers/downloads/batches")
             {
                 using var doc = JsonDocument.Parse(body);
@@ -395,4 +409,99 @@ public sealed class AlbumFolderTests : IDisposable
         Assert.True(walk.Slskd.Searches.Count >= 4);
         Assert.All(walk.Slskd.Batches, b => Assert.Single(b.Files));
     }
+
+    private static object LossyResponse(string user, string file, int seconds) => new
+    {
+        username = user, uploadSpeed = 1_000_000, queueLength = 0, hasFreeUploadSlot = true,
+        files = new[] { new { filename = file, size = 8_000_000L, length = seconds, extension = "mp3", bitRate = 320 } },
+    };
+
+    /// <summary>
+    /// #70: the search finds the song only as an MP3, and the FLAC sits beside it in the same
+    /// folder, unanswered. Octo asks the peer for that folder and takes the FLAC from it.
+    /// </summary>
+    [Fact]
+    public async Task AFlacBesideTheOnlyMp3TheSearchFoundIsTaken()
+    {
+        const string folder = @"Music\Drake\Nothing Was the Same";
+        var walk = Build(albumFolders: false, songs => text =>
+            text.Contains("Started") ? [LossyResponse("bothpeer", $@"{folder}\04 - Started.mp3", 180)] : []);
+        var started = walk.Songs[3];
+        var flac = $@"{folder}\04 - Started.flac";
+        walk.Slskd.Length(flac, 180);
+        walk.Slskd.Folders = (user, dir) => user == "bothpeer" && dir == folder
+            ? new
+            {
+                name = folder,
+                files = new object[]
+                {
+                    new { filename = "04 - Started.mp3", size = 8_000_000L, extension = "mp3", length = 180 },
+                    new { filename = "04 - Started.flac", size = (long)Flac(180).Length, extension = "flac", length = 180 },
+                    new { filename = "03 - Hold On, We're Going Home.flac", size = (long)Flac(228).Length, extension = "flac", length = 228 },
+                },
+            }
+            : null;
+
+        var path = await walk.Service.ExecuteAcquisitionAsync("soulseek", started.ExternalId!, false, true,
+            DownloadSource.Soulseek, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(60));
+
+        Assert.Equal([("bothpeer", folder)], walk.Slskd.Browses);
+        var batch = Assert.Single(walk.Slskd.Batches);
+        Assert.Equal([flac], batch.Files);
+        Assert.EndsWith(".flac", path);
+        Assert.True(File.Exists(path));
+    }
+
+    [Fact]
+    public async Task NoFlacBesideTheMp3MeansNoDownload()
+    {
+        const string folder = @"Music\Drake\Nothing Was the Same";
+        var walk = Build(albumFolders: false, songs => text =>
+            text.Contains("Started") ? [LossyResponse("mp3peer", $@"{folder}\04 - Started.mp3", 180)] : []);
+        walk.Slskd.Folders = (_, _) => new
+        {
+            name = folder,
+            files = new object[] { new { filename = "04 - Started.mp3", size = 8_000_000L, extension = "mp3", length = 180 } },
+        };
+
+        await Assert.ThrowsAnyAsync<Exception>(() => walk.Service.ExecuteAcquisitionAsync("soulseek", walk.Songs[3].ExternalId!,
+            false, true, DownloadSource.Soulseek, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(60)));
+
+        Assert.Single(walk.Slskd.Browses);
+        Assert.Empty(walk.Slskd.Batches);
+    }
+
+    [Fact]
+    public void AFoldersFilesComeBackWithTheirFullRemotePath()
+    {
+        var from = new SoulseekFileHit { Username = "peer", Filename = @"A\B\x.mp3", QueueLength = 2, UploadSpeed = 900, HasFreeUploadSlot = true };
+        var hits = SoulseekClient.ParseDirectory(
+            """[{"name":"A\\B","files":[{"filename":"01 - Song.flac","size":30000000,"extension":"flac","length":200,"bitDepth":16,"sampleRate":44100}]}]""",
+            from, @"A\B");
+
+        var hit = Assert.Single(hits);
+        Assert.Equal(@"A\B\01 - Song.flac", hit.Filename);
+        Assert.Equal("flac", hit.Extension);
+        Assert.Equal(200, hit.Length);
+        Assert.Equal(2, hit.QueueLength);
+        Assert.True(hit.HasFreeUploadSlot);
+    }
+
+    [Fact]
+    public void AFolderObjectAndFullPathsAreReadToo()
+    {
+        var from = new SoulseekFileHit { Username = "peer", Filename = @"A\B\x.mp3" };
+        var hits = SoulseekClient.ParseDirectory(
+            """{"files":[{"filename":"A\\B\\02 - Other.flac","size":1}]}""", from, @"A\B");
+
+        Assert.Equal(@"A\B\02 - Other.flac", Assert.Single(hits).Filename);
+        Assert.Equal("flac", hits[0].Extension);
+    }
+
+    [Theory]
+    [InlineData(@"Music\Artist\Album\01 - Song.mp3", @"Music\Artist\Album")]
+    [InlineData("Music/Artist/01 - Song.mp3", "Music/Artist")]
+    [InlineData("01 - Song.mp3", "")]
+    public void TheFolderOfAFileIsWhatThePeerNamesIt(string file, string folder) =>
+        Assert.Equal(folder, SoulseekDownloadService.FolderOfFile(file));
 }

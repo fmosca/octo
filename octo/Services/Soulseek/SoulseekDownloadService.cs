@@ -682,6 +682,8 @@ public class SoulseekDownloadService : BaseDownloadService
         {
             List<SoulseekFileHit> hits = [];
             List<SoulseekFileHit> found = [];
+            // Every query's answers, for the folder look below.
+            List<SoulseekFileHit> everyHit = [];
             foreach (var (query, strict) in queries)
             {
                 if (ReferenceEquals(query, queries[0].Query))
@@ -691,11 +693,16 @@ public class SoulseekDownloadService : BaseDownloadService
                 // Ranked once, on the whole search: slskd hands over a search's answers only when it
                 // ends, so there is nothing to stop early on.
                 hits = await _slskd.SearchAsync(query.Text, profile, cancellationToken);
+                everyHit.AddRange(hits);
                 found = RankCandidates(hits, routing.Title!, routing.Duration, strict, routing.Album)
                     .Where(h => passOver is null || h.Username != passOver.Username || h.Filename != passOver.Filename)
                     .ToList();
                 if (found.Count > 0) break;
             }
+            if (found.Count == 0)
+                found = (await BesideLossyCopiesAsync(everyHit, routing, cancellationToken))
+                    .Where(h => passOver is null || h.Username != passOver.Username || h.Filename != passOver.Filename)
+                    .ToList();
 
             // Logged here, once per song, rather than inside RankCandidates. This is the line that
             // explains a track that used to download and now does not.
@@ -1198,6 +1205,58 @@ public class SoulseekDownloadService : BaseDownloadService
     /// </summary>
     internal static bool AddsVersion(string filename, string title) =>
         SongIdentity.AddedVersions(title, LeafTitle(filename)).Count > 0;
+
+    /// <summary>How many peers' folders are looked in when a search finds only lossy copies.</summary>
+    internal const int PeerFoldersToBrowse = 3;
+
+    /// <summary>How long a peer gets to list one folder.</summary>
+    internal static readonly TimeSpan BrowseTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// A search that found the song only lossy (an MP3 where FLAC is preferred) looks in the
+    /// folders those copies sit in: a peer often shares an album in both formats, side by side,
+    /// and only one format answered the search (#70). The best few peers are asked for that one
+    /// folder, and what they list is ranked exactly like search hits, so title, length, version
+    /// and live folder all count, and AcoustID and the spectrum still check the download.
+    /// </summary>
+    private async Task<List<SoulseekFileHit>> BesideLossyCopiesAsync(List<SoulseekFileHit> hits, SoulseekRouting routing,
+        CancellationToken cancellationToken)
+    {
+        var wanted = SoulseekClient.NormalizeExtension(_settings.PreferredExtension, "");
+        var title = routing.Title!;
+        var lossy = hits
+            .Where(h => !string.Equals(h.Extension, wanted, StringComparison.OrdinalIgnoreCase))
+            .Where(h => FolderOfFile(h.Filename).Length > 0)
+            .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title, requirePhrase: false))
+            .Where(h => DurationPlausible(h.Length, routing.Duration, requireKnownLength: false))
+            .Where(h => !AddsVersion(h.Filename, title))
+            .Where(h => !FromLiveFolder(h.Filename, title, routing.Album))
+            .GroupBy(h => (h.Username, Folder: FolderOfFile(h.Filename)))
+            .Select(group => group.First())
+            .OrderByDescending(h => h.HasFreeUploadSlot == true)
+            .ThenBy(h => h.QueueLength ?? int.MaxValue)
+            .ThenByDescending(h => h.UploadSpeed ?? 0)
+            .Take(PeerFoldersToBrowse)
+            .ToList();
+        if (lossy.Count == 0) return [];
+
+        var listed = new List<SoulseekFileHit>();
+        // One at a time: slskd runs one peer operation at a time anyway.
+        foreach (var hit in lossy)
+            listed.AddRange(await _slskd.BrowseFolderAsync(hit, FolderOfFile(hit.Filename), BrowseTimeout, cancellationToken));
+        var found = RankCandidates(listed, title, routing.Duration, strict: false, routing.Album);
+        Logger.LogInformation(
+            "Soulseek: no {Ext} of '{Artist} - {Title}' in the search; looked in {Peers} peers' folders beside their lossy copy and found {Count}",
+            wanted.ToUpperInvariant(), routing.Artist, title, lossy.Count, found.Count);
+        return found;
+    }
+
+    /// <summary>The folder a remote file sits in, as the peer names it; empty at the share's root.</summary>
+    internal static string FolderOfFile(string filename)
+    {
+        var slash = filename.LastIndexOfAny(['\\', '/']);
+        return slash > 0 ? filename[..slash] : "";
+    }
 
     /// <summary>
     /// Whether a plainly named file sits in a live album's folder: "Decade (live at the El

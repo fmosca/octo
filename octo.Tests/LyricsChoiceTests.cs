@@ -329,10 +329,14 @@ public sealed class LyricsChoiceTests : IDisposable
         public string Key => "kugou";
         public int Finds;
 
+        /// <summary>Done once a lookup has its answer, for a test to wait on instead of the clock.</summary>
+        public TaskCompletionSource Answered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public async Task<LyricsLookup> FindAsync(LyricsQuery query, CancellationToken ct)
         {
             Interlocked.Increment(ref Finds);
             await Task.Delay(delay, ct);
+            Answered.TrySetResult();
             return new LyricsLookup(new LyricsResult("KuGou", "[00:01.00]found late", null, false), false);
         }
     }
@@ -350,8 +354,11 @@ public sealed class LyricsChoiceTests : IDisposable
         Assert.Equal("failed", first.GetProperty("status").GetString());
         Assert.Contains("Still looking", first.GetProperty("error").GetProperty("message").GetString());
 
-        // The lookup kept going and was kept, so the next ask gets the lyrics at once.
-        await Task.Delay(TimeSpan.FromSeconds(2.5));
+        // The lookup kept going and was kept, so the next ask gets the lyrics at once. Waited for
+        // by the lookup's own answer, not a fixed sleep, which a loaded machine overran; the short
+        // grace after it is for the answer to be stored.
+        await slow.Answered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
         var second = await GetJson(client, $"/rest/getLyricsBySongId?id={id}&f=json&{Auth()}");
         Assert.Equal("ok", second.GetProperty("status").GetString());
         var line = second.GetProperty("lyricsList").GetProperty("structuredLyrics")[0].GetProperty("line")[0];

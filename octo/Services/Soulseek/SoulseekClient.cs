@@ -537,6 +537,88 @@ public class SoulseekClient
     }
 
     /// <summary>
+    /// The files in one folder of a peer's share (slskd asks the peer for that folder alone, not
+    /// its whole share). Each comes back with its full remote path, ready to enqueue, and the
+    /// queue and speed of <paramref name="from"/>, the search hit that pointed at the folder.
+    /// Empty when the peer does not answer in time or will not list it.
+    /// </summary>
+    public async Task<List<SoulseekFileHit>> BrowseFolderAsync(SoulseekFileHit from, string directory, TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        limit.CancelAfter(timeout);
+        try
+        {
+            using var resp = await SendOperationAsync(
+                $"{Base}/api/v0/users/{Uri.EscapeDataString(from.Username)}/directory",
+                JsonSerializer.Serialize(new { directory }), search: false, limit.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("slskd could not list {User}'s folder {Folder}: HTTP {Code}",
+                    from.Username, directory, (int)resp.StatusCode);
+                return [];
+            }
+            return ParseDirectory(await resp.Content.ReadAsStringAsync(limit.Token), from, directory);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("{User} did not list the folder {Folder} within {Seconds}s", from.Username, directory, timeout.TotalSeconds);
+            return [];
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException)
+        {
+            _logger.LogInformation("Could not list {User}'s folder {Folder}: {Message}", from.Username, directory, ex.Message);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// slskd's answer for one folder: a folder object, or a list of them, each with its files. A
+    /// file's name is either its full remote path or its name alone, which is then put under the
+    /// folder it was listed in.
+    /// </summary>
+    internal static List<SoulseekFileHit> ParseDirectory(string json, SoulseekFileHit from, string directory)
+    {
+        var hits = new List<SoulseekFileHit>();
+        using var doc = JsonDocument.Parse(json);
+        IEnumerable<JsonElement> folders = doc.RootElement.ValueKind switch
+        {
+            JsonValueKind.Array => doc.RootElement.EnumerateArray().ToList(),
+            JsonValueKind.Object => [doc.RootElement],
+            _ => [],
+        };
+        foreach (var folder in folders)
+        {
+            var name = folder.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String
+                ? nameEl.GetString() : null;
+            var where = string.IsNullOrWhiteSpace(name) ? directory : name!;
+            if (!folder.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array) continue;
+            foreach (var file in files.EnumerateArray())
+            {
+                var filename = file.TryGetProperty("filename", out var fnEl) ? fnEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(filename)) continue;
+                if (filename.IndexOfAny(['\\', '/']) < 0) filename = where.TrimEnd('\\', '/') + "\\" + filename;
+                int? Int(string key) => file.TryGetProperty(key, out var el) && el.ValueKind == JsonValueKind.Number ? el.GetInt32() : null;
+                hits.Add(new SoulseekFileHit
+                {
+                    Username = from.Username,
+                    Filename = filename,
+                    Size = file.TryGetProperty("size", out var sizeEl) && sizeEl.ValueKind == JsonValueKind.Number ? sizeEl.GetInt64() : 0,
+                    BitRate = Int("bitRate"),
+                    SampleRate = Int("sampleRate"),
+                    BitDepth = Int("bitDepth"),
+                    Length = Int("length"),
+                    Extension = NormalizeExtension(file.TryGetProperty("extension", out var exEl) ? exEl.GetString() : null, filename),
+                    UploadSpeed = from.UploadSpeed,
+                    QueueLength = from.QueueLength,
+                    HasFreeUploadSlot = from.HasFreeUploadSlot,
+                });
+            }
+        }
+        return hits;
+    }
+
+    /// <summary>
     /// Reduce a file extension to the bare lowercase form ("flac").
     ///
     /// Candidate ranking accepts a hit by comparing this against the configured
