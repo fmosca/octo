@@ -1367,7 +1367,7 @@ const COVER_TILE_CAP = 600;
 const coverEl = id => document.getElementById(id);
 
 function coverNote(message, kind = 'ok') {
-  note(coverEl('cover-bar'), message, kind);
+  note(coverEl('cover-head')?.closest('.cover-summary'), message, kind);
 }
 
 function coverRows(run) { return run?.preview || []; }
@@ -1444,7 +1444,7 @@ function renderCoverBar(run) {
     go.textContent = 'Find better covers';
     go.hidden = false;
   } else if (run.mode === 'Preview' && pickableRows.length) {
-    countEl.textContent = `${count} selected`;
+    countEl.textContent = `${count.toLocaleString()} selected`;
     hint.textContent = 'Your old covers are kept, so you can undo.';
     go.textContent = `Replace ${count} cover${count === 1 ? '' : 's'}`;
     go.hidden = false;
@@ -3709,8 +3709,13 @@ const lyricsKindLabel = { word: 'Word by word', line: 'Timed by line', plain: 'N
 const lyricsSaveLabel = { beside: 'beside each song', inside: 'inside each song', both: 'beside and inside each song' };
 
 function lyricsNote(message, kind = 'ok') {
-  note(lyricsEl('lyrics-bar'), message, kind);
+  note(lyricsEl('lyrics-head')?.closest('.cover-summary'), message, kind);
 }
+
+// Set when a step was started from this page, so the page keeps watching (and says so) even
+// while a status request fails, instead of going quiet.
+let lyricsExpectRunning = false;
+let lyricsLoadError = '';
 
 // A scan lists every song it found wanting (the Show chip can narrow it to songs with none);
 // later steps list the songs they worked on.
@@ -3787,12 +3792,15 @@ function renderLyricsBar(run) {
       Undo: 'Putting the old lyrics back.',
     }[run.mode] || 'Working.';
   } else if (run.mode === 'Scan' && pickableRows.length) {
-    countEl.textContent = `${count} selected`;
-    hint.textContent = 'Looks up better lyrics for each. Nothing changes yet.';
+    countEl.textContent = `${count.toLocaleString()} selected`;
+    // A lookup and the pause after it come to about 2.5 seconds a song.
+    const minutes = Math.round(count * 2.5 / 60);
+    const takes = minutes >= 90 ? `about ${Math.round(minutes / 60)} hours` : minutes >= 2 ? `about ${minutes} minutes` : 'a minute or two';
+    hint.textContent = `Looks up better lyrics for each, ${takes}. Nothing changes yet, and you can stop and resume.`;
     go.textContent = 'Find better lyrics';
     go.hidden = false;
   } else if (run.mode === 'Preview' && pickableRows.length) {
-    countEl.textContent = `${count} selected`;
+    countEl.textContent = `${count.toLocaleString()} selected`;
     hint.textContent = `Saved ${lyricsSaveLabel[run.saveTo] || 'beside each song'}. Whatever they replace is kept, so you can undo.`;
     go.textContent = `Save ${count} lyric${count === 1 ? '' : 's'}`;
     go.hidden = false;
@@ -3839,18 +3847,19 @@ function renderLyricsLibrary(run) {
   } else if (running) {
     head = { Scan: 'Scanning', Preview: 'Finding better lyrics', Save: 'Saving lyrics', Undo: 'Putting lyrics back', Walk: 'Finding lyrics' }[run.mode] || 'Working';
     sub = `${run.processed.toLocaleString()} of ${plural(run.total, 'song')}`;
-    if (run.mode === 'Preview') {
-      if (lyricsPace?.runId !== run.runId) lyricsPace = { runId: run.runId, at: Date.now(), done: run.processed };
-      const moved = run.processed - lyricsPace.done;
-      if (moved >= 3) {
-        const left = (Date.now() - lyricsPace.at) / moved * Math.max(0, run.total - run.processed) / 1000;
-        if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
-      }
+    if (run.mode === 'Scan' && all.length) sub += ` · ${all.length.toLocaleString()} could have better lyrics so far`;
+    if (run.mode === 'Preview' && run.upgraded) sub += ` · ${run.upgraded.toLocaleString()} found so far`;
+    if (lyricsPace?.runId !== run.runId) lyricsPace = { runId: run.runId, at: Date.now(), done: run.processed };
+    const moved = run.processed - lyricsPace.done;
+    if (moved >= 3) {
+      const left = (Date.now() - lyricsPace.at) / moved * Math.max(0, run.total - run.processed) / 1000;
+      if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
     }
   } else if (run.mode === 'Scan') {
     head = all.length ? plural(all.length, 'song could have better lyrics', 'songs could have better lyrics') : 'Every song has word-by-word lyrics';
-    sub = [countHas('none') ? `${countHas('none')} with none` : '', countHas('plain') ? `${countHas('plain')} not timed` : '',
-      countHas('line') ? `${countHas('line')} timed by line` : '', run.wordAlready ? `${run.wordAlready} already word by word` : '']
+    const n = value => value.toLocaleString();
+    sub = [countHas('none') ? `${n(countHas('none'))} with none` : '', countHas('plain') ? `${n(countHas('plain'))} not timed` : '',
+      countHas('line') ? `${n(countHas('line'))} timed by line` : '', run.wordAlready ? `${n(run.wordAlready)} already word by word` : '']
       .filter(Boolean).join(' · ');
   } else if (run.mode === 'Preview') {
     const found = all.filter(row => row.result === 'found');
@@ -3886,12 +3895,48 @@ function renderLyricsLibrary(run) {
   renderLyricsBar(run);
 }
 
+function lyricsWatch(on) {
+  if (on && !lyricsLibraryPoll) lyricsLibraryPoll = setInterval(() => loadLyricsLibrary(), 1500);
+  if (!on && lyricsLibraryPoll) {
+    clearInterval(lyricsLibraryPoll);
+    lyricsLibraryPoll = null;
+  }
+}
+
+// What the page shows when Octo could not say how the lyrics run stands.
+function renderLyricsTrouble(message, signIn) {
+  if (!lyricsEl('lyrics-list')) return;
+  lyricsEl('lyrics-head').textContent = signIn ? '' : lyricsExpectRunning ? 'Still working' : 'Could not load the lyrics scan';
+  lyricsEl('lyrics-sub').textContent = signIn ? '' : message;
+  if (signIn && !lyricsRun) {
+    lyricsEl('lyrics-empty').hidden = false;
+    lyricsEl('lyrics-empty').querySelector('.set-info-d').textContent =
+      'Sign in with your Navidrome admin account to scan. A scan only reads your songs: it looks nothing up and changes nothing.';
+  }
+}
+
 async function loadLyricsLibrary(retry = false) {
-  const response = await lyricsFetch('/api/admin/lyrics/library', {}, retry);
-  if (!response.ok) return null;
+  let response;
+  try {
+    response = await lyricsFetch('/api/admin/lyrics/library', {}, retry);
+  } catch (error) {
+    response = null;
+  }
+  if (!response?.ok) {
+    const signIn = response?.status === 401;
+    lyricsLoadError = signIn ? '' : response ? await lyricsError(response) : 'Octo did not answer.';
+    renderLyricsTrouble(lyricsExpectRunning
+      ? `Octo did not say how far it got (${lyricsLoadError}). Checking again.`
+      : lyricsLoadError, signIn);
+    // A step started from here goes on on the server; keep asking until it can be shown.
+    lyricsWatch(lyricsExpectRunning && !signIn);
+    return null;
+  }
+  lyricsLoadError = '';
   const run = await response.json();
   // Accepted but not started yet: shown as starting, so the page keeps watching.
-  if (run.busy && run.status !== 'Running') Object.assign(run, { status: 'Running', starting: true });
+  if (run.running && run.status !== 'Running') Object.assign(run, { status: 'Running', starting: true });
+  if (run.status !== 'Running') lyricsExpectRunning = false;
   const previous = lyricsRun;
   lyricsRun = run;
   if (!lyricsControlsSet && run.status !== 'Idle' && run.scope) {
@@ -3902,12 +3947,7 @@ async function loadLyricsLibrary(retry = false) {
   renderLyricsLibrary(run);
   if (previous?.status === 'Running' && run.status === 'Failed') lyricsNote(run.reason || 'The run stopped.', 'error');
 
-  if (run.status === 'Running') {
-    if (!lyricsLibraryPoll) lyricsLibraryPoll = setInterval(() => loadLyricsLibrary(), 1500);
-  } else if (lyricsLibraryPoll) {
-    clearInterval(lyricsLibraryPoll);
-    lyricsLibraryPoll = null;
-  }
+  lyricsWatch(run.status === 'Running');
   return run;
 }
 
@@ -3922,6 +3962,13 @@ async function startLyrics(mode, picked = null) {
     lyricsNote(await lyricsError(response), 'error');
     return;
   }
+  // Said at once, before Octo's first answer: the step has been handed over.
+  lyricsNote('');
+  lyricsExpectRunning = true;
+  const base = lyricsRun || { rows: [], errors: [] };
+  renderLyricsLibrary({ ...base, runId: base.runId, mode, status: 'Running', starting: true, total: 0, processed: 0,
+    rows: mode === 'Scan' ? [] : base.rows });
+  lyricsWatch(true);
   await loadLyricsLibrary();
 }
 

@@ -979,50 +979,9 @@ public sealed class CoverUpgradeWorker : BackgroundService
     private async Task<Dictionary<string, string>> NavidromeAlbumsAsync(IServiceProvider services, string root,
         CancellationToken ct)
     {
-        var albums = new Dictionary<string, string>(StringComparer.Ordinal);
-        var identity = services.GetService<NavidromeIdentityService>();
-        var baseUrl = services.GetService<IOptionsMonitor<SubsonicSettings>>()?.CurrentValue.Url;
-        var http = services.GetService<IHttpClientFactory>();
-        if (identity is null || http is null || string.IsNullOrWhiteSpace(baseUrl)) return albums;
-        try
-        {
-            var jwt = await identity.EnsureAdminJwtAsync(ct);
-            if (string.IsNullOrEmpty(jwt)) return albums;
-            const int page = 1000;
-            for (var start = 0; start < 200_000; start += page)
-            {
-                using var request = new HttpRequestMessage(HttpMethod.Get,
-                    $"{baseUrl.TrimEnd('/')}/api/song?_start={start}&_end={start + page}&_sort=id&_order=ASC");
-                request.Headers.TryAddWithoutValidation("X-Nd-Authorization", $"Bearer {jwt}");
-                using var response = await http.CreateClient().SendAsync(request, ct);
-                if (!response.IsSuccessStatusCode) break;
-                using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(ct));
-                if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) break;
-                var count = 0;
-                foreach (var song in doc.RootElement.EnumerateArray())
-                {
-                    count++;
-                    var album = Str(song, "albumId");
-                    var path = Str(song, "path");
-                    if (string.IsNullOrEmpty(album) || string.IsNullOrEmpty(path)) continue;
-                    var relative = Path.Combine(path.Replace('\\', '/').TrimStart('/')
-                        .Split('/', StringSplitOptions.RemoveEmptyEntries));
-                    foreach (var baseDir in new[] { Str(song, "libraryPath"), root })
-                    {
-                        if (string.IsNullOrEmpty(baseDir)) continue;
-                        albums.TryAdd(Path.GetFullPath(Path.Combine(baseDir, relative)), album);
-                    }
-                    // An older Navidrome reports the full path instead.
-                    if (Path.IsPathRooted(path)) albums.TryAdd(Path.GetFullPath(path), album);
-                }
-                if (count < page) break;
-            }
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogInformation("Cover upgrade could not list Navidrome's songs, so it goes folder by folder: {M}", ex.Message);
-        }
-        return albums;
+        var songs = await Octo.Services.Library.NavidromeSongList.ListAsync(services, root, _logger, ct);
+        return songs.Where(pair => !string.IsNullOrEmpty(pair.Value.AlbumId))
+            .ToDictionary(pair => pair.Key, pair => pair.Value.AlbumId!, StringComparer.Ordinal);
     }
 
     private static string? Str(System.Text.Json.JsonElement element, string name) =>

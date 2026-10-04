@@ -110,19 +110,32 @@ public sealed partial class LyricsLibraryWorker
 
     // ---- Scan ---------------------------------------------------------------------------------
 
-    private Task ScanAsync(CancellationToken ct)
+    /// <summary>
+    /// Reads what each song has. Navidrome's song list names every song's artist, title and tag
+    /// lyrics, and one listing of the music folder finds the lyrics files, so only a song that
+    /// already has lyrics is opened; reading every file over a network mount took minutes.
+    /// </summary>
+    private async Task ScanAsync(CancellationToken ct)
     {
         var queue = _store.Current.Queue;
+        var root = _musicRoot();
+        Dictionary<string, Octo.Services.Library.NavidromeSongEntry> known;
+        using (var scope = _scopes.CreateScope())
+            known = await Octo.Services.Library.NavidromeSongList.ListAsync(scope.ServiceProvider, root, _logger, ct);
+        var sidecars = LyricsFileStems(root);
+        _logger.LogInformation("Lyrics scan: Navidrome named {Known} of {Total} song(s); {Files} lyrics file(s) found",
+            queue.Count(path => known.ContainsKey(Path.GetFullPath(path))), queue.Count, sidecars?.Count ?? -1);
+
         for (var index = _store.Current.Cursor; index < queue.Count; index++)
         {
-            if (Stopping(ct)) return Task.CompletedTask;
+            if (Stopping(ct)) return;
             var path = queue[index];
             LyricsLibraryRow? row = null;
             var word = false;
             string? error = null;
             try
             {
-                (row, word) = ScanSong(path);
+                (row, word) = ScanSong(path, known.GetValueOrDefault(Path.GetFullPath(path)), sidecars);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -140,7 +153,48 @@ public sealed partial class LyricsLibraryWorker
             });
         }
         Finish();
-        return Task.CompletedTask;
+    }
+
+    private static readonly string[] LyricsFileExtensions = [".lrc", ".txt", ".ttml", ".elrc", ".srt", ".yaml", ".yml"];
+
+    /// <summary>Every song stem (full path without extension) with a lyrics file beside it, from
+    /// one listing of the music folder; null when it cannot be listed, so each song is checked.</summary>
+    internal static HashSet<string>? LyricsFileStems(string root)
+    {
+        try
+        {
+            if (!Directory.Exists(root)) return null;
+            return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                .Where(file => LyricsFileExtensions.Contains(Path.GetExtension(file), StringComparer.OrdinalIgnoreCase))
+                .Select(file => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(file))!, Path.GetFileNameWithoutExtension(file)))
+                .ToHashSet(StringComparer.Ordinal);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A song Navidrome named: read from its list unless the song has lyrics (in its
+    /// tags or a file beside it), which are opened to learn how they are timed. Any other song is
+    /// read from its file.</summary>
+    internal static (LyricsLibraryRow? Row, bool Word) ScanSong(string path, Octo.Services.Library.NavidromeSongEntry? known,
+        HashSet<string>? lyricsFiles)
+    {
+        if (known is null || string.IsNullOrWhiteSpace(known.Artist) || string.IsNullOrWhiteSpace(known.Title))
+            return ScanSong(path);
+        var full = Path.GetFullPath(path);
+        var stem = Path.Combine(Path.GetDirectoryName(full)!, Path.GetFileNameWithoutExtension(full));
+        if (known.HasTagLyrics || lyricsFiles is null || lyricsFiles.Contains(stem)) return ScanSong(path);
+        return (new LyricsLibraryRow
+        {
+            Id = LyricsLibraryRow.IdOf(path),
+            Path = path,
+            Artist = known.Artist.Trim(),
+            Title = known.Title.Trim(),
+            Album = string.IsNullOrWhiteSpace(known.Album) ? null : known.Album.Trim(),
+            Has = "none",
+        }, false);
     }
 
     /// <summary>One song as a scan sees it: a row when its lyrics are missing, plain or timed by

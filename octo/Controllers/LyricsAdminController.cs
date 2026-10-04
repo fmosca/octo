@@ -103,7 +103,9 @@ public sealed class LyricsAdminController : ControllerBase
                 row.Id, row.Path, row.Artist, row.Title, row.Album, row.Has, row.Result,
                 row.Source, row.Kind, row.CandidateId, row.Doubt, row.Preview,
             }),
-            busy = _job.IsRunning,
+            // Not "busy": that is the run's count of songs no service answered for, and two
+            // properties of one name cannot be written.
+            running = _job.IsRunning,
             canUndo = _job.CanUndo,
             saveTo = LyricsSaveTo.Normalize(_metadata.CurrentValue.SaveLyricsTo),
             review = run.Review.OrderByDescending(entry => entry.AtUtc).ToList(),
