@@ -113,6 +113,10 @@ public abstract class BaseDownloadService : IDownloadService
     /// </summary>
     protected static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Song, string> FetchedFrom = new();
 
+    /// <summary>Songs a backend asked to land without a notice of their own: a Lidarr album's
+    /// songs that nobody hearted, and the songs of an album heart, which gets one for the album.</summary>
+    protected static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Song, object> Muted = new();
+
     private static string SourceLabel(Song song, string ext) =>
         FetchedFrom.TryGetValue(song, out var source) ? source : ext == "FLAC" ? "Soulseek" : "YouTube";
 
@@ -691,7 +695,7 @@ public abstract class BaseDownloadService : IDownloadService
             if (!isCache)
             {
                 await LocalLibraryService.RegisterDownloadedSongAsync(song, localPath);
-                await RecordHistoryAsync(song, localPath, silence, requestedBy);
+                await RecordHistoryAsync(song, localPath, silence || Muted.TryGetValue(song, out _), requestedBy);
                 AskForReview(song, localPath, requestedBy);
                 Track(t => t.Imported(externalProvider, externalId, song.Artist, song.Title, localPath));
 

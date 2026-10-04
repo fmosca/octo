@@ -343,6 +343,7 @@ builder.Services.AddSingleton<ILidarrHeartAcquisitionService, LidarrHeartAcquisi
 // Lidarr as a source for one song at a time (Better quality, wrong song), and which albums a
 // heart or an upgrade is working on, so the two never share one.
 builder.Services.AddSingleton<Octo.Services.Lidarr.LidarrAlbumClaims>();
+builder.Services.AddSingleton<Octo.Services.Lidarr.LidarrImportHandoff>();
 builder.Services.AddSingleton<Octo.Services.Lidarr.ILidarrTrackFetcher, Octo.Services.Lidarr.LidarrTrackFetcher>();
 builder.Services.AddSingleton<HeartAcquisitionCoordinator>();
 builder.Services.AddHostedService<Octo.Services.Common.SoulseekHoldResumer>();

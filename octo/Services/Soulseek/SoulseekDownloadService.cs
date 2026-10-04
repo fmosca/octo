@@ -220,12 +220,65 @@ public class SoulseekDownloadService : BaseDownloadService
     internal const string IncomingFolderName = ".octo-incoming";
 
     /// <summary>
+    /// A file a Lidarr heart brought in, taken into a job folder and held to the checks a Soulseek
+    /// download meets. AcoustID naming another recording, or a live take nobody asked for, throws
+    /// the file away: Lidarr has no second copy, so the heart's next source tries instead. A
+    /// FLAC made from an MP3 is kept and marked, as Soulseek keeps its last resort.
+    /// </summary>
+    private async Task<string> AdoptLidarrImportAsync(SoulseekRouting routing, Song song,
+        Octo.Services.Lidarr.LidarrImport import, CancellationToken cancellationToken)
+    {
+        FetchedFrom.AddOrUpdate(song, "Lidarr");
+        if (import.Quiet) Muted.AddOrUpdate(song, true);
+        if (!IOFile.Exists(import.Path))
+            throw new FileNotFoundException($"Lidarr's file for '{routing.Artist} - {routing.Title}' is gone: {import.Path}");
+
+        var jobDir = Path.Combine(DownloadPath, IncomingFolderName, "lidarr", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(jobDir);
+        var local = Path.Combine(jobDir, Path.GetFileName(import.Path));
+        try { IOFile.Move(import.Path, local); }
+        catch (IOException)
+        {
+            // Another volume: copied, then the import removed.
+            IOFile.Copy(import.Path, local);
+            IOFile.Delete(import.Path);
+        }
+        TryRemoveEmptyParents(Path.GetDirectoryName(import.Path), DownloadPath);
+
+        if (song is { ExternalProvider: { Length: > 0 } provider, ExternalId: { Length: > 0 } id })
+            Track(t => t.Stage(provider, id, AcquisitionState.Verifying, "Lidarr"));
+        var verdict = await _verification.VerifyAsync(local, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc,
+            refuseLive: !LiveVersion.Requested(routing.Title, routing.Album));
+        if (verdict.Verdict == Octo.Services.Fingerprint.VerificationVerdict.Mismatch)
+        {
+            Logger.LogWarning("Lidarr brought {Actual} for '{Artist} - {Title}' (AcoustID score {Score:P0}); discarding it",
+                verdict.Describe(), routing.Artist, routing.Title, verdict.Score);
+            try { IOFile.Delete(local); } catch { /* swept with the job folders */ }
+            throw new FileNotFoundException($"AcoustID identified Lidarr's file as {verdict.Describe()}");
+        }
+        var spectrum = await _verification.CheckLosslessAsync(local, routing.Artist, routing.Title);
+        if (spectrum.IsLikelyLossy)
+        {
+            Logger.LogWarning("Lidarr's copy of '{Artist} - {Title}' is {Spectrum}; keeping it, marked as a transcode",
+                routing.Artist, routing.Title, spectrum.Describe());
+            song.TranscodedFrom = spectrum.Estimate;
+        }
+        Logger.LogInformation("Took Lidarr's import of '{Artist} - {Title}' into the pipeline: {Path}", routing.Artist, routing.Title, local);
+        return local;
+    }
+
+    /// <summary>
     /// One song through Lidarr, copied into a job folder under the incoming dot folder, which no
     /// scan looks at. From there it is identified, checked and swapped in like any download.
     /// </summary>
     private async Task<string> DownloadViaLidarrAsync(SoulseekRouting routing, Song song, bool losslessOnly,
         CancellationToken cancellationToken)
     {
+        // A heart's album that Lidarr already brought in: the file is here, and only needs taking.
+        if (song.ExternalId is { Length: > 0 } externalId
+            && OptionalService<Octo.Services.Lidarr.LidarrImportHandoff>()?.Take(externalId) is { } import)
+            return await AdoptLidarrImportAsync(routing, song, import, cancellationToken);
+
         var fetcher = OptionalService<Octo.Services.Lidarr.ILidarrTrackFetcher>()
             ?? throw new InvalidOperationException("Lidarr is not available on this server.");
         if (song is { ExternalProvider: { Length: > 0 } provider, ExternalId: { Length: > 0 } id })

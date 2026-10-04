@@ -2028,8 +2028,8 @@
             <div class="set-row stack">
               <div class="set-info">
                 <label class="set-info-t" for="f-lidarr-completion">Completion notifications</label>
-                <div class="set-info-d">When a Lidarr heart counts as done: once Lidarr takes it, or once its files arrive.</div>
-                <div class="set-info-more">Accepted stops at a successful handoff to Lidarr. Imported reports completion or failure only after the files appear or the timeout runs out. Neither holds up later hearts.</div>
+                <div class="set-info-d">Which Lidarr notices you get. Either way, a heart waits for the import, and a song that does not land goes to the next source.</div>
+                <div class="set-info-more">When Lidarr accepts it: a notice when the search starts, and one for the album when an album heart lands. When the files are imported: also one when a song heart's album lands, and one when an import fails or runs out of time. Neither holds up playback or later hearts.</div>
               </div>
               <select class="set-input" id="f-lidarr-completion" name="Lidarr.CompletionMode">
                 <option value="Accepted">When Lidarr accepts it</option>
