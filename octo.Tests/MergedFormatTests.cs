@@ -58,6 +58,19 @@ public sealed class MergedFormatTests
                 // The catalog writes this title with a curly apostrophe; the library's tags do not.
                 if (path.StartsWith("/search/album", StringComparison.Ordinal) && query["q"]?.Contains("Look Back") == true)
                     return Json("""{"data":[{"id":20,"title":"Don’t Look Back","record_type":"album","nb_tracks":10,"artist":{"name":"Test Artist"}},{"id":21,"title":"Look Back Again","record_type":"album","nb_tracks":10,"artist":{"name":"Test Artist"}}]}""");
+                // octo-player#1: a catalog album with the library album's very name, and none of its songs.
+                if (path.StartsWith("/search/album", StringComparison.Ordinal) && query["q"]?.Contains("Nightcore") == true)
+                    return Json("""{"data":[{"id":30,"title":"Nightcore","record_type":"album","nb_tracks":3,"artist":{"name":"Nightcore"}}]}""");
+                if (path == "/album/30/tracks")
+                    return Json("""
+                        {"total":3,"data":[
+                          {"title":"Love Tonight (Nightcore Remix)","duration":142,"track_position":1,"disk_number":1,"artist":{"name":"Nightcore"}},
+                          {"title":"Angel (Nightcore Remix)","duration":159,"track_position":2,"disk_number":1,"artist":{"name":"Nightcore"}},
+                          {"title":"Sad Songs & Depression (Nightcore Remix)","duration":280,"track_position":3,"disk_number":1,"artist":{"name":"Nightcore"}}
+                        ]}
+                        """);
+                if (path == "/album/30")
+                    return Json("""{"id":30,"title":"Nightcore","release_date":"2014-01-01","artist":{"name":"Nightcore"}}""");
                 if (path.StartsWith("/search/album", StringComparison.Ordinal))
                     return Json("""{"data":[{"id":1,"title":"Test Album","record_type":"album","nb_tracks":4,"artist":{"name":"Test Artist"}}]}""");
                 if (path == "/album/1/tracks")
@@ -90,6 +103,16 @@ public sealed class MergedFormatTests
             if (path.EndsWith("/rest/getAlbum", StringComparison.Ordinal) || path.EndsWith("/rest/getArtist", StringComparison.Ordinal))
                 lock (NavidromeFormats) NavidromeFormats.Add(query["f"] ?? "xml");
 
+            if (path.EndsWith("/rest/getAlbum", StringComparison.Ordinal) && query["id"] == "al-nc")
+                return Json("""
+                    {"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","album":{
+                      "id":"al-nc","name":"Nightcore","artist":"Nightcore","songCount":3,"duration":518,
+                      "song":[
+                        {"id":"nc-1","title":"Believer (Rock Version)","album":"Nightcore","artist":"Missigno","track":1,"duration":216},
+                        {"id":"nc-2","title":"Mi Mi Mi (Rock Version)","album":"Nightcore","artist":"Missigno","track":2,"duration":168},
+                        {"id":"nc-3","title":"MAGIC","album":"Nightcore","artist":"Missigno","track":3,"duration":134}
+                      ]}}}
+                    """);
             if (path.EndsWith("/rest/getAlbum", StringComparison.Ordinal))
             {
                 return json
@@ -192,6 +215,22 @@ public sealed class MergedFormatTests
         Assert.Equal("ok", (string?)xml.Root.Attribute("status"));
         // Navidrome was asked for JSON both times: the merge reads JSON.
         Assert.All(factory.Servers.NavidromeFormats, f => Assert.Equal("json", f));
+    }
+
+    [Fact]
+    public async Task GetAlbum_LeavesAnAlbumAloneWhenTheCatalogAlbumOnlySharesItsName()
+    {
+        await using var factory = new WebFactory();
+        using var client = factory.CreateClient();
+
+        using var json = JsonDocument.Parse(await client.GetStringAsync($"/rest/getAlbum.view?{Auth}&f=json&id=al-nc"));
+        var album = json.RootElement.GetProperty("subsonic-response").GetProperty("album");
+        var titles = album.GetProperty("song").EnumerateArray().Select(s => s.GetProperty("title").GetString()).ToList();
+
+        Assert.Equal(["Believer (Rock Version)", "Mi Mi Mi (Rock Version)", "MAGIC"], titles);
+        Assert.Equal(3, album.GetProperty("songCount").GetInt32());
+        // The catalog was asked, and its album turned down for having none of these songs.
+        Assert.Contains("/album/30/tracks", factory.Servers.DeezerCalls);
     }
 
     [Fact]

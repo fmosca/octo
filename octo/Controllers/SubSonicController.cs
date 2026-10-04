@@ -1941,59 +1941,36 @@ public class SubsonicController : ControllerBase
             return await RelayAsAskedAsync("rest/getAlbum", parameters, format, navidromeResult.Body, navidromeResult.ContentType);
         }
 
+        var library = localSongs.Select(AlbumFillIn.FromSubsonic).ToList();
+
+        // The first catalog album by this name that holds the library's songs, known by ISRC
+        // or by title and length. A name alone can belong to another record: "Nightcore" by
+        // "Nightcore" (octo-player#1).
         var searchQuery = $"{artistName} {albumName}";
         var deezerAlbums = await _metadataService.SearchAlbumsAsync(searchQuery, 5);
         Album? deezerAlbum = null;
-        
-        // Find matching album on Deezer (exact match first)
-        foreach (var candidate in deezerAlbums)
+        foreach (var candidate in AlbumFillIn.Candidates(deezerAlbums, artistName, albumName, AlbumFillIn.CountSongs(library)))
         {
-            if (candidate.Artist != null &&
-                SongIdentity.SameArtistName(candidate.Artist, artistName) &&
-                SongIdentity.Key(candidate.Title) == SongIdentity.Key(albumName))
+            // The provider must come from the candidate. A hardcoded "deezer" never
+            // matches the metadata service's provider name, so this always returned null.
+            var detail = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
+            if (detail is null || detail.Songs.Count == 0) continue;
+            if (AlbumFillIn.Holds(library, detail.Songs))
             {
-                // The provider must come from the candidate. A hardcoded "deezer" never
-                // matches the metadata service's provider name, so this always returned null.
-                deezerAlbum = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
+                deezerAlbum = detail;
                 break;
             }
+            _logger.LogDebug(
+                "getAlbum '{Artist} - {Album}': catalog album {Id} shares the name but not the songs; not filled in from it",
+                artistName, albumName, candidate.ExternalId);
         }
 
-        // Fallback to fuzzy match
-        if (deezerAlbum == null)
+        if (deezerAlbum != null)
         {
-            foreach (var candidate in deezerAlbums)
-            {
-                var candidateTitle = SongIdentity.Key(candidate.Title);
-                var wantedTitle = SongIdentity.Key(albumName);
-                if (candidate.Artist != null &&
-                    SongIdentity.Key(candidate.Artist).Contains(SongIdentity.Key(artistName)) &&
-                    candidateTitle.Length > 0 && wantedTitle.Length > 0 &&
-                    (candidateTitle.Contains(wantedTitle) || wantedTitle.Contains(candidateTitle)))
-                {
-                    deezerAlbum = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
-                    break;
-                }
-            }
-        }
-
-        if (deezerAlbum != null && deezerAlbum.Songs.Count > 0)
-        {
-            // One album, one artist: a track is owned when its title is, "Song (feat. X)" and
-            // "Song" alike, but never "Song (Live)" for "Song".
-            var localSongTitles = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var song in localSongs)
-            {
-                if (song is Dictionary<string, object> dict && dict.TryGetValue("title", out var titleObj))
-                {
-                    localSongTitles.Add(SongIdentity.TitleKey(titleObj?.ToString()));
-                }
-            }
-
             var mergedSongs = localSongs.ToList();
             foreach (var deezerSong in deezerAlbum.Songs)
             {
-                if (!localSongTitles.Contains(SongIdentity.TitleKey(deezerSong.Title)))
+                if (!AlbumFillIn.Owned(library, deezerSong))
                 {
                     mergedSongs.Add(_responseBuilder.ConvertSongToJson(deezerSong));
                 }
