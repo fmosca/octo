@@ -213,6 +213,66 @@ public static class SongIdentity
     /// "Suicideboys" agree. Only ever an additional key.</summary>
     public static string LooseKey(string? value) => Key(FoldStylized(Fold(value)));
 
+    /// <summary>Which words make two album titles the same record re-issued, and which make
+    /// them different records. An album re-pressed as a remaster, an expanded, deluxe or
+    /// anniversary edition, a hi-res pressing or a re-issue year is the same record; a live
+    /// album, a credited remix, a version carrying a featured guest, a part number or a
+    /// subtitle is a different one. Read from the title alone.</summary>
+    public static string AlbumCoreKey(string? artist, string? title)
+    {
+        var artistKey = Key(artist);
+        if (string.IsNullOrWhiteSpace(title)) return "";
+        var text = Fold(title);
+
+        // A bracket or dash tail that carries an edition word ("Deluxe Edition", "2020
+        // Remaster", "Super Deluxe Edition - Rudy Van Gelder Remaster", "Monophonic
+        // Edition") is a pressing of the record the title names, so it goes — the names
+        // beside the word (a mastering engineer, a re-issue campaign) go with it. One with
+        // no edition word ("Blue Train / Africa Brass / Ole", "226 bpm - Live from The
+        // Tiberi Tapes", "Crooked Man Remix", "feat. X") names a different record and is
+        // kept whole in the key. A whole title that is only an edition word ("2011
+        // Remaster") keys as it came, so it never collapses into an empty shell.
+        var kept = new List<string>();
+        text = Bracket.Replace(text, match =>
+        {
+            var inner = match.Groups[1].Value;
+            if (EditionWord.IsMatch(inner)) return " ";
+            kept.Add(inner);
+            return " ";
+        });
+        for (var guard = 0; guard < 4; guard++)
+        {
+            var tails = DashTail.Matches(text);
+            if (tails.Count == 0) break;
+            var last = tails[^1];
+            if (last.Index == 0) break;
+            var tail = text[(last.Index + last.Length)..];
+            if (!EditionWord.IsMatch(tail)) break;
+            text = text[..last.Index];
+        }
+        var core = Key(EditionWord.Replace(text, " "));
+        if (core.Length == 0 && kept.Count == 0)
+            return $"{artistKey}|{Key(Fold(title))}";
+        // A kept album list splits on its separators BEFORE keying and the parts sort, so
+        // "X (A / B)" and "X (B / A)" agree and only truly different volumes disagree.
+        var parts = kept.SelectMany(part =>
+                Separator.Split(Fold(part)).Select(Key).Where(k => k.Length > 0))
+            .Order(StringComparer.Ordinal);
+        return $"{artistKey}|{core}|{string.Join('|', parts)}";
+    }
+
+    /// <summary>A word whose presence marks the bracket or tail it sits in as a re-issue of
+    /// the record rather than a different record. Years fold too: they are a re-issue date,
+    /// and a recording year is in the release data, not the title.</summary>
+    private static readonly Regex EditionWord = new(
+        @"\b(?:deluxe|super[ ]?deluxe|expanded|anniversary|special|remaster(?:ed)?|re-?master|re-?issue[d]?|edition[s]?|version|hi-?res|explicit|mono(?:phonic)?|stereo|bonus(?:[ ]tracks?)?|limited|digipack)\b"
+        + @"|\b\d{4}\b|\b\d{2}[ ]?bit\b|\b\d+[ ]?(?:kbps|khz)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>How an album list inside one title separates its entries: " / ", "&", ",".
+    /// Only for sorting kept-bracket parts; the entries themselves stay letters and digits.</summary>
+    private static readonly Regex Separator = new(@"[/&,\-]| and ", RegexOptions.Compiled);
+
     /// <summary>
     /// Stylized characters read as the letters they stand for: $ as s, @ as a, 0 as o and 3 as
     /// e when they sit against a letter, ! as i between two letters. "2003", "Blink-182" and

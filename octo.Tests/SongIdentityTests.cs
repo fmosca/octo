@@ -336,4 +336,61 @@ public class SongIdentityTests
     {
         Assert.Null(SongIdentity.KnownName(artist));
     }
+
+    // ---- AlbumCoreKey: same record re-issued folds, a different record does not ----------
+
+    [Theory]
+    [InlineData("Coltrane")]
+    [InlineData("Coltrane (Expanded Edition)")]
+    [InlineData("Coltrane (Deluxe Edition - Rudy Van Gelder Remaster)")]
+    [InlineData("Coltrane [Rudy Van Gelder Remaster]")]
+    [InlineData("Coltrane (Remastered 2026)")]
+    [InlineData("Coltrane (2009)")]
+    [InlineData("Coltrane [24 bit Hi-Res]")]
+    public void AlbumCoreKey_EditionsOfOneRecord_Fold(string title)
+    {
+        var key = SongIdentity.AlbumCoreKey("John Coltrane", title);
+        Assert.Equal(SongIdentity.AlbumCoreKey("John Coltrane", "Coltrane"), key);
+    }
+
+    [Theory]
+    [InlineData("Giant Steps (226 bpm – Live from The Tiberi Tapes)")]
+    [InlineData("Coltrane (Crooked Man Remix)")]
+    [InlineData("Coltrane '58: The Prestige Recordings")]
+    [InlineData("Coltrane For Lovers")]
+    [InlineData("Duke Ellington & John Coltrane")]
+    [InlineData("Coltrane Jazz")]
+    public void AlbumCoreKey_DifferentRecords_StandApart(string title)
+    {
+        var key = SongIdentity.AlbumCoreKey("John Coltrane", title);
+        Assert.NotEqual(SongIdentity.AlbumCoreKey("John Coltrane", "Coltrane"), key);
+    }
+
+    [Fact]
+    public void AlbumCoreKey_ArtistInKey_SameTitleDifferentArtistsStayApart()
+        => Assert.NotEqual(
+            SongIdentity.AlbumCoreKey("John Coltrane", "Coltrane"),
+            SongIdentity.AlbumCoreKey("John Coltrane Quartet", "Coltrane"));
+
+    [Fact]
+    public void AlbumCoreKey_BothBracketsNameDifferentRecords_TheyStayApart()
+    {
+        // Two compilation volumes of the same series: the [Remastered] pressing word folds,
+        // the volume's album list does not.
+        var a = SongIdentity.AlbumCoreKey("John Coltrane",
+            "Four Classic Albums (Blue Train / Africa Brass / Plays the Blues / Ole) [Remastered]");
+        var b = SongIdentity.AlbumCoreKey("John Coltrane",
+            "Four Classic Albums (Coltrane Jazz / My Favorite Things / Bags & Trane / Giant Steps) [Remastered]");
+        Assert.NotEqual(a, b);
+        // Bracket order does not matter either — the same record listed the other way round.
+        var c = SongIdentity.AlbumCoreKey("John Coltrane",
+            "Four Classic Albums (Ole/ Plays the Blues/ Africa Brass / Blue Train) [Remastered]");
+        Assert.Equal(a, c);
+    }
+
+    [Fact]
+    public void AlbumCoreKey_WholeTitleIsAnEditionWord_KeysAsItCame()
+        => Assert.Equal(
+            SongIdentity.AlbumCoreKey("Various", "2011 Remaster"),
+            SongIdentity.AlbumCoreKey("Various", "2011 Remaster"));
 }

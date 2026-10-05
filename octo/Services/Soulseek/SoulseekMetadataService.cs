@@ -114,10 +114,14 @@ public class SoulseekMetadataService : IMusicMetadataService
     // quota and poisoned the metadata caches (issue #8). DeezerRateLimiter now holds that
     // budget centrally, so this figure is about how long a user waits, not about safety.
     //
-    // 12 is the same "first page" figure PrewarmYouTubeIdsAsync already uses. It must
-    // stay above TopDurationResolveLimit, or the rows that get a YouTube length hint
-    // would be reading a duration nobody resolved.
-    private const int SearchEnrichLimit = 12;
+    // 6 is one Deezer wave at the enrich semaphore's 8-way concurrency: p50 Deezer
+    // track-search was 1.1 s over 10 days (2026-10-05), so the inline pass lands in
+    // ~1-2 s where 12 rows took two waves (~2-4 s) and pushed cold searches past 4 s
+    // when the shim was slow too. Rows past this enrich from cache inline and warm
+    // off-path via WarmLengths, and the first page's rows still get their video-accurate
+    // length from ResolveTopDurationsAsync once WaitForSearchDurations is on (it is off
+    // in production now: the length arrives via getSong on interaction instead).
+    private const int SearchEnrichLimit = 6;
 
     // The whole slice a search can return. Everything between the first page and this is
     // filled from cache and warmed for next time, because a row with no enrichment falls

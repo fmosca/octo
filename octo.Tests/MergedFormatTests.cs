@@ -459,11 +459,13 @@ public sealed class MergedFormatTests
         Assert.All(answers, answer => answer.EnsureSuccessStatusCode());
 
         var calls = factory.Servers.DeezerCalls.ToList();
-        // The search that names the artist, the listing, and each album's own record, once.
+        // The search that names the artist and the listing, once each - the two-requests-at-
+        // -once economy this test exists for. The listing's own track-count fills and the
+        // fire-and-forget release-group warm queue add detail calls after that, so no total
+        // is asserted; but a second walk of the listing would mean a third walk of the
+        // artist, which is the regression this guards against.
         Assert.Equal(1, calls.Count(path => path.StartsWith("/search/artist", StringComparison.Ordinal)));
         Assert.Equal(1, calls.Count(path => path == "/artist/7/albums"));
-        Assert.Equal(["/album/1", "/album/2", "/album/3"], calls.Where(path => path.StartsWith("/album/", StringComparison.Ordinal)).Order());
-        Assert.Equal(5, calls.Count);
     }
 
     [Fact]

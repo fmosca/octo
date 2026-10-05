@@ -58,10 +58,12 @@ public class DeezerMetadataService : IDisposable
         int? TrackPosition, int? DiscNumber, string? Isrc);
 
     /// <summary>An album plus its full tracklist. RecordType is the catalog's own word for it:
-    /// album, ep, single or compile.</summary>
+    /// album, ep, single or compile. Upc is the release's barcode, when the catalog lists
+    /// one - the key that names a pressing everywhere, and the bridge to the music database's
+    /// release groups.</summary>
     public record AlbumDetail(string DeezerId, string Title, string Artist,
         string? CoverUrl, int? Year, string? Genre, string? Label, List<AlbumTrack> Tracks,
-        string? RecordType = null);
+        string? RecordType = null, string? Upc = null);
 
     /// <summary>What the catalog said when asked for an album's detail.</summary>
     public enum AlbumAnswer
@@ -180,12 +182,16 @@ public class DeezerMetadataService : IDisposable
 
     public DeezerMetadataService(IHttpClientFactory httpFactory,
         IOptionsMonitor<MetadataSettings> metadataOptions,
-        ILogger<DeezerMetadataService> logger)
+        ILogger<DeezerMetadataService> logger,
+        Octo.Services.Fingerprint.MusicBrainzClient? musicBrainz = null)
     {
         _httpFactory = httpFactory;
         _metadataOptions = metadataOptions;
         _logger = logger;
+        _musicBrainz = musicBrainz;
     }
+
+    private readonly Octo.Services.Fingerprint.MusicBrainzClient? _musicBrainz;
 
     private HttpClient Client()
     {
@@ -524,7 +530,8 @@ public class DeezerMetadataService : IDisposable
     }
 
     /// <summary>Search the album catalog. Single-track "albums" are dropped: a plain
-    /// artist query returns a lot of them and they crowd out real records.</summary>
+    /// artist query returns a lot of them and they crowd out real records. One row per
+    /// record: editions of one album fold into the ranking's first hit.</summary>
     public async Task<List<AlbumHit>> SearchAlbumsAsync(string query, int limit, CancellationToken ct = default,
         bool keepSingles = false)
     {
@@ -533,6 +540,7 @@ public class DeezerMetadataService : IDisposable
         if (TryGetCached<List<AlbumHit>>(key, out var cached)) return cached!;
 
         var hits = new List<AlbumHit>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             var q = Uri.EscapeDataString(query);
@@ -560,6 +568,14 @@ public class DeezerMetadataService : IDisposable
                         continue;
 
                     var artist = a.TryGetProperty("artist", out var art) ? Str(art, "name") : null;
+
+                    // The catalog's search returns the same record many times over (a
+                    // remaster, an expanded edition, another artist's edition spelling),
+                    // and each row crowds a real one out of the page. One row per record:
+                    // the first hit keeps its place, later editions are dropped rather
+                    // than ranked, a search result has no record-type ranking to defend.
+                    if (!seen.Add(SongIdentity.AlbumCoreKey(artist ?? "", title))) continue;
+
                     hits.Add(new AlbumHit(
                         id, title, artist ?? "",
                         Str(a, "cover_xl") ?? Str(a, "cover_medium"),
@@ -572,17 +588,19 @@ public class DeezerMetadataService : IDisposable
             _logger.LogDebug("deezer album search '{Q}' failed: {M}", query, ex.Message);
         }
 
-        Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        Put(key, FoldByReleaseGroup(hits), hits.Count == 0 ? NegativeTtl : PositiveTtl);
         return hits;
     }
 
     /// <summary>
     /// An artist's own releases for their page: albums, then EPs, then singles, then their own
     /// compilations, newest first within each, the way the apps group a discography. One copy
-    /// of each title, whatever its type: the catalog lists a clean and an explicit copy of many,
-    /// and an album can share its title with its own single or EP. The album is the one kept.
-    /// Two releases of one title would also open as one, since an outside album's id is made
-    /// from the artist and title, and the second would take over the first's. Singles used to
+    /// of each record: editions of one title (a remaster, an expanded or deluxe edition, a
+    /// re-issue year) are one row, the better-ranked record type kept; a live album, a
+    /// credited remix or a version with a guest stays its own row, as does an album sharing
+    /// its title with its own single or EP (the album is the one kept). Two releases of one
+    /// record would otherwise open as one, since an outside album's id is made from the
+    /// artist and title, and the second would take over the first's. Singles used to
     /// be left out unless there was nothing else, which hid half of a career that is mostly
     /// singles; grouped after the records, they no longer bury them. The artist's name is not
     /// on this listing, so every hit carries the one given.
@@ -591,7 +609,13 @@ public class DeezerMetadataService : IDisposable
     {
         if (string.IsNullOrWhiteSpace(deezerArtistId)) return new List<AlbumHit>();
         var key = $"ara|{deezerArtistId}".ToLowerInvariant();
-        if (TryGetCached<List<AlbumHit>>(key, out var cached)) return cached!;
+        if (TryGetCached<List<AlbumHit>>(key, out var cached))
+        {
+            // The fold re-runs on a cached listing: the warm queue may have tied rows since
+            // this cache entry was written, and a cached "fewer rows" page is the point of
+            // the queue. FoldByReleaseGroup returns the list untouched when nothing is warm.
+            return FoldByReleaseGroup(cached!);
+        }
 
         var releases = new List<AlbumHit>();
         // Where each title sits in the list, so a better copy found later takes its place.
@@ -624,10 +648,12 @@ public class DeezerMetadataService : IDisposable
                     var hit = new AlbumHit(albumId, title, artistName,
                         Str(a, "cover_xl") ?? Str(a, "cover_medium"), year, Int(a, "nb_tracks") ?? 0, recordType);
 
-                    var titleKey = Octo.Services.Common.SongIdentity.Key(title);
-                    if (!byTitle.TryGetValue(titleKey, out var at))
+                    // The same record re-issued (an edition suffix, a remaster year) is one
+                    // row, the better-ranked record type kept; different records never fold.
+                    var coreKey = SongIdentity.AlbumCoreKey(artistName, title);
+                    if (!byTitle.TryGetValue(coreKey, out var at))
                     {
-                        byTitle[titleKey] = releases.Count;
+                        byTitle[coreKey] = releases.Count;
                         releases.Add(hit);
                     }
                     else if (ReleaseRank(recordType) < ReleaseRank(releases[at].RecordType))
@@ -648,12 +674,61 @@ public class DeezerMetadataService : IDisposable
                 "deezer artist {Id} ('{Artist}') has {Total} releases; the page lists the first {Listed}",
                 deezerArtistId, artistName, all, listed);
 
-        var hits = releases
+        var hits = FoldByReleaseGroup(releases);
+        hits = hits
             .OrderBy(h => ReleaseRank(h.RecordType))
             .ThenByDescending(h => h.Year ?? 0)
             .ToList();
         Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        // Off the critical path: the next visit to this page folds the editions the
+        // music database can name that the titles alone could not.
+        if (hits.Count > 1) WarmReleaseGroups(hits);
         return hits;
+    }
+
+    /// <summary>
+    /// Release-group fold, the second measure after the titles: rows the title fold kept
+    /// apart (a renamed edition, a different spelling) are one record when the music
+    /// database gives both the same release-group id. Only rows whose ids are already warm
+    /// fold here, so the first visit runs on titles and a later one shows fewer rows. The
+    /// better-ranked record type keeps the row; an album beats an EP. Rows with no warm id,
+    /// or ids of a group no other row shares, pass through unchanged.
+    /// </summary>
+    private List<AlbumHit> FoldByReleaseGroup(List<AlbumHit> releases)
+    {
+        // Group the rows by any warm id; rows without one are groups of their own.
+        var groups = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        for (var i = 0; i < releases.Count; i++)
+        {
+            var group = KnownReleaseGroup(releases[i].DeezerId);
+            if (group is null) continue;
+            if (!groups.TryGetValue(group, out var rows)) groups[group] = rows = new List<int>();
+            rows.Add(i);
+        }
+
+        if (groups.Count == 0) return releases;
+
+        // Position each row keeps, or the row of its group it loses to.
+        var kept = new Dictionary<int, int>();
+        foreach (var rows in groups.Values)
+        {
+            // The better-ranked record type keeps the row, catalog order as the tie-break;
+            // a type the catalog never named ranks last.
+            var best = rows
+                .OrderBy(r => releases[r].RecordType is null ? 5 : ReleaseRank(releases[r].RecordType))
+                .ThenBy(r => r)
+                .First();
+            foreach (var row in rows)
+                kept[row] = row == best ? row : best;
+        }
+
+        var folded = new List<AlbumHit>(releases.Count);
+        for (var i = 0; i < releases.Count; i++)
+        {
+            if (kept.TryGetValue(i, out var keep) && keep != i) continue;
+            folded.Add(releases[i]);
+        }
+        return folded;
     }
 
     /// <summary>
@@ -693,6 +768,78 @@ public class DeezerMetadataService : IDisposable
 
     /// <summary>A track count already known for an album, without asking the catalog.</summary>
     public bool TryKnownTrackCount(string deezerId, out int? count) => TryGetCached($"tc|{deezerId}", out count);
+
+    // ---- MusicBrainz release-group fold ------------------------------------------------
+
+    /// <summary>The release-group id MusicBrainz names for a catalog album's barcode, when it
+    /// has been asked. Empty string is a asked-and-missed marker, distinct from absent.</summary>
+    private readonly ConcurrentDictionary<string, string> _releaseGroups = new(StringComparer.Ordinal);
+
+    /// <summary>How many barcode lookups one artist visit may queue: the queue runs at the
+    /// music database's one request a second, so a page with dozens of editions must not
+    /// make it a minutes-long backlog for the fingerprint path.</summary>
+    internal const int RgWarmsPerVisit = 8;
+
+    /// <summary>The run of the current release-group warm queue once it has started. Test
+    /// observation only, the same idea as the length warmer's; production never awaits it.</summary>
+    internal Task LastRgWarm { get; private set; } = Task.CompletedTask;
+
+    /// <summary>
+    /// Fire-and-forget: for each album the listing still shows as its own row, ask the music
+    /// database which release-group its barcode belongs to, at that database's pace and only
+    /// through its one-a-second gate. The next listing call folds rows the ids now tie
+    /// together. Bounded per visit, skipped when the music-database client is absent, and no
+    /// row's shape changes here - the fold happens where listings are built.
+    /// </summary>
+    public void WarmReleaseGroups(IEnumerable<AlbumHit> albums)
+    {
+        if (_musicBrainz is null) return;
+        // No record-type filter, not even for singles: a single and its album are different
+        // release-groups in the music database, so a wrong fold cannot be made here by
+        // dropping the filter's rows - it would only leave rows the fold could have tied.
+        var targets = albums
+            .Where(h => h.DeezerId is { Length: > 0 })
+            .Where(h => !_releaseGroups.ContainsKey(h.DeezerId))
+            .Take(RgWarmsPerVisit)
+            .Select(h => h.DeezerId)
+            .ToList();
+        foreach (var deezerId in targets)
+            _releaseGroups.TryAdd(deezerId, "");  // claimed, so a second visit re-queues nothing
+
+        LastRgWarm = Task.Run(async () =>
+        {
+            foreach (var deezerId in targets)
+            {
+                try
+                {
+                    // The detail call is cached after the first one (the page's own count
+                    // fills usually already made it), so this normally reads, not asks.
+                    var detail = (await LookUpAlbumDetailAsync(deezerId)).Detail;
+                    var upc = detail?.Upc;
+                    if (string.IsNullOrWhiteSpace(upc))
+                    {
+                        _releaseGroups[deezerId] = "";
+                        continue;
+                    }
+                    // A group id an earlier row already owns still answers this row: both
+                    // rows name the same record, which is exactly the fold's evidence.
+                    var group = await _musicBrainz!.FindReleaseGroupByBarcodeAsync(upc, CancellationToken.None);
+                    _releaseGroups[deezerId] = group is { Length: > 0 } ? group : "";
+                }
+                catch { _releaseGroups[deezerId] = ""; }
+            }
+        });
+    }
+
+    /// <summary>The release-group id warm for an album, or null. Empty string means asked and
+    /// answered with nothing, which is also null here - only a real id counts.</summary>
+    public string? KnownReleaseGroup(string deezerId) =>
+        _releaseGroups.TryGetValue(deezerId, out var group) && group.Length > 0 ? group : null;
+
+    /// <summary>Every album id warm for one release-group id.</summary>
+    public IReadOnlyList<string> AlbumIdsInGroup(string groupId) =>
+        _releaseGroups.Where(pair => string.Equals(pair.Value, groupId, StringComparison.Ordinal))
+            .Select(pair => pair.Key).ToList();
 
     /// <summary>How many releases an artist's page asks for: the catalog's page size, enough for
     /// all but the longest careers.</summary>
@@ -784,7 +931,7 @@ public class DeezerMetadataService : IDisposable
         try
         {
             string title = "", artist = "", genre = "", label = "", cover = "";
-            string? recordType = null;
+            string? recordType = null, upc = null;
             int? year = null;
             // Declared out here on purpose: the document below is disposed before the
             // tracklist call, and this is what tells an empty tracklist apart from an
@@ -802,6 +949,10 @@ public class DeezerMetadataService : IDisposable
                     cover = Str(root, "cover_xl") ?? Str(root, "cover_medium") ?? "";
                     label = Str(root, "label") ?? "";
                     recordType = Str(root, "record_type");
+                    // The catalog usually lists the barcode of the pressing it indexes; a
+                    // blank or a non-digit string means it has none we can use.
+                    var rawUpc = Str(root, "upc");
+                    if (!string.IsNullOrWhiteSpace(rawUpc) && rawUpc.Trim() != "0") upc = rawUpc.Trim();
                     var rd = Str(root, "release_date");
                     if (!string.IsNullOrEmpty(rd) && rd.Length >= 4 && int.TryParse(rd[..4], out var yr))
                         year = yr;
@@ -879,7 +1030,7 @@ public class DeezerMetadataService : IDisposable
                 string.IsNullOrEmpty(cover) ? null : cover, year,
                 string.IsNullOrEmpty(genre) ? null : genre,
                 string.IsNullOrEmpty(label) ? null : label,
-                tracks, recordType);
+                tracks, recordType, upc);
         }
         catch (Exception ex)
         {

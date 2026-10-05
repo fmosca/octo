@@ -53,3 +53,43 @@ truth for shim code is now this repo's `yt-dlp-shim/`.
 - Deploy a new build: run `09-docker-compose-run.yml` after CI publishes; the
   compose files pin `:main` tags, so a plain re-run picks the new image up.
 - Server logs: `docker logs octo` / `docker logs octo-ytdlp-shim` on the host.
+
+## Search-result dedup and the artist page (2026-10-05)
+
+The outside-catalog album rows come from Deezer, which lists every edition of a
+record as its own row — Coltrane's page was 52 (search) / 98 (artist) rows where
+about 25 records exist. Two measures, both built on `SongIdentity`'s keys plus
+the Deezer service:
+
+1. **Title fold, everywhere, always** — `SongIdentity.AlbumCoreKey(artist, title)`
+   strips the edition vocabulary (deluxe/expanded/remaster/year/mono…), keeps
+   live versions, credited remixes, guests and volume parts (different records),
+   and includes the artist (editions credited to "John Coltrane Quartet" vs
+   "John Coltrane" stay apart, same as Navidrome's own album identity).
+   `DeezerMetadataService.SearchAlbumsAsync` and `GetArtistAlbumsAsync` fold on
+   it at parse time; the artist page keeps the better-ranked record type
+   (`ReleaseRank`).
+2. **Release-group fold, warm, second visit on** — a barcode (UPC, on the album
+   detail) names a pressing everywhere; `MusicBrainzClient
+   .FindReleaseGroupByBarcodeAsync` turns one into the music database's
+   release-group id. After an artist page renders, `WarmReleaseGroups` asks for
+   at most 8 albums per visit at the music database's 1 req/s pace; the next
+   listing folds rows whose ids tie (a renamed edition, different spelling the
+   title rules cannot hear). Rows with no answer stay as they are. The fold
+   consult also runs over `SearchAlbumsAsync` results and over cached artist
+   listings, so a warmed id trims the page on later visits without refetching.
+
+Search latency: the phone saw 4–8 s on a cold "coltrane" search. That was the
+respond-time build waiting for two full Deezer enrich waves and the YouTube
+duration resolve. `Subsonic__WaitForSearchDurations=false` (deploy side, set
+2026-10-05) answers with Deezer lengths immediately (cold 0.8 s, warm 0.2 s,
+measured through the Caddy-adjacent fast path); video-accurate lengths arrive
+off-path via `getSong`. `SearchEnrichLimit` is 6 (one Deezer wave); rows past it
+enrich from cache inline and are warmed for the next search by `WarmLengths` off
+the critical path.
+
+Artist biography: octo's `getArtistInfo2` returns `""` for outside-catalog
+artists by construction (the Deezer-side artist has no biography source wired in)
+and relays Navidrome's own biography for library artists (needs Last.fm keys in
+Navidrome). Empty on the phone for a catalog artist is the by-design state, not
+a lookup bug.

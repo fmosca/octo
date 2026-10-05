@@ -13,7 +13,8 @@ public class DeezerMetadataServiceTests
     /// Any url with no match returns 404, which exercises the best-effort paths.</summary>
     private static DeezerMetadataService BuildService(Dictionary<string, string> routes,
         string language = "en", List<HttpRequestMessage>? capture = null,
-        ILogger<DeezerMetadataService>? logger = null)
+        ILogger<DeezerMetadataService>? logger = null,
+        Octo.Services.Fingerprint.MusicBrainzClient? musicBrainz = null)
     {
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected()
@@ -41,7 +42,8 @@ public class DeezerMetadataServiceTests
 
         return new DeezerMetadataService(factory.Object,
             TestOptions.Monitor(new MetadataSettings { Language = language }),
-            logger ?? new Mock<ILogger<DeezerMetadataService>>().Object);
+            logger ?? new Mock<ILogger<DeezerMetadataService>>().Object,
+            musicBrainz);
     }
 
     /// <summary>Deezer reports throttling as HTTP 200 with this body, which is the whole
@@ -734,6 +736,112 @@ public class DeezerMetadataServiceTests
         var hits = await svc.GetArtistAlbumsAsync("9", "New Artist");
 
         Assert.Equal(new[] { "Song B", "Song A" }, hits.Select(h => h.Title));
+    }
+
+    // ---- Release-group fold: warm ids tie what titles alone kept apart -----------------
+
+    /// <summary>A deezer album detail with a barcode, so the warm queue has a bridge to ask 
+    /// the music database about.</summary>
+    private static string AlbumDetailWithUpc(string title, string upc, int id) =>
+        $@"{{""id"":{id},""title"":""{title}"",""nb_tracks"":10,""label"":""Label"",
+           ""release_date"":""1998-04-30"",""upc"":""{upc}"",
+           ""artist"":{{""name"":""Test Artist""}},""genres"":{{""data"":[]}}}}";
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_RgWarmGroupsEditions_AndRanksTheAlbumIn()
+    {
+        // Titles say two different records ("X" and "X Vol. 2"): a volume is a kept part, so
+        // the title fold holds them apart. But the catalog gave both the same barcode - the
+        // same record in the music database's eyes - so after the warm run the page shows
+        // one row, the album keeping it. Y has its own barcode and stays.
+        var discography = @"{""data"":[
+            {""id"":1,""title"":""X"",""record_type"":""album"",""release_date"":""1998-04-30""},
+            {""id"":2,""title"":""X Vol. 2"",""record_type"":""ep"",""release_date"":""2003-01-01""},
+            {""id"":3,""title"":""Y"",""record_type"":""album"",""release_date"":""2001-03-12""}
+        ]}";
+        var routes = new Dictionary<string, string>
+        {
+            ["/album/1/tracks"] = TracksJson(10),
+            ["/album/2/tracks"] = TracksJson(10),
+            ["/album/3/tracks"] = TracksJson(10),
+            ["/album/1"] = AlbumDetailWithUpc("X", "602445000000", 1),
+            ["/album/2"] = AlbumDetailWithUpc("X Vol. 2", "602445000000", 2),
+            ["/album/3"] = AlbumDetailWithUpc("Y", "509990000000", 3),
+            ["/artist/44/albums"] = discography,
+        };
+        var svc = BuildService(routes, musicBrainz: NewMusicBrainz(routes,
+            new() { ["602445000000"] = "rg-shared", ["509990000000"] = "rg-y" }));
+
+        var first = await svc.GetArtistAlbumsAsync("44", "Test Artist");
+        Assert.Equal(new[] { "Y", "X", "X Vol. 2" }, first.Select(h => h.Title));
+
+        await svc.LastRgWarm;
+        var second = await svc.GetArtistAlbumsAsync("44", "Test Artist");
+        Assert.Equal(new[] { "Y", "X" }, second.Select(h => h.Title));
+        // The album edition kept the row.
+        Assert.Equal("1", second.Single(h => h.Title == "X").DeezerId);
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_RowsWithoutAWarmGroup_AreUntouched()
+    {
+        // No barcode answers anything: every row stays, in the same shape the title fold left.
+        var discography = @"{""data"":[
+            {""id"":1,""title"":""X"",""record_type"":""album"",""release_date"":""1998-04-30""},
+            {""id"":2,""title"":""X Vol. 2"",""record_type"":""ep"",""release_date"":""2003-01-01""}
+        ]}";
+        var routes = new Dictionary<string, string>
+        {
+            ["/album/1/tracks"] = TracksJson(10),
+            ["/album/2/tracks"] = TracksJson(10),
+            ["/album/1"] = AlbumDetailWithUpc("X", "1111111111111", 1),
+            ["/album/2"] = AlbumDetailWithUpc("X Vol. 2", "2222222222", 2),
+            ["/artist/44/albums"] = discography,
+        };
+        // No barcode group map: every barcode query misses, so nothing can fold.
+        var svc = BuildService(routes, musicBrainz: NewMusicBrainz(routes));
+
+        var first = await svc.GetArtistAlbumsAsync("44", "Test Artist");
+        Assert.Equal(new[] { "X", "X Vol. 2" }, first.Select(h => h.Title));
+        await svc.LastRgWarm;
+        var second = await svc.GetArtistAlbumsAsync("44", "Test Artist");
+        Assert.Equal(new[] { "X", "X Vol. 2" }, second.Select(h => h.Title));
+    }
+
+    /// <summary>A music-database client over its own url-substring routes, kept apart from
+    /// the catalog's: a "/release/" needle would otherwise swallows every barcode query, so
+    /// all barcodes would name one group. Answers by EXACT barcode query text.</summary>
+    private static Octo.Services.Fingerprint.MusicBrainzClient NewMusicBrainz(
+        Dictionary<string, string> routes, Dictionary<string, string>? barcodeGroups = null)
+    {
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync((HttpRequestMessage req, CancellationToken _) =>
+            {
+                var url = req.RequestUri!.ToString();
+                if (url.Contains("barcode:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var code = Uri.UnescapeDataString(url[(url.IndexOf("barcode:", StringComparison.OrdinalIgnoreCase) + 8)..]);
+                    code = code.Split('&')[0];
+                    if (barcodeGroups is not null && barcodeGroups.TryGetValue(code, out var group))
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        { Content = new StringContent(
+                            @$"{{""releases"":[{{""id"":""r-1"",""release-group"":{{""id"":""{group}""}}}}]}}") };
+                    return new HttpResponseMessage(HttpStatusCode.NotFound);
+                }
+                foreach (var (needle, body) in routes)
+                    if (url.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            });
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient(It.IsAny<string>()))
+            .Returns(() => new HttpClient(handler.Object) { BaseAddress = new Uri("https://musicbrainz.org/ws/2/") });
+        return new Octo.Services.Fingerprint.MusicBrainzClient(factory.Object,
+            new Mock<ILogger<Octo.Services.Fingerprint.MusicBrainzClient>>().Object);
     }
 
     [Fact]

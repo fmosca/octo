@@ -92,6 +92,45 @@ public sealed class MusicBrainzClient
     }
 
     /// <summary>
+    /// The release-group id of the pressing a barcode names. A barcode is shared by every
+    /// edition of one release-group that kept it, so this is how two differently spelled
+    /// listings of the same record learn they are the same record. MusicBrainz answers
+    /// "Not Found" for a barcode it does not know, which reads as null like any other miss.
+    /// Remembered a day.
+    /// </summary>
+    public async Task<string?> FindReleaseGroupByBarcodeAsync(string? barcode, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(barcode)) return null;
+        var code = barcode.Trim();
+        if (code.Length is < 8 or > 14 || code.Any(c => !char.IsDigit(c))) return null;
+        var key = "barcode|" + code;
+        if (_cache.TryGetValue(key, out string? cached) && cached is not null) return cached;
+        // Remembering the miss for this session too: a barcode with no group will not
+        // grow one in an hour, and re-asking would spend the one-a-second budget.
+        if (_cache.TryGetValue("nobc|" + code, out _)) return null;
+
+        using var doc = await GetAsync(
+            $"release/?query=barcode:{Uri.EscapeDataString(code)}&fmt=json&limit=1", "barcode lookup", ct);
+        if (doc is null)
+        {
+            _cache.Set("nobc|" + code, "1", new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = SearchTtl });
+            return null;
+        }
+        string? groupId = null;
+        if (doc.RootElement.TryGetProperty("releases", out var releases)
+            && releases.ValueKind == JsonValueKind.Array && releases.GetArrayLength() > 0
+            && releases[0].TryGetProperty("release-group", out var group))
+            groupId = group.TryGetProperty("id", out var gid) ? gid.GetString() : null;
+        if (groupId is null)
+        {
+            _cache.Set("nobc|" + code, "1", new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = SearchTtl });
+            return null;
+        }
+        _cache.Set(key, groupId, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = ReleaseTtl });
+        return groupId;
+    }
+
+    /// <summary>
     /// The search for a recording by name, with a length window of ten seconds either way when
     /// the length is known. Every name goes through <see cref="EscapeQuery"/>, since a quote, a
     /// colon or a slash in a title would otherwise change what the query means and the failure
