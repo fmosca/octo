@@ -781,9 +781,11 @@ public class DeezerMetadataService : IDisposable
     private readonly ConcurrentDictionary<string, string> _releaseGroups = new(StringComparer.Ordinal);
 
     /// <summary>How many barcode lookups one artist visit may queue: the queue runs at the
-    /// music database's one request a second, so a page with dozens of editions must not
-    /// make it a minutes-long backlog for the fingerprint path.</summary>
-    internal const int RgWarmsPerVisit = 8;
+    /// music database's one request a second, so 16 is ~18 s of that database's lane per
+    /// visit, off the critical path, and a 100-row discography is fully warm in under
+    /// a dozen visits. The fingerprint path shares the gate and needs one to three lookups
+    /// when a person keeps a track; a page visit queues at most these.</summary>
+    internal const int RgWarmsPerVisit = 16;
 
     /// <summary>The run of the current release-group warm queue once it has started. Test
     /// observation only, the same idea as the length warmer's; production never awaits it.</summary>
