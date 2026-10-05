@@ -78,6 +78,18 @@ the Deezer service:
    title rules cannot hear). Rows with no answer stay as they are. The fold
    consult also runs over `SearchAlbumsAsync` results and over cached artist
    listings, so a warmed id trims the page on later visits without refetching.
+3. **Singles are not an artist page's business** — a single is one song put out
+   on its own, and the catalog lists every one, so an album's own singles
+   ("Tonight", "Tonight (Remixes)", "Tonight (8-Bit Button Masher Remix)")
+   repeated its title down the page under releases that are the same record
+   under the identity rules and so cannot be folded. `SubSonicController
+   .ArtistPageAlbums` keeps albums, EPs and compilations and drops rows whose
+   release type is only `single`, on the outside artist page (Subsonic
+   `getArtist`) and on the native one (`/api/artist`, `/api/album?artist_id=`),
+   where the counts beside the page come from the same list and so agree with
+   it. An artist whose catalog is singles keeps them, so a page cannot come back
+   empty, and a row the catalog gave no type for is kept — it may be an album.
+   The singles stay reachable through search and through their own album pages.
 
 Search latency: the phone saw 4–8 s on a cold "coltrane" search. That was the
 respond-time build waiting for two full Deezer enrich waves and the YouTube

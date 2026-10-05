@@ -95,7 +95,10 @@ public sealed class MergedFormatTests
                 // The catalog's own shape: no artist and no track counts on this listing. An EP
                 // shares the album's title, and would open as the album (or the album as it).
                 if (path.StartsWith("/artist/7/albums", StringComparison.Ordinal))
-                    return Json("""{"data":[{"id":1,"title":"Test Album","record_type":"album","release_date":"2001-01-01"},{"id":2,"title":"Other Album","record_type":"album","release_date":"2005-05-05"},{"id":3,"title":"A Single","record_type":"single","release_date":"2006-01-01"},{"id":4,"title":"Other Album","record_type":"ep","release_date":"2004-04-04"}]}""");
+                    return Json("""{"data":[{"id":1,"title":"Test Album","record_type":"album","release_date":"2001-01-01"},{"id":2,"title":"Other Album","record_type":"album","release_date":"2005-05-05"},{"id":3,"title":"A Single","record_type":"single","release_date":"2006-01-01"},{"id":4,"title":"Other Album","record_type":"ep","release_date":"2004-04-04"},{"id":5,"title":"An EP","record_type":"ep","release_date":"2003-03-03"}]}""");
+                // An artist whose catalog is singles and nothing else.
+                if (path.StartsWith("/artist/11/albums", StringComparison.Ordinal))
+                    return Json("""{"data":[{"id":110,"title":"First Single","record_type":"single","release_date":"2020-01-01"},{"id":111,"title":"Second Single","record_type":"single","release_date":"2021-01-01"}]}""");
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             }
 
@@ -314,8 +317,9 @@ public sealed class MergedFormatTests
         var artist = json.RootElement.GetProperty("subsonic-response").GetProperty("artist");
         var albums = artist.GetProperty("album").EnumerateArray().ToList();
 
-        // The owned album once, then the outside ones, the album before the single.
-        Assert.Equal(["Test Album", "Other Album", "A Single"], albums.Select(a => a.GetProperty("name").GetString()));
+        // The owned album once, then the outside ones, the album before the EP, and the
+        // single left off the page.
+        Assert.Equal(["Test Album", "Other Album", "An EP"], albums.Select(a => a.GetProperty("name").GetString()));
         Assert.Equal(3, artist.GetProperty("albumCount").GetInt32());
         var outside = albums[1];
         Assert.Equal("Test Artist", outside.GetProperty("artist").GetString());
@@ -350,7 +354,7 @@ public sealed class MergedFormatTests
         using var json = JsonDocument.Parse(await client.GetStringAsync($"/rest/getArtist.view?{Auth}&f=json&id={id}"));
         var artist = json.RootElement.GetProperty("subsonic-response").GetProperty("artist");
 
-        Assert.Equal(["Other Album", "Test Album", "A Single"],
+        Assert.Equal(["Other Album", "Test Album", "An EP"],
             artist.GetProperty("album").EnumerateArray().Select(a => a.GetProperty("name").GetString()));
         Assert.All(artist.GetProperty("album").EnumerateArray(), a => Assert.Equal(id, a.GetProperty("artistId").GetString()));
     }
@@ -414,8 +418,8 @@ public sealed class MergedFormatTests
         Assert.Equal("3", listResponse.Headers.GetValues("X-Total-Count").Single());
         using var list = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
         var albums = list.RootElement.EnumerateArray().ToList();
-        // The albums, then the single, as getArtist lists them.
-        Assert.Equal(["Other Album", "Test Album", "A Single"], albums.Select(a => a.GetProperty("name").GetString()));
+        // The albums, then the EP, as getArtist lists them.
+        Assert.Equal(["Other Album", "Test Album", "An EP"], albums.Select(a => a.GetProperty("name").GetString()));
         Assert.All(albums, a =>
         {
             Assert.Equal(id, a.GetProperty("albumArtistId").GetString());
@@ -497,7 +501,32 @@ public sealed class MergedFormatTests
             a => a.GetProperty("tags").GetProperty("releasetype").EnumerateArray().Select(t => t.GetString()!).ToList());
 
         Assert.Equal(["album"], types["Other Album"]);
-        Assert.Equal(["single"], types["A Single"]);
+        Assert.Equal(["ep"], types["An EP"]);
+        // The single is a song's release, and the page lists records: it is not there to type.
+        Assert.DoesNotContain("A Single", types.Keys);
+    }
+
+    [Fact]
+    public async Task GetArtist_AnArtistOfOnlySinglesKeepsThem()
+    {
+        // Leaving singles off a page is tidying, not a rule about the catalog: an artist who
+        // has put out nothing else would open as a page with no albums at all.
+        await using var factory = new WebFactory();
+        using var client = factory.CreateClient();
+        var id = factory.Services.GetRequiredService<Octo.Services.Soulseek.ExternalIdRegistry>().Register(
+            new Octo.Services.Soulseek.SoulseekRouting
+            {
+                Kind = Octo.Services.Soulseek.RoutingKind.Artist,
+                Artist = "Single Only",
+                ExternalArtistId = "11",
+            });
+
+        using var json = JsonDocument.Parse(await client.GetStringAsync($"/rest/getArtist.view?{Auth}&f=json&id={id}"));
+        var artist = json.RootElement.GetProperty("subsonic-response").GetProperty("artist");
+
+        Assert.Equal(["Second Single", "First Single"],
+            artist.GetProperty("album").EnumerateArray().Select(a => a.GetProperty("name").GetString()));
+        Assert.Equal(2, artist.GetProperty("albumCount").GetInt32());
     }
 
     [Fact]
@@ -548,7 +577,9 @@ public sealed class MergedFormatTests
         // The outside ones say what the catalog calls them, in the same lowercase words, so
         // one artist's list never mixes "album" and "Album".
         Assert.Equal(["album"], types["Other Album"]);
-        Assert.Equal(["single"], types["A Single"]);
+        Assert.Equal(["ep"], types["An EP"]);
+        // The single is left off an artist's page, so it is not there to be typed either.
+        Assert.DoesNotContain("A Single", types.Keys);
         Assert.All(types.Values.SelectMany(t => t), type => Assert.Equal(type.ToLowerInvariant(), type));
 
         var xml = XDocument.Parse(await client.GetStringAsync($"/rest/getArtist.view?{Auth}&id=ar-1"));

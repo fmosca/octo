@@ -1740,8 +1740,8 @@ public class SubsonicController : ControllerBase
                 return _responseBuilder.CreateError(format, 70, "Artist not found");
             }
 
-            var albums = await _metadataService.GetArtistAlbumsAsync(provider!, externalId!);
-            
+            var albums = ArtistPageAlbums(await _metadataService.GetArtistAlbumsAsync(provider!, externalId!));
+
             // Fill artist info for each album (Deezer API doesn't include it in artist/albums endpoint)
             foreach (var album in albums)
             {
@@ -1818,8 +1818,8 @@ public class SubsonicController : ControllerBase
                 // The provider must come from the artist found, as for albums: a hardcoded
                 // "deezer" never matches the metadata service's name, so this was always empty.
                 // The library's own albums go along, to tell two artists of one name apart.
-                deezerAlbums = await _metadataService.GetArtistAlbumsAsync(deezerArtist.ExternalProvider!, deezerArtist.ExternalId!,
-                    localAlbumTitles);
+                deezerAlbums = ArtistPageAlbums(await _metadataService.GetArtistAlbumsAsync(
+                    deezerArtist.ExternalProvider!, deezerArtist.ExternalId!, localAlbumTitles));
                 
                 // Fill artist info for each album (Deezer API doesn't include it in artist/albums endpoint)
                 // Use local artist ID and name so albums link back to the local artist
@@ -4348,9 +4348,9 @@ public class SubsonicController : ControllerBase
     private async Task<List<Album>> OutsideArtistAlbumsAsync(string artistId, string artistName,
         bool knownCountsOnly = false)
     {
-        var albums = knownCountsOnly
+        var albums = ArtistPageAlbums(knownCountsOnly
             ? await _metadataService.GetArtistAlbumsKnownCountsAsync(SoulseekMetadataService.ProviderName, artistId)
-            : await _metadataService.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, artistId);
+            : await _metadataService.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, artistId));
         foreach (var album in albums)
         {
             if (string.IsNullOrEmpty(album.Artist)) album.Artist = artistName;
@@ -4358,6 +4358,26 @@ public class SubsonicController : ControllerBase
         }
         return albums;
     }
+
+    /// <summary>
+    /// The rows an artist's page lists: the records — albums, EPs, compilations — and not the
+    /// singles. A single is one song put out on its own, and a catalog that hands over every
+    /// one of them buries the album it came from: "Tonight" beside "Tonight (Remixes)" and
+    /// "Tonight (8-Bit Button Masher Remix)" reads as one title repeated. An artist whose
+    /// catalog holds nothing but singles keeps them, so a page never comes back empty; a row
+    /// the catalog gave no type for is kept too, because it may be an album.
+    /// </summary>
+    internal static List<Album> ArtistPageAlbums(IEnumerable<Album> albums)
+    {
+        var listed = albums.ToList();
+        var singles = listed.Where(IsSingleRelease).ToList();
+        if (singles.Count == 0 || singles.Count == listed.Count) return listed;
+        listed.RemoveAll(IsSingleRelease);
+        return listed;
+    }
+
+    private static bool IsSingleRelease(Album album) =>
+        album.ReleaseTypes.Count > 0 && album.ReleaseTypes.All(type => type == "single");
 
     /// <summary>
     /// Serializes one outside Artist into Navidrome's native artist JSON shape. Counts go
