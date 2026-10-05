@@ -2890,7 +2890,9 @@ public class SubsonicController : ControllerBase
             }
         }
 
-        if (string.IsNullOrEmpty(artistName) || string.IsNullOrEmpty(trackTitle))
+        // An artist seed has no title: the artist name is the whole seed. A song seed must
+        // have both, which is what sent an artist row down the song path with nothing (#61).
+        if (string.IsNullOrEmpty(artistName) || (!isArtistSeed && string.IsNullOrEmpty(trackTitle)))
         {
             _logger.LogWarning("Could not get artist/title for song {Id}", id);
             return _responseBuilder.CreateResponse(format, responseKey, new { });
