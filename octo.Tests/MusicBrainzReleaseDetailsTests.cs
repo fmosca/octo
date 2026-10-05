@@ -236,6 +236,22 @@ public class MusicBrainzReleaseDetailsTests
 /// </summary>
 public class MusicBrainzQueryTests
 {
+    private static MusicBrainzClient Client(Func<string, HttpResponseMessage> answer, List<string> calls)
+    {
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync((HttpRequestMessage req, CancellationToken _) =>
+            {
+                calls.Add(req.RequestUri!.ToString());
+                return answer(req.RequestUri!.ToString());
+            });
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient(It.IsAny<string>()))
+            .Returns(() => new HttpClient(handler.Object) { BaseAddress = new Uri("https://musicbrainz.test/ws/2/") });
+        return new MusicBrainzClient(factory.Object, NullLogger<MusicBrainzClient>.Instance);
+    }
+
     private static string Query(string url)
     {
         var start = url.IndexOf("query=", StringComparison.Ordinal) + "query=".Length;
@@ -267,4 +283,49 @@ public class MusicBrainzQueryTests
     [InlineData("a+b-c&&d||e!f(g)h{i}j[k]l^m\"n~o*p?q:r\\s/t", "a\\+b\\-c\\&\\&d\\|\\|e\\!f\\(g\\)h\\{i\\}j\\[k\\]l\\^m\\\"n\\~o\\*p\\?q\\:r\\\\s\\/t")]
     public void EscapeQuery(string input, string expected) =>
         Assert.Equal(expected, MusicBrainzClient.EscapeQuery(input));
+
+    // ---- the barcode: a real miss is remembered, an unanswered call is not --------------
+
+    [Fact]
+    public async Task FindReleaseGroupByBarcode_BarcodeTheDatabaseKnows_GivesItsGroup()
+    {
+        var calls = new List<string>();
+        var client = Client(url => Json("""
+            {"releases":[{"id":"r-1","release-group":{"id":"rg-1"}}]}
+            """), calls);
+        Assert.Equal("rg-1", await client.FindReleaseGroupByBarcodeAsync("00602547071696", default));
+        Assert.Contains("barcode:00602547071696", Uri.UnescapeDataString(calls[0]));
+    }
+
+    [Fact]
+    public async Task FindReleaseGroupByBarcode_AnsweredWithNothing_RememberedAndNotReasked()
+    {
+        var calls = new List<string>();
+        var client = Client(_ => Json("""{"releases":[]}"""), calls);
+        Assert.Null(await client.FindReleaseGroupByBarcodeAsync("1111111111111", default));
+        Assert.Null(await client.FindReleaseGroupByBarcodeAsync("1111111111111", default));
+        // The miss is remembered; asking again wastes the budget.
+        Assert.Single(calls);
+    }
+
+    [Fact]
+    public async Task FindReleaseGroupByBarcode_TheCallNeverAnswered_RetriedNextTime()
+    {
+        // A refusal is not an answer: caching it would turn one throttled call into hours
+        // of "the database has no such barcode".
+        var calls = new List<string>();
+        var refused = true;
+        var client = Client(_ => refused
+            ? new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            { Content = new StringContent("throttled") }
+            : Json("""{"releases":[{"id":"r-1","release-group":{"id":"rg-1"}}]}"""), calls);
+        Assert.Null(await client.FindReleaseGroupByBarcodeAsync("2222222222", default));
+        Assert.Null(await client.FindReleaseGroupByBarcodeAsync("2222222222", default));
+        Assert.Equal(2, calls.Count); // asked again, and this time it could answer
+        refused = false;
+        Assert.Equal("rg-1", await client.FindReleaseGroupByBarcodeAsync("2222222222", default));
+    }
+
+    private static HttpResponseMessage Json(string body) =>
+        new(HttpStatusCode.OK) { Content = new StringContent(body) };
 }

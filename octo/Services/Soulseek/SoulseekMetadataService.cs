@@ -373,7 +373,17 @@ public class SoulseekMetadataService : IMusicMetadataService
                 // Deezer duration as a hint so it picks the closest-length canonical
                 // video (not a long-form/compilation upload); playback reuses the
                 // stored videoId, so the shown length matches the audio.
-                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", song.Duration,
+                //
+                // The hint is only a length somebody actually resolved: SearchEnrichLimit
+                // (6) is below this pass's 8, so one or two rows the search built carry the
+                // 180 s fallback in Song.Duration with nothing behind it — a hint of 180 for
+                // a 7-minute live take would pin the wrong video, and playback reuses the
+                // pinned one. A row whose routing has no metadata length resolves hint-less
+                // (top result) instead, the same as a row with no length at all; getSong
+                // still resolves it, so the play-time path keeps its accurate length.
+                var routing = _idRegistry.Lookup(song.Id);
+                var hinted = routing is { } r && SongLength.HasMetadataLength(r) ? song.Duration : null;
+                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", hinted,
                     background: background, ct: ct);
                 if (hit is { VideoId.Length: > 0 } && hit.Duration is int d && d > 0)
                 {
@@ -384,7 +394,6 @@ public class SoulseekMetadataService : IMusicMetadataService
                     // runs, and Song.Duration is an int? whose torn write can read back as 0.
                     // getSong builds its answer from routing.Duration, so it still gets this length.
                     if (!background && SongLength.SaneVideoLength(d) is int shown) song.Duration = shown;
-                    var routing = _idRegistry.Lookup(song.Id);
                     // A play can pin a different video while this lookup runs. The next Range
                     // request has to get the same video, so the pinned one wins.
                     if (background && routing is { YouTubeId.Length: > 0 } && routing.YouTubeId != hit.VideoId) return;

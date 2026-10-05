@@ -740,6 +740,36 @@ public class DeezerMetadataServiceTests
 
     // ---- Release-group fold: warm ids tie what titles alone kept apart -----------------
 
+    [Fact]
+    public async Task SearchAlbumsAsync_AWarmReleaseGroup_PrincesTheSecondCall()
+    {
+        // The catalog lists "X" and "X Vol. 2" and gives both the same barcode - one record
+        // the title rules cannot hear. The fold consults ids warmed against the music
+        // database, and the list a call returns is the list its cache keeps.
+        var routes = new Dictionary<string, string>
+        {
+            ["/search/album?q=x&limit=20"] = @"{""data"":[
+                {""id"":1,""title"":""X"",""record_type"":""album"",""artist"":{""name"":""Test Artist""}},
+                {""id"":2,""title"":""X Vol. 2"",""record_type"":""album"",""artist"":{""name"":""Other""}}
+            ]}",
+            ["/album/1"] = AlbumDetailWithUpc("X", "602445000000", 1),
+            ["/album/2"] = AlbumDetailWithUpc("X Vol. 2", "602445000000", 2),
+        };
+        var svc = BuildService(routes, musicBrainz: NewMusicBrainz(routes,
+            new() { ["602445000000"] = "rg-shared" }));
+
+        var before = await svc.SearchAlbumsAsync("x", 20);
+        Assert.Equal(new[] { "X", "X Vol. 2" }, before.Select(h => h.Title));
+
+        // Warm both ids by hand (the queue itself runs fire-and-forget): both rows now
+        // name one release-group, the first keeping the row.
+        svc.WarmReleaseGroups(await svc.SearchAlbumsAsync("x", 20));
+        await svc.LastRgWarm;
+
+        var after = await svc.SearchAlbumsAsync("x", 20);
+        Assert.Equal(new[] { "X" }, after.Select(h => h.Title));
+    }
+
     /// <summary>A deezer album detail with a barcode, so the warm queue has a bridge to ask 
     /// the music database about.</summary>
     private static string AlbumDetailWithUpc(string title, string upc, int id) =>

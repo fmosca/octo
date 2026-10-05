@@ -58,12 +58,12 @@ public class DeezerMetadataService : IDisposable
         int? TrackPosition, int? DiscNumber, string? Isrc);
 
     /// <summary>An album plus its full tracklist. RecordType is the catalog's own word for it:
-    /// album, ep, single or compile. Upc is the release's barcode, when the catalog lists
-    /// one - the key that names a pressing everywhere, and the bridge to the music database's
-    /// release groups.</summary>
+    /// album, ep, single or compile. (The release's barcode is read separately, by
+    /// <see cref="GetAlbumUpcAsync"/>, which asks the catalog one album call and caches on
+    /// its own key - never the tracklist.)</summary>
     public record AlbumDetail(string DeezerId, string Title, string Artist,
         string? CoverUrl, int? Year, string? Genre, string? Label, List<AlbumTrack> Tracks,
-        string? RecordType = null, string? Upc = null);
+        string? RecordType = null);
 
     /// <summary>What the catalog said when asked for an album's detail.</summary>
     public enum AlbumAnswer
@@ -537,7 +537,12 @@ public class DeezerMetadataService : IDisposable
     {
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<AlbumHit>();
         var key = $"as|{query}|{limit}|{keepSingles}".ToLowerInvariant();
-        if (TryGetCached<List<AlbumHit>>(key, out var cached)) return cached!;
+        if (TryGetCached<List<AlbumHit>>(key, out var cached))
+        {
+            // As on the artist listing: the fold re-runs over the cached rows, because the
+            // warm queue may have tied rows since this entry was written.
+            return FoldByReleaseGroup(cached!);
+        }
 
         var hits = new List<AlbumHit>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -587,9 +592,11 @@ public class DeezerMetadataService : IDisposable
         {
             _logger.LogDebug("deezer album search '{Q}' failed: {M}", query, ex.Message);
         }
-
-        Put(key, FoldByReleaseGroup(hits), hits.Count == 0 ? NegativeTtl : PositiveTtl);
-        return hits;
+        // The caller gets what the cache keeps: an id warm since this search was written
+        // would otherwise show folded on the next visit only, and this visit unfolded.
+        var folded = FoldByReleaseGroup(hits);
+        Put(key, folded, folded.Count == 0 ? NegativeTtl : PositiveTtl);
+        return folded;
     }
 
     /// <summary>
@@ -819,10 +826,11 @@ public class DeezerMetadataService : IDisposable
             {
                 try
                 {
-                    // The detail call is cached after the first one (the page's own count
-                    // fills usually already made it), so this normally reads, not asks.
-                    var detail = (await LookUpAlbumDetailAsync(deezerId)).Detail;
-                    var upc = detail?.Upc;
+                    // The barcode only. GetAlbumUpcAsync caches under its own key and never
+                    // fetches the tracklist, so a warm costs the catalog one album call the
+                    // first time and a cache read afterwards - the full detail call would
+                    // have paid an extra 300-track fetch per row for data the fold ignores.
+                    var upc = await GetAlbumUpcAsync(deezerId);
                     if (string.IsNullOrWhiteSpace(upc))
                     {
                         _releaseGroups[deezerId] = "";
@@ -938,7 +946,7 @@ public class DeezerMetadataService : IDisposable
         try
         {
             string title = "", artist = "", genre = "", label = "", cover = "";
-            string? recordType = null, upc = null;
+            string? recordType = null;
             int? year = null;
             // Declared out here on purpose: the document below is disposed before the
             // tracklist call, and this is what tells an empty tracklist apart from an
@@ -956,10 +964,6 @@ public class DeezerMetadataService : IDisposable
                     cover = Str(root, "cover_xl") ?? Str(root, "cover_medium") ?? "";
                     label = Str(root, "label") ?? "";
                     recordType = Str(root, "record_type");
-                    // The catalog usually lists the barcode of the pressing it indexes; a
-                    // blank or a non-digit string means it has none we can use.
-                    var rawUpc = Str(root, "upc");
-                    if (!string.IsNullOrWhiteSpace(rawUpc) && rawUpc.Trim() != "0") upc = rawUpc.Trim();
                     var rd = Str(root, "release_date");
                     if (!string.IsNullOrEmpty(rd) && rd.Length >= 4 && int.TryParse(rd[..4], out var yr))
                         year = yr;
@@ -1037,7 +1041,7 @@ public class DeezerMetadataService : IDisposable
                 string.IsNullOrEmpty(cover) ? null : cover, year,
                 string.IsNullOrEmpty(genre) ? null : genre,
                 string.IsNullOrEmpty(label) ? null : label,
-                tracks, recordType, upc);
+                tracks, recordType);
         }
         catch (Exception ex)
         {

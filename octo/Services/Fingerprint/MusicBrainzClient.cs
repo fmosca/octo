@@ -94,9 +94,10 @@ public sealed class MusicBrainzClient
     /// <summary>
     /// The release-group id of the pressing a barcode names. A barcode is shared by every
     /// edition of one release-group that kept it, so this is how two differently spelled
-    /// listings of the same record learn they are the same record. MusicBrainz answers
-    /// "Not Found" for a barcode it does not know, which reads as null like any other miss.
-    /// Remembered a day.
+    /// listings of the same record learn they are the same record. "Not Found" and an empty
+    /// hits list mean the database has nothing for it, which is remembered a few hours; a
+    /// request that never completed an answer is not cached at all, so one throttled call
+    /// cannot turn into six hours of "no such barcode".
     /// </summary>
     public async Task<string?> FindReleaseGroupByBarcodeAsync(string? barcode, CancellationToken ct)
     {
@@ -109,13 +110,11 @@ public sealed class MusicBrainzClient
         // grow one in an hour, and re-asking would spend the one-a-second budget.
         if (_cache.TryGetValue("nobc|" + code, out _)) return null;
 
+        // Null here is "could not be asked" - down, throttled, unreadable - and is left
+        // uncached. Only a parsed answer says anything about the barcode.
         using var doc = await GetAsync(
             $"release/?query=barcode:{Uri.EscapeDataString(code)}&fmt=json&limit=1", "barcode lookup", ct);
-        if (doc is null)
-        {
-            _cache.Set("nobc|" + code, "1", new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = SearchTtl });
-            return null;
-        }
+        if (doc is null) return null;
         string? groupId = null;
         if (doc.RootElement.TryGetProperty("releases", out var releases)
             && releases.ValueKind == JsonValueKind.Array && releases.GetArrayLength() > 0
