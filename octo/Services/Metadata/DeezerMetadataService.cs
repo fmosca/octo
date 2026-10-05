@@ -614,7 +614,12 @@ public class DeezerMetadataService : IDisposable
             // The fold re-runs on a cached listing: the warm queue may have tied rows since
             // this cache entry was written, and a cached "fewer rows" page is the point of
             // the queue. FoldByReleaseGroup returns the list untouched when nothing is warm.
-            return FoldByReleaseGroup(cached!);
+            // The queue keeps filling here too: a first visit warmed 8 barcodes, and until
+            // the cache entry expires the fetch branch that re-arms the queue never runs,
+            // so a long discography only ever warmed its first two batches.
+            var folded = FoldByReleaseGroup(cached!);
+            if (folded.Count > 1) WarmReleaseGroups(folded);
+            return folded;
         }
 
         var releases = new List<AlbumHit>();
