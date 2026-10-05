@@ -82,7 +82,9 @@ public sealed class SoulseekIncompleteFolderTests : IDisposable
         });
 
         var result = await SoulseekDownloadService.RetryResolveAsync(
-            () => SoulseekDownloadService.ResolveLocalPath(Remote, Size, false, [_root], ["incomplete"]),
+            () => SoulseekDownloadService.ResolveLocalPath(Remote, Size, false, [_root], ["incomplete"]) is { } path
+                ? new SoulseekDownloadService.ResolvedPath(path, false)
+                : null,
             maxWait: TimeSpan.FromSeconds(5), pollInterval: TimeSpan.FromMilliseconds(10), CancellationToken.None);
         await mover;
 

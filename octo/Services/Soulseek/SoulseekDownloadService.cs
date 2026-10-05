@@ -887,9 +887,13 @@ public class SoulseekDownloadService : BaseDownloadService
                 var maxWait = state == SoulseekTransferState.Succeeded ? TimeSpan.FromSeconds(15) : TimeSpan.FromSeconds(5);
                 var jobRoots = batched ? await JobRootsAsync(cancellationToken) : [];
                 // Where this attempt's file is now, asked again after a check that took seconds.
-                string? FindOwnFile() => batched
-                    ? ResolveInJob(jobRoots, jobDir, hit.Filename, hit.Size, callerGaveUp)
-                    : ResolveLanded(hit.Filename, hit.Size, callerGaveUp, excluded);
+                ResolvedPath? FindOwnFile() => batched
+                    ? ResolveInJob(jobRoots, jobDir, hit.Filename, hit.Size, callerGaveUp) is { } found
+                        ? new ResolvedPath(found, false)
+                        : null
+                    : ResolveLanded(hit.Filename, hit.Size, callerGaveUp, excluded) is { } landed
+                        ? new ResolvedPath(landed, IsIncompleteLocation(landed))
+                        : null;
                 var localPath = batched
                     ? await RetryResolveAsync(FindOwnFile, maxWait, TimeSpan.FromSeconds(1), cancellationToken)
                     : await ResolveLocalPathWithRetryAsync(
@@ -953,7 +957,7 @@ public class SoulseekDownloadService : BaseDownloadService
                     // If the file moved during the check, find it and ask again instead of blaming the
                     // peer for slskd's own move.
                     if (verdict.Verdict == Octo.Services.Fingerprint.VerificationVerdict.Mismatch && !IOFile.Exists(localPath)
-                        && FindOwnFile() is { } movedTo)
+                        && FindOwnFile() is { Path: { } movedTo })
                     {
                         localPath = movedTo;
                         verdict = await _verification.VerifyAsync(localPath, routing.Artist, routing.Title, song.Isrc ?? routing.Isrc,
@@ -1027,7 +1031,7 @@ public class SoulseekDownloadService : BaseDownloadService
                             if (callerGaveUp) break;
                             continue;
                         }
-                        localPath = foundAgain;
+                        localPath = foundAgain.Path;
                     }
 
                     if (reserve is not null && !SamePath(reserve.Path, localPath))
@@ -1640,22 +1644,54 @@ public class SoulseekDownloadService : BaseDownloadService
     /// FileMatches rejects a partial copy by size, and the incomplete folder is never
     /// searched (#69), so a full-size copy that slskd has not moved yet cannot end
     /// the wait early. A cancelled caller gets one final check instead of a wait.
+    ///
+    /// While the move runs, the copy on disk that matches is the one slskd has not
+    /// moved yet, so it is held back until the settled copy appears: the path this
+    /// returns is what placement, tagging and the download history all work from.
     /// </summary>
     private Task<string?> ResolveLocalPathWithRetryAsync(
         string remoteFilename, long expectedSize, IReadOnlyCollection<string> excluded,
         bool requireExactSize, TimeSpan maxWait, CancellationToken ct)
         => RetryResolveAsync(
-            () => ResolveLanded(remoteFilename, expectedSize, requireExactSize, excluded),
+            () => ResolveLanded(remoteFilename, expectedSize, requireExactSize, excluded) is { } path
+                && !IsIncompleteLocation(path)
+                ? new ResolvedPath(path, false)
+                : null,
             maxWait, TimeSpan.FromSeconds(1), ct);
 
+    /// <summary>Where the file is, and whether that is where it will stay.</summary>
+    internal sealed record ResolvedPath(string Path, bool Provisional);
+
+    /// <summary>
+    /// Whether a path is still inside slskd's incomplete directory, from which the file
+    /// is about to move. Named by the segment, not by the word: an album folder called
+    /// "Incomplete Collection" is a settled location, and a file named "incomplete.flac"
+    /// says nothing about where it sits.
+    /// </summary>
+    internal static bool IsIncompleteLocation(string path) =>
+        (Path.GetDirectoryName(path) ?? "")
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries)
+            .Any(segment => segment.Equals("incomplete", StringComparison.OrdinalIgnoreCase));
+
     internal static async Task<string?> RetryResolveAsync(
-        Func<string?> resolve, TimeSpan maxWait, TimeSpan pollInterval, CancellationToken ct)
+        Func<ResolvedPath?> resolve, TimeSpan maxWait, TimeSpan pollInterval, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + maxWait;
+        ResolvedPath? provisional = null;
         while (true)
         {
-            var path = resolve();
-            if (path is not null || DateTime.UtcNow >= deadline) return path;
+            var hit = resolve();
+            if (hit is { Provisional: false }) return hit.Path;
+            // A hit inside slskd's incomplete directory is a file that is about to move.
+            // Remember it, and keep looking for the copy that will stay: whatever this
+            // returns is the path placement, tagging and the history all work from, and a
+            // path that stops existing between here and there is how a finished download
+            // got stranded — skipped by placement, unopenable by the tagger, recorded with
+            // SizeBytes 0. If nothing settled ever appears the provisional path is still
+            // returned, because a path that may move beats no path at all.
+            provisional = hit ?? provisional;
+            if (DateTime.UtcNow >= deadline) return provisional?.Path;
             try
             {
                 await Task.Delay(pollInterval, ct);
@@ -1664,7 +1700,7 @@ public class SoulseekDownloadService : BaseDownloadService
             {
                 // Caller left: no point waiting out the window, but the file may
                 // have just landed, so look once more before giving up.
-                return resolve();
+                return (resolve() ?? provisional)?.Path;
             }
         }
     }

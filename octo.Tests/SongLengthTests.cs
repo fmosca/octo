@@ -265,7 +265,7 @@ public class SongLengthTests
         var svc = fixture.Service();
         var song = (await svc.SearchSongsByArtistTitleAsync("Someone", "Live Set")).Single();
 
-        await svc.ResolveTopDurationsAsync([song]);
+        await svc.ResolveTopDurationsAsync([song], background: true);
 
         Assert.Equal(180, song.Duration);
         Assert.Equal("vid-Someone Live Set", fixture.Registry.Lookup(song.Id)!.YouTubeId);

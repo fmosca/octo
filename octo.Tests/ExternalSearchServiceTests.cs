@@ -55,8 +55,8 @@ public class ExternalSearchServiceTests
         var metadata = new Mock<IMusicMetadataService>();
         metadata.Setup(m => m.SearchSongsByArtistTitleAsync("Artist", "Song", 1, null))
             .ReturnsAsync([new Song { Artist = "Artist", Title = "Song" }]);
-        metadata.Setup(m => m.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>(), It.IsAny<bool>()))
-            .Callback((List<Song> _, CancellationToken _, bool background) => started.TrySetResult(background))
+        metadata.Setup(m => m.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>(), It.IsAny<bool>(), It.IsAny<bool>()))
+            .Callback((List<Song> _, CancellationToken _, bool _, bool background) => started.TrySetResult(background))
             .Returns(durations.Task);
         var search = new ExternalSearchService(metadata.Object, NullLogger<ExternalSearchService>.Instance,
             OneHitLastFm(), TestOptions.Monitor(new SubsonicSettings { WaitForSearchDurations = waitForDurations }));
@@ -81,7 +81,7 @@ public class ExternalSearchServiceTests
         var metadata = new Mock<IMusicMetadataService>();
         metadata.Setup(m => m.SearchSongsByArtistTitleAsync("Artist", "Song", 1, null))
             .ReturnsAsync([new Song { Artist = "Artist", Title = "Song" }]);
-        metadata.Setup(m => m.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>(), true))
+        metadata.Setup(m => m.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>(), false, true))
             .Callback(() => started.TrySetResult()).Returns(durations.Task);
         metadata.Setup(m => m.PrewarmYouTubeIdsAsync(It.IsAny<IEnumerable<Song>>(), 12, It.IsAny<CancellationToken>()))
             .Callback(() => prewarmed.TrySetResult()).Returns(Task.CompletedTask);

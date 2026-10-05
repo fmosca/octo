@@ -58,7 +58,8 @@ public interface IMusicMetadataService
     /// and a dropped resolve leaves the 180 s placeholder the client is about to draw its
     /// scrub bar from. The shim's own gate reserves capacity for interactive work.
     /// </param>
-    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default, bool interactive = false)
+    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default,
+        bool interactive = false, bool background = false)
         => Task.CompletedTask;
 
     /// <summary>

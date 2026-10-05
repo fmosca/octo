@@ -351,16 +351,18 @@ public class SoulseekMetadataService : IMusicMetadataService
     private readonly SemaphoreSlim _backgroundDurationGate = new(2);
 
     public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default,
-        bool interactive = false)
+        bool interactive = false, bool background = false)
     {
         var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
         {
             // The background pass runs after the client has the results, so a play may already
             // have pinned a video for this song. It keeps it, and the shim is spared the lookup.
-            var background = !interactive;
             if (background && _idRegistry.Lookup(song.Id) is { YouTubeId.Length: > 0 }) return;
-            var gate = interactive ? _prewarmGate : _backgroundDurationGate;
-            if (background && !await gate.WaitAsync(PrewarmQueueWait, ct)) return;
+            var gate = background ? _backgroundDurationGate : _prewarmGate;
+            // Interactive callers go straight through — the shim's own gate keeps a reserve for
+            // interactive work, so this cannot starve a play — and a dropped resolve would leave
+            // the 180 s placeholder the client is about to draw its scrub bar from.
+            if (!interactive && !await gate.WaitAsync(PrewarmQueueWait, ct)) return;
             try
             {
                 // Fast metadata-only lookup (flat search, no URL solve). Pass the
@@ -394,7 +396,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                 }
             }
             catch { /* best-effort; keeps the existing duration on a miss */ }
-            finally { if (background) gate.Release(); }
+            finally { if (!interactive) gate.Release(); }
         });
         await Task.WhenAll(tasks);
     }
