@@ -258,7 +258,7 @@ public class SubsonicResponseBuilderTests
         };
 
         // Act
-        var result = _builder.CreateArtistResponse("json", artist, albums);
+        var result = _builder.CreateArtistResponse("json", artist, albums, ("", ""), null);
 
         // Assert
         var jsonResult = Assert.IsType<JsonResult>(result);
@@ -287,7 +287,7 @@ public class SubsonicResponseBuilderTests
         };
 
         // Act
-        var result = _builder.CreateArtistResponse("xml", artist, albums);
+        var result = _builder.CreateArtistResponse("xml", artist, albums, ("", ""), null);
 
         // Assert
         var contentResult = Assert.IsType<ContentResult>(result);
@@ -300,6 +300,76 @@ public class SubsonicResponseBuilderTests
         Assert.Equal("artist123", artistElement.Attribute("id")?.Value);
         Assert.Equal("Test Artist", artistElement.Attribute("name")?.Value);
         Assert.Equal("2", artistElement.Attribute("albumCount")?.Value);
+    }
+
+    [Fact]
+    public void CreateArtistResponse_WithBioAndSimilar_CarriesBothFormats()
+    {
+        var artist = new Artist { Id = "a1", Name = "Phoenix", ImageUrl = "https://img/p.jpg" };
+        var albums = new List<Album> { new() { Id = "al1", Title = "Wolfgang Amadeus Phoenix" } };
+        var similar = new List<Artist>
+        {
+            new() { Id = "s1", Name = "Metronomy", ImageUrl = "https://img/m.jpg" },
+            new() { Id = "s2", Name = "Foals" },
+        };
+
+        var json = Assert.IsType<JsonResult>(_builder.CreateArtistResponse(
+            "json", artist, albums, ("A long biography.", "A short one."), similar));
+        var doc = JsonDocument.Parse(JsonSerializer.Serialize(json.Value));
+        var data = doc.RootElement.GetProperty("subsonic-response").GetProperty("artist");
+        Assert.Equal("A long biography.", data.GetProperty("biography").GetString());
+        Assert.Equal("A short one.", data.GetProperty("biographySummary").GetString());
+        var rows = data.GetProperty("similarArtist");
+        Assert.Equal(2, rows.GetArrayLength());
+        Assert.Equal("Metronomy", rows[0].GetProperty("name").GetString());
+        Assert.Equal("https://img/m.jpg", rows[0].GetProperty("artistImageUrl").GetString());
+        Assert.False(rows[0].GetProperty("isUser").GetBoolean());
+        // No biography section when none came back: not even an empty one.
+        var bare = Assert.IsType<JsonResult>(_builder.CreateArtistResponse(
+            "json", artist, albums, ("", ""), null));
+        var bareDoc = JsonDocument.Parse(JsonSerializer.Serialize(bare.Value));
+        Assert.False(bareDoc.RootElement.GetProperty("subsonic-response")
+            .GetProperty("artist").TryGetProperty("biography", out _));
+
+        var xml = Assert.IsType<ContentResult>(_builder.CreateArtistResponse(
+            "xml", artist, albums, ("A long biography.", "A short one."), similar));
+        var xdoc = XDocument.Parse(xml.Content!);
+        var ns = xdoc.Root!.GetDefaultNamespace();
+        var el = xdoc.Root!.Element(ns + "artist")!;
+        Assert.Equal("A long biography.", el.Attribute("biography")?.Value);
+        var xmlRows = el.Elements(ns + "similarArtist").ToList();
+        Assert.Equal(2, xmlRows.Count);
+        Assert.Equal("Metronomy", xmlRows[0].Attribute("name")?.Value);
+        Assert.Equal("https://img/m.jpg", xmlRows[0].Attribute("artistImageUrl")?.Value);
+    }
+
+    [Fact]
+    public void CreateInfoResponse_WithSimilarRows_WritesThemInBothFormats()
+    {
+        var similar = new List<Artist>
+        {
+            new() { Id = "s1", Name = "Foals", ImageUrl = "https://img/f.jpg" },
+        };
+
+        var json = Assert.IsType<JsonResult>(_builder.CreateInfoResponse("json", "artistInfo2",
+            new Dictionary<string, object> { ["biography"] = "Bio." }, similar));
+        var doc = JsonDocument.Parse(JsonSerializer.Serialize(json.Value));
+        var data = doc.RootElement.GetProperty("subsonic-response").GetProperty("artistInfo2");
+        Assert.Equal("Bio.", data.GetProperty("biography").GetString());
+        var rows = data.GetProperty("similarArtist");
+        Assert.Equal("s1", rows[0].GetProperty("id").GetString());
+        Assert.Equal("Foals", rows[0].GetProperty("name").GetString());
+        Assert.False(rows[0].GetProperty("isUser").GetBoolean());
+
+        var xml = Assert.IsType<ContentResult>(_builder.CreateInfoResponse("xml", "artistInfo2",
+            new Dictionary<string, object> { ["biography"] = "Bio." }, similar));
+        var xdoc = XDocument.Parse(xml.Content!);
+        var ns = xdoc.Root!.GetDefaultNamespace();
+        var el = xdoc.Root!.Element(ns + "artistInfo2")!;
+        Assert.Equal("Bio.", el.Element(ns + "biography")?.Value);
+        var xmlRows = el.Elements(ns + "similarArtist").ToList();
+        Assert.Single(xmlRows);
+        Assert.Equal("Foals", xmlRows[0].Attribute("name")?.Value);
     }
 
     [Fact]

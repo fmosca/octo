@@ -374,6 +374,21 @@ public class LastFmService
                 .Where(item => item.Name.Length > 0).Take(limit).ToList();
         }, cancellationToken);
 
+    /// <summary>The artist's biography as the catalog's editors wrote it, and the summary
+    /// form many clients show first. Empty when the catalog has none for the name; the
+    /// caller is what decides the name is this artist's.</summary>
+    public record ArtistBio(string Biography, string Summary);
+
+    public Task<ArtistBio?> GetArtistBiographyAsync(string artist,
+        CancellationToken cancellationToken = default) => CachedAsync<ArtistBio?>(
+        $"artist-bio|{artist}", async ct =>
+        {
+            using var doc = await GetDocumentAsync("artist.getinfo",
+                new Dictionary<string, string> { ["artist"] = artist }, ct);
+            if (doc is null || !doc.RootElement.TryGetProperty("artist", out var artistEl)) return null;
+            return new ArtistBio(Text(artistEl, "bio", "content"), Text(artistEl, "bio", "summary"));
+        }, cancellationToken);
+
     public Task<List<string>> GetArtistTopTagsAsync(string artist, int limit = 10,
         CancellationToken cancellationToken = default) => GetTagsAsync(
         "artist.gettoptags", new() { ["artist"] = artist }, $"artist-tags|{artist}|{limit}", limit,

@@ -1754,8 +1754,17 @@ public class SubsonicController : ControllerBase
                     album.ArtistId = artist.Id;
                 }
             }
-            
-            return _responseBuilder.CreateArtistResponse(format, artist, albums);
+
+            // Page context, fetched in one pass: the biography and the similar-artist rows.
+            // Arpeggi only asks for top songs when the artist object it just read carried a
+            // similarArtist row, so this list is also what unlocks its "top songs" section.
+            var bioTask = _lastFmService is not null
+                ? _metadataService.BiographyAsync(provider!, externalId!, _lastFmService)
+                : Task.FromResult<(string Biography, string Summary)?>(("", ""));
+            var similar = await _metadataService.RelatedArtistsAsync(provider!, externalId!, 12);
+            var bio = await bioTask;
+            return _responseBuilder.CreateArtistResponse(format, artist, albums,
+                bio ?? ("", ""), similar);
         }
 
         // Merged from Navidrome's JSON whatever the client asked for, then answered in the
@@ -3713,19 +3722,62 @@ public class SubsonicController : ControllerBase
         {
             var artist = await _metadataService.GetArtistAsync(provider!, externalId!);
             var url = artist?.ImageUrl ?? "";
-            return _responseBuilder.CreateInfoResponse(format, "artistInfo2", new Dictionary<string, string>
+            var fields = new Dictionary<string, object>
             {
                 ["biography"] = "",
                 ["smallImageUrl"] = url,
                 ["mediumImageUrl"] = url,
                 ["largeImageUrl"] = url,
-            });
+            };
+
+            // The biography and the similar-artist rows, as far as they are known. An
+            // outside artist's page is mostly these two things: an empty biography here is
+            // what a client's artist sheet shows as a missing section.
+            var bio = _lastFmService is not null && provider is not null
+                ? await _metadataService.BiographyAsync(provider, externalId!, _lastFmService)
+                : null;
+            if (bio is { Biography.Length: > 0 })
+            {
+                fields["biography"] = bio.Value.Biography;
+                if (bio.Value.Summary.Length > 0) fields["biographySummary"] = bio.Value.Summary;
+            }
+            var similar = provider is null ? null
+                : await _metadataService.RelatedArtistsAsync(provider, externalId!, 12);
+            return _responseBuilder.CreateInfoResponse(format, "artistInfo2", fields, similar);
         }
 
         var relay = await _proxyService.RelaySafeAsync("rest/getArtistInfo2", parameters);
         if (relay.Success && relay.Body != null)
             return File(relay.Body, relay.ContentType ?? $"application/{format}");
         return _responseBuilder.CreateResponse(format, "artistInfo2", new { });
+    }
+
+    [HttpGet, HttpPost]
+    [Route("rest/getTopSongs")]
+    [Route("rest/getTopSongs.view")]
+    public async Task<IActionResult> GetTopSongs()
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var count = int.TryParse(parameters.GetValueOrDefault("count", "20"), out var parsed) ? parsed : 20;
+        var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
+
+        // Library (or unknown) ids: nothing to add. Navidrome's own answer would be empty
+        // too — getTopSongs is an OpenSubsonic extension Subsonic-origin servers do not
+        // answer with rows for.
+        if (!isExternal)
+            return _responseBuilder.CreateResponse(format, "topSongs", new { });
+
+        var songs = await _metadataService.TopTracksAsync(provider!, externalId!, count);
+        if (songs is null)
+            return _responseBuilder.CreateResponse(format, "topSongs", new { });
+
+        var body = new Dictionary<string, object>
+        {
+            ["song"] = songs.Select(s => _responseBuilder.ConvertSongToJson(s)).ToList(),
+        };
+        return _responseBuilder.CreateMergedResponse(format, "topSongs", body);
     }
 
     [Route("{**endpoint}")]
@@ -4298,7 +4350,19 @@ public class SubsonicController : ControllerBase
         // that request is the one that asks the catalog for the rest.
         var albums = await OutsideArtistAlbumsAsync(id, artist.Name, knownCountsOnly: true);
 
-        var bytes = Encoding.UTF8.GetBytes(BuildNativeArtistObject(artist, albums).ToJsonString());
+        // Best-effort biography: the page's last section. Fetched only when a source is
+        // configured, and never allowed to fail the page.
+        string? biography = null;
+        try
+        {
+            if (_lastFmService is not null)
+                biography = (await _metadataService.BiographyAsync(
+                    SoulseekMetadataService.ProviderName, id, _lastFmService))?.Biography;
+        }
+        catch (Exception ex) { _logger.LogDebug("native artist biography failed: {M}", ex.Message); }
+
+        var bytes = Encoding.UTF8.GetBytes(
+            BuildNativeArtistObject(artist, albums, biography).ToJsonString());
         Response.StatusCode = 200;
         Response.ContentType = "application/json";
         await Response.Body.WriteAsync(bytes);
@@ -4385,7 +4449,8 @@ public class SubsonicController : ControllerBase
     /// clients read one or the other. The image URLs are the three getArtistInfo2 gives; a
     /// client that draws the artist through getCoverArt with the id is served by Octo too.
     /// </summary>
-    private static JsonObject BuildNativeArtistObject(Artist artist, IReadOnlyList<Album> albums)
+    private static JsonObject BuildNativeArtistObject(Artist artist, IReadOnlyList<Album> albums,
+        string? biography = null)
     {
         var songCount = albums.Sum(a => a.SongCount ?? 0);
         JsonObject Stats() => new() { ["albumCount"] = albums.Count, ["songCount"] = songCount, ["size"] = 0 };
@@ -4410,6 +4475,7 @@ public class SubsonicController : ControllerBase
             o["mediumImageUrl"] = artist.ImageUrl;
             o["largeImageUrl"] = artist.ImageUrl;
         }
+        if (!string.IsNullOrEmpty(biography)) o["biography"] = biography;
         return o;
     }
 

@@ -529,6 +529,113 @@ public class DeezerMetadataService : IDisposable
         return hits;
     }
 
+    /// <summary>The artists the catalog puts beside this one, most followed first. One row
+    /// per artist, taken from the catalog's /artist/{id}/related — keyed by the artist's
+    /// catalog id, so two acts of one name can never borrow each other's page.</summary>
+    public record RelatedHit(string DeezerId, string Name, string? PictureUrl, int Fans);
+
+    /// <summary>Who the catalog plays alongside this artist, for the similar-artist row of
+    /// their page. Cached like every other artist lookup.</summary>
+    public async Task<List<RelatedHit>> RelatedArtistsAsync(string deezerArtistId, int limit,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deezerArtistId) || limit <= 0) return new List<RelatedHit>();
+        var key = $"arel|{deezerArtistId}|{limit}".ToLowerInvariant();
+        if (TryGetCached<List<RelatedHit>>(key, out var cached)) return cached!;
+        return await SharedAsync(key, () => FetchRelatedArtistsAsync(deezerArtistId, limit, key), ct);
+    }
+
+    private async Task<List<RelatedHit>> FetchRelatedArtistsAsync(string deezerArtistId, int limit, string key)
+    {
+        var hits = new List<RelatedHit>();
+        try
+        {
+            using var r = await GetJsonAsync(
+                $"{Base}/artist/{Uri.EscapeDataString(deezerArtistId)}/related?limit={limit}",
+                CancellationToken.None, background: true);
+            if (r.Transient) return hits;
+            if (r.Doc is not null
+                && r.Doc.RootElement.TryGetProperty("data", out var data)
+                && data.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var a in data.EnumerateArray())
+                {
+                    var id = a.TryGetProperty("id", out var aid) && aid.ValueKind == JsonValueKind.Number
+                        ? aid.GetInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
+                    var name = Str(a, "name");
+                    if (id is null || string.IsNullOrWhiteSpace(name)) continue;
+                    hits.Add(new RelatedHit(id, name,
+                        Str(a, "picture_xl") ?? Str(a, "picture_medium"), Int(a, "nb_fan") ?? 0));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer related artists '{Id}' failed: {M}", deezerArtistId, ex.Message);
+        }
+
+        Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        return hits;
+    }
+
+    /// <summary>One song of an artist's most-played list, as the catalog's /top answers it:
+    /// the song's own id and the record it sits on.</summary>
+    public record TopTrack(long DeezerTrackId, string Title, string ArtistName, int? Duration,
+        string? AlbumTitle, long? DeezerAlbumId, string? TracklistUrl);
+
+    /// <summary>The artist's most-played songs, in the catalog's own order. Feeds a top-songs
+    /// page and re-arms the track-count cache the artist's album rows read.</summary>
+    public async Task<List<TopTrack>> TopTracksAsync(string deezerArtistId, int limit,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deezerArtistId) || limit <= 0) return new List<TopTrack>();
+        var key = $"atop|{deezerArtistId}|{limit}".ToLowerInvariant();
+        if (TryGetCached<List<TopTrack>>(key, out var cached)) return cached!;
+        return await SharedAsync(key, () => FetchTopTracksAsync(deezerArtistId, limit, key), ct);
+    }
+
+    private async Task<List<TopTrack>> FetchTopTracksAsync(string deezerArtistId, int limit, string key)
+    {
+        var hits = new List<TopTrack>();
+        try
+        {
+            using var r = await GetJsonAsync(
+                $"{Base}/artist/{Uri.EscapeDataString(deezerArtistId)}/top?limit={limit}",
+                CancellationToken.None, background: true);
+            if (r.Transient) return hits;
+            if (r.Doc is not null
+                && r.Doc.RootElement.TryGetProperty("data", out var data)
+                && data.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var t in data.EnumerateArray())
+                {
+                    var id = t.TryGetProperty("id", out var tid) && tid.ValueKind == JsonValueKind.Number
+                        ? tid.GetInt64() : 0;
+                    var title = Str(t, "title");
+                    if (id == 0 || string.IsNullOrWhiteSpace(title)) continue;
+                    var artistName = t.TryGetProperty("artist", out var art) ? Str(art, "name") : null;
+                    var albumId = t.TryGetProperty("album", out var alb)
+                        && alb.ValueKind == JsonValueKind.Object
+                        && alb.TryGetProperty("id", out var alid)
+                        && alid.ValueKind == JsonValueKind.Number
+                        ? alid.GetInt64() : 0;
+                    hits.Add(new TopTrack(id, title,
+                        artistName ?? "", Int(t, "duration") is int d && d > 0 ? d : null,
+                        alb.ValueKind == JsonValueKind.Object ? Str(alb, "title") : null,
+                        albumId > 0 ? albumId : null,
+                        alb.ValueKind == JsonValueKind.Object ? Str(alb, "tracklist") : null));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer top tracks '{Id}' failed: {M}", deezerArtistId, ex.Message);
+        }
+
+        Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        return hits;
+    }
+
     /// <summary>Search the album catalog. Single-track "albums" are dropped: a plain
     /// artist query returns a lot of them and they crowd out real records. One row per
     /// record: editions of one album fold into the ranking's first hit.</summary>

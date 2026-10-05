@@ -83,6 +83,44 @@ public partial class SubsonicResponseBuilder
     }
 
     /// <summary>
+    /// Same shape as the string version, plus artist rows written as their Subsonic shape
+    /// (see <see cref="OutsideArtistRow"/>) in JSON and one child element per row in XML.
+    /// Fields keep their order: an info element reads top to bottom in clients.
+    /// </summary>
+    public IActionResult CreateInfoResponse(string format, string elementName,
+        Dictionary<string, object> fields, List<Artist>? similarArtists = null)
+    {
+        var rows = similarArtists is { Count: > 0 }
+            ? similarArtists.Select(OutsideArtistRow).ToList()
+            : null;
+        if (format == "json")
+        {
+            var payload = new Dictionary<string, object>(fields);
+            if (rows is not null) payload["similarArtist"] = rows;
+            return CreateJsonResponse(new Dictionary<string, object>
+            {
+                ["status"] = "ok",
+                ["version"] = SubsonicVersion,
+                [elementName] = payload,
+            });
+        }
+
+        var ns = XNamespace.Get(SubsonicNamespace);
+        var el = new XElement(ns + elementName);
+        foreach (var f in fields)
+            el.Add(new XElement(ns + f.Key, f.Value));
+        if (rows is not null)
+            foreach (var row in similarArtists!)
+                el.Add(OutsideArtistXml(ns, "similarArtist", row));
+        var doc = new XDocument(
+            new XElement(ns + "subsonic-response",
+                new XAttribute("status", "ok"),
+                new XAttribute("version", SubsonicVersion),
+                el));
+        return new ContentResult { Content = doc.ToString(), ContentType = "application/xml" };
+    }
+
+    /// <summary>
     /// Creates a Subsonic error response.
     /// </summary>
     public IActionResult CreateError(string format, int code, string message)
@@ -373,45 +411,84 @@ public partial class SubsonicResponseBuilder
         return new ContentResult { Content = doc.ToString(), ContentType = "application/xml" };
     }
 
-    /// <summary>
-    /// Creates a Subsonic response containing an artist with albums.
-    /// </summary>
-    public IActionResult CreateArtistResponse(string format, Artist artist, List<Album> albums)
+    /// <summary>A getArtist answer for an outside artist: the artist with its albums, plus
+    /// the page's context — its biography and its similar artists — when they are known.
+    /// Arpeggi renders "top songs" from a getTopSongs call it makes only when the artist
+    /// response itself carried one or more similarArtist rows, so the similar rows are what
+    /// turns the page from a bare album list into a full artist page. The biography rides in
+    /// the artist object ("biography" attribute); getTopSongs carries the song rows.</summary>
+    public IActionResult CreateArtistResponse(string format, Artist artist, List<Album> albums,
+        (string Biography, string Summary) bio, List<Artist>? similar)
     {
         if (format == "json")
         {
-            return CreateJsonResponse(new 
-            { 
-                status = "ok", 
-                version = SubsonicVersion,
-                artist = new
-                {
-                    id = artist.Id,
-                    name = artist.Name,
-                    coverArt = artist.Id,
-                    albumCount = albums.Count,
-                    artistImageUrl = artist.ImageUrl,
-                    album = albums.Select(a => ConvertAlbumToJson(a)).ToList()
-                }
+            var artistJson = new Dictionary<string, object>
+            {
+                ["id"] = artist.Id,
+                ["name"] = artist.Name,
+                ["coverArt"] = artist.Id,
+                ["albumCount"] = albums.Count,
+                ["album"] = albums.Select(a => ConvertAlbumToJson(a)).ToList(),
+            };
+            if (artist.ImageUrl is { Length: > 0 }) artistJson["artistImageUrl"] = artist.ImageUrl;
+            if (bio.Biography.Length > 0)
+            {
+                artistJson["biography"] = bio.Biography;
+                if (bio.Summary.Length > 0) artistJson["biographySummary"] = bio.Summary;
+            }
+            if (similar is { Count: > 0 })
+                artistJson["similarArtist"] = similar.Select(OutsideArtistRow).ToList();
+            return CreateJsonResponse(new Dictionary<string, object>
+            {
+                ["status"] = "ok",
+                ["version"] = SubsonicVersion,
+                ["artist"] = artistJson,
             });
         }
-        
+
         var ns = XNamespace.Get(SubsonicNamespace);
-        var doc = new XDocument(
+        var artistElement = new XElement(ns + "artist",
+            new XAttribute("id", artist.Id),
+            new XAttribute("name", artist.Name),
+            new XAttribute("coverArt", artist.Id),
+            new XAttribute("albumCount", albums.Count));
+        if (artist.ImageUrl is { Length: > 0 })
+            artistElement.Add(new XAttribute("artistImageUrl", artist.ImageUrl));
+        if (bio.Biography.Length > 0)
+        {
+            artistElement.Add(new XAttribute("biography", bio.Biography));
+            if (bio.Summary.Length > 0) artistElement.Add(new XAttribute("biographySummary", bio.Summary));
+        }
+        artistElement.Add(albums.Select(a => ConvertAlbumToXml(a, ns)));
+        if (similar is { Count: > 0 })
+            foreach (var row in similar)
+                artistElement.Add(OutsideArtistXml(ns, "similarArtist", row));
+        return new ContentResult { Content = new XDocument(
             new XElement(ns + "subsonic-response",
                 new XAttribute("status", "ok"),
                 new XAttribute("version", SubsonicVersion),
-                new XElement(ns + "artist",
-                    new XAttribute("id", artist.Id),
-                    new XAttribute("name", artist.Name),
-                    new XAttribute("coverArt", artist.Id),
-                    new XAttribute("albumCount", albums.Count),
-                    albums.Select(a => ConvertAlbumToXml(a, ns))
-                )
-            )
-        );
-        return new ContentResult { Content = doc.ToString(), ContentType = "application/xml" };
+                artistElement)).ToString(), ContentType = "application/xml" };
     }
+
+    /// <summary>One outside artist as the reference shape: id, name, cover art, image and
+    /// the OpenSubsonic "user is following" note, so a client reads it as it reads the
+    /// catalog's own rows.</summary>
+    private static Dictionary<string, object> OutsideArtistRow(Artist artist) => new()
+    {
+        ["id"] = artist.Id,
+        ["name"] = artist.Name,
+        ["coverArt"] = artist.Id,
+        ["artistImageUrl"] = artist.ImageUrl ?? "",
+        ["isUser"] = false,
+    };
+
+    private static XElement OutsideArtistXml(XNamespace ns, string elementName, Artist artist) =>
+        new(ns + elementName,
+            new XAttribute("id", artist.Id),
+            new XAttribute("name", artist.Name),
+            new XAttribute("coverArt", artist.Id),
+            new XAttribute("artistImageUrl", artist.ImageUrl ?? ""),
+            new XAttribute("isUser", "false"));
 
     /// <summary>
     /// An ok response in the format the client asked for, from the JSON-shaped data Octo

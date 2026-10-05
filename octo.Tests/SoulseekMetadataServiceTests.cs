@@ -6,6 +6,7 @@ using Moq.Protected;
 using Octo.Models.Domain;
 using Octo.Models.Settings;
 using Octo.Services.CoverArt;
+using Octo.Services.LastFm;
 using Octo.Services.Metadata;
 using Octo.Services.Soulseek;
 using Octo.Services.Subsonic;
@@ -593,5 +594,172 @@ public class SoulseekMetadataServiceTests
         Assert.Equal(["A Single", "Best Of", "Odd One"], page.Select(a => a.Title));
         // A type OpenSubsonic has no name for is left unsaid rather than guessed.
         Assert.Empty(page.Single(a => a.Title == "Odd One").ReleaseTypes);
+    }
+
+    // ---- Artist page data: related, top, biography ----------------------------------
+
+    private const string RelatedJson = @"{""data"":[
+        {""id"":31,""name"":""Metronomy, The Others"",""picture_medium"":""https://cdn/m.jpg"",""nb_fan"":5},
+        {""id"":33,""name"":""Foals""}]}";
+
+    private const string TopJson = @"{""data"":[
+        {""id"":601,""title"":""Lisztomania"",""duration"":260,""album"":{""title"":""Wolfgang Amadeus Phoenix""}},
+        {""id"":602,""title"":""1901""}]}";
+
+    private const string ArtistSearchJson = @"{""data"":[
+        {""id"":15,""name"":""Phoenix"",""nb_fan"":100000}]}";
+
+    [Fact]
+    public async Task RelatedArtists_ResolvesTheIdByNameAndRegistersRows()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = ArtistSearchJson,
+            ["/artist/15/related"] = RelatedJson,
+        });
+        var id = OutsideArtist("Phoenix");
+
+        var related = await svc.RelatedArtistsAsync(SoulseekMetadataService.ProviderName, id);
+
+        Assert.NotNull(related);
+        Assert.Equal(["Metronomy, The Others", "Foals"], related!.Select(a => a.Name));
+        // Tapping a row opens that artist's page: a real catalog id on the routing.
+        var row = _registry.Lookup(related[0].Id)!;
+        Assert.Equal(RoutingKind.Artist, row.Kind);
+        Assert.Equal("31", row.ExternalArtistId);
+        // Name search done once; the next visit asks for no search again.
+        Assert.Equal("15", _registry.Lookup(id)!.ExternalArtistId);
+        var searches = _calls.Count(c => c.Contains("/search/artist"));
+        await svc.RelatedArtistsAsync(SoulseekMetadataService.ProviderName, id);
+        Assert.Equal(searches, _calls.Count(c => c.Contains("/search/artist")));
+    }
+
+    [Fact]
+    public async Task RelatedArtists_TopTracksOrAlienProvider_AnswerNull()
+    {
+        var svc = BuildService(new());
+        Assert.Null(await svc.RelatedArtistsAsync("deezer", "whatever"));
+        // A song id is not an artist page.
+        var songId = _registry.Register(new SoulseekRouting { Artist = "Phoenix", Title = "Lisztomania" });
+        Assert.Null(await svc.RelatedArtistsAsync(SoulseekMetadataService.ProviderName, songId));
+    }
+
+    [Fact]
+    public async Task TopTracks_AnUnresolvedId_SearchesOnceAndCarriesDurations()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = ArtistSearchJson,
+            ["/artist/15/top"] = TopJson,
+        });
+        var id = OutsideArtist("Phoenix");
+
+        var top = await svc.TopTracksAsync(SoulseekMetadataService.ProviderName, id, 2);
+
+        Assert.NotNull(top);
+        Assert.Equal(["Lisztomania", "1901"], top!.Select(s => s.Title));
+        Assert.Equal(["Wolfgang Amadeus Phoenix", ""], top.Select(s => s.Album));
+        // Catalog length is carried and remembered as the display length, so the scrub bar
+        // is right from the first render.
+        Assert.Equal(260, top[0].Duration);
+        Assert.Equal(260, _registry.Lookup(top[0].Id) is { } r ? SongLength.Shown(r).Seconds : null);
+        // Rows play like every outside song: a song routing resolved at play time.
+        Assert.Equal(RoutingKind.Song, _registry.Lookup(top[0].Id)!.Kind);
+        // The remembered id skips the name search on the next visit.
+        Assert.Equal("15", _registry.Lookup(id)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public async Task TopTracks_ANonArtistId_AnswersNull()
+    {
+        var svc = BuildService(new());
+        Assert.Null(await svc.TopTracksAsync("spotify", "whatever"));
+    }
+
+    [Fact]
+    public async Task Biography_ResolvesThroughTheCatalogNameAndReadsLastFm()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = ArtistSearchJson,
+            ["/artist/15/related"] = RelatedJson,
+        });
+        var id = OutsideArtist("Phoenix");
+        var lastFm = BuildLastFm(new()
+        {
+            ["method=artist.getinfo"] = @"{""artist"":{""name"":""Phoenix"",
+                ""bio"":{""content"":""A long biography."",""summary"":""A short one.""}}}",
+        });
+
+        var bio = await svc.BiographyAsync(SoulseekMetadataService.ProviderName, id, lastFm);
+
+        Assert.NotNull(bio);
+        Assert.Equal("A long biography.", bio!.Value.Biography);
+        Assert.Equal("A short one.", bio.Value.Summary);
+    }
+
+    [Fact]
+    public async Task Biography_ANameOfAnotherSpelling_UsesTheCatalogsName()
+    {
+        // The routing carries the stylized display form; the catalog's row is "Phoen!x".
+        // The bio is asked for the catalog's spelling, never the display form's near miss.
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[{""id"":44,""name"":""Phoen!x"",""nb_fan"":10}]}",
+        });
+        var id = OutsideArtist("Phoen!x");
+        string? askedFor = null;
+        var lastFm = BuildLastFm(new() { ["method=artist.getinfo"] = @"{""artist"":{""name"":""Phoen!x"",""bio"":{""content"":""Bio.""}}}" });
+
+        var bio = await svc.BiographyAsync(SoulseekMetadataService.ProviderName, id, lastFm);
+
+        Assert.NotNull(bio);
+        Assert.Equal("Bio.", bio!.Value.Biography);
+        // The last.fm call went out with the catalog's own name for the id.
+        askedFor = _calls.First(c => c.Contains("artist.getinfo"));
+        Assert.Contains(Uri.EscapeDataString("Phoen!x"), askedFor);
+        Assert.DoesNotContain(Uri.EscapeDataString("Phoenix"), askedFor);
+    }
+
+    [Fact]
+    public async Task Biography_MissingKeyOrMissingBio_AnswersEmpty()
+    {
+        var svc = BuildService(new());
+        var noKey = BuildLastFm(new());
+        Assert.Equal(("", ""), await svc.BiographyAsync(
+            SoulseekMetadataService.ProviderName, OutsideArtist("Phoenix"), noKey) ?? ("", ""));
+        var withKey = BuildLastFm(new()
+        {
+            ["method=artist.getinfo"] = @"{""artist"":{""name"":""Phoenix"",""bio"":{""content"":""""}}}",
+        });
+        Assert.Equal(("", ""), await svc.BiographyAsync(
+            SoulseekMetadataService.ProviderName, OutsideArtist("Phoenix"), withKey) ?? ("", ""));
+    }
+
+    /// <summary>A Last.fm service answering biography calls from a url map. Its key is set,
+    /// so the callers under test take the biography branch.</summary>
+    private LastFmService BuildLastFm(Dictionary<string, string> routes)
+    {
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Returns((HttpRequestMessage req, CancellationToken _) =>
+            {
+                var url = req.RequestUri!.ToString();
+                _calls.Enqueue(url);
+                foreach (var (needle, body) in routes)
+                    if (url.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                            { Content = new StringContent(body) });
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    { Content = new StringContent(@"{""error"":6,""message"":""not found""}") });
+            });
+
+        var settings = TestOptions.Monitor(new LastFmSettings { ApiKey = "test-key" });
+        var meta = Microsoft.Extensions.Options.Options.Create(new Octo.Models.Settings.MetadataSettings());
+        return new LastFmService(new HttpClient(handler.Object), settings, meta,
+            new Mock<ILogger<LastFmService>>().Object);
     }
 }

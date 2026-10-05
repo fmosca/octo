@@ -3,6 +3,7 @@ using Octo.Models.Settings;
 using Octo.Models.Download;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
+using Octo.Services.LastFm;
 
 namespace Octo.Services;
 
@@ -167,4 +168,31 @@ public interface IMusicMetadataService
     /// <param name="externalId">Playlist ID from the provider</param>
     /// <returns>List of songs in the playlist</returns>
     Task<List<Song>> GetPlaylistTracksAsync(string externalProvider, string externalId);
+
+    /// <summary>
+    /// The artists the catalog plays alongside an outside artist, its "similar artists"
+    /// row. Rows are outside artist rows the client can open. Null when the id is not an
+    /// outside artist of this provider.
+    /// </summary>
+    Task<List<Artist>?> RelatedArtistsAsync(string externalProvider, string externalId,
+        int limit = 20, CancellationToken ct = default)
+        => Task.FromResult<List<Artist>?>(null);
+
+    /// <summary>
+    /// An outside artist's most-played songs, as outside song rows the client can play.
+    /// Null when the id is not an outside artist of this provider.
+    /// </summary>
+    Task<List<Song>?> TopTracksAsync(string externalProvider, string externalId,
+        int limit = 20, CancellationToken ct = default)
+        => Task.FromResult<List<Song>?>(null);
+
+    /// <summary>
+    /// An outside artist's biography and its summary, or empty strings when no source has
+    /// one. Null when the id is not an outside artist of this provider. The last.fm service
+    /// is the caller's to hand over: the provider knows the artist's real name, last.fm
+    /// holds the texts.
+    /// </summary>
+    Task<(string Biography, string Summary)?> BiographyAsync(string externalProvider, string externalId,
+        LastFmService lastFm, CancellationToken ct = default)
+        => Task.FromResult<(string, string)?>(null);
 }

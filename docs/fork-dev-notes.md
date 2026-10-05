@@ -100,8 +100,13 @@ off-path via `getSong`. `SearchEnrichLimit` is 6 (one Deezer wave); rows past it
 enrich from cache inline and are warmed for the next search by `WarmLengths` off
 the critical path.
 
-Artist biography: octo's `getArtistInfo2` returns `""` for outside-catalog
-artists by construction (the Deezer-side artist has no biography source wired in)
-and relays Navidrome's own biography for library artists (needs Last.fm keys in
-Navidrome). Empty on the phone for a catalog artist is the by-design state, not
-a lookup bug.
+Artist biography: `getArtistInfo2` for an outside-catalog artist reads last.fm's
+`artist.getinfo` for the artist's name and answers `biography` (plus a
+`biographySummary`); empty means the key is unset or the catalog has no text for
+that name. Library artists still relay Navidrome's own biography (needs Last.fm
+keys in Navidrome). The same biography rides the outside `getArtist` response,
+and the Navidrome-native artist object carries `biography` too. Similar-artist
+rows: outside `getArtist`/`getArtistInfo2` list catalog related artists
+(`RelatedArtistsAsync`), and `getTopSongs` answers an outside artist's most-played
+songs as play-registered songs — Arpeggi asks for it only when the artist
+response carried a `similarArtist` row.

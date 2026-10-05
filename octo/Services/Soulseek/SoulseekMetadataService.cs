@@ -1082,6 +1082,146 @@ public class SoulseekMetadataService : IMusicMetadataService
         return albums;
     }
 
+    /// <summary>
+    /// The artists the catalog plays alongside this one, as the client's "similar artists"
+    /// row. Each is an outside artist row with a real id, so tapping one opens their page.
+    /// Null when the id is not an outside artist.
+    /// </summary>
+    public async Task<List<Artist>?> RelatedArtistsAsync(string externalProvider, string externalId,
+        int limit = 20, CancellationToken ct = default)
+    {
+        if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
+        var routing = _idRegistry.Lookup(externalId);
+        if (routing is not { Kind: RoutingKind.Artist } artistRouting) return null;
+        var known = artistRouting.ExternalArtistId;
+        if (string.IsNullOrEmpty(known))
+        {
+            known = await FindCatalogArtistIdAsync(routing.Artist ?? "", ct);
+            if (string.IsNullOrEmpty(known)) return null;
+            // The routing carries the catalog id from now on: the next visit asks for the
+            // right artist's page directly. Registering keeps the merge behavior (an "id the
+            // listing already resolved" is never forgotten), and the id is minted from the
+            // name, so nothing about the client-facing id changes.
+            routing.ExternalArtistId = known;
+            _idRegistry.Register(routing);
+        }
+
+        var related = await _deezer.RelatedArtistsAsync(known, limit, ct);
+        return related.Select(hit => new Artist
+        {
+            Id = _idRegistry.Register(new SoulseekRouting
+            {
+                Kind = RoutingKind.Artist,
+                Artist = hit.Name,
+                ExternalArtistId = hit.DeezerId,
+            }),
+            Name = hit.Name,
+            ImageUrl = hit.PictureUrl,
+            IsLocal = false,
+            ExternalProvider = ProviderName,
+            ExternalId = null,
+        }).ToList();
+    }
+
+    /// <summary>The catalog id of the artist this name is, of the candidates one exact name.</summary>
+    private async Task<string?> FindCatalogArtistIdAsync(string name, CancellationToken ct)
+    {
+        var hits = await _deezer.SearchArtistsAsync(name, 5, ct);
+        return hits.Where(hit => SongIdentity.SameArtistName(hit.Name, name))
+            .OrderByDescending(hit => hit.Fans)
+            .FirstOrDefault()?.DeezerId;
+    }
+
+    /// <summary>
+    /// The artist's most-played songs as outside song rows, the way album search registers
+    /// one — so a row plays, stars and streams like every other outside song. Null when the
+    /// id is not an outside artist; empty when the catalog knows no songs for them.
+    /// </summary>
+    public async Task<List<Song>?> TopTracksAsync(string externalProvider, string externalId,
+        int limit = 20, CancellationToken ct = default)
+    {
+        if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
+        var routing = _idRegistry.Lookup(externalId);
+        if (routing is not { Kind: RoutingKind.Artist } artistRouting) return null;
+        var known = artistRouting.ExternalArtistId;
+        if (string.IsNullOrEmpty(known))
+        {
+            known = await FindCatalogArtistIdAsync(routing.Artist ?? "", ct);
+            if (string.IsNullOrEmpty(known)) return null;
+            // Same carry as the related-artists walk: the next visit asks for no name search.
+            artistRouting.ExternalArtistId = known;
+            _idRegistry.Register(artistRouting);
+        }
+
+        var tops = await _deezer.TopTracksAsync(known, limit, ct);
+        return tops.Select(top =>
+        {
+            // Registered by name, the way every search row is. The catalog's top list is
+            // the play order: a row with no catalog id resolves to a video at play time
+            // exactly as a search row does, so no extra routing field is needed.
+            var routing = new SoulseekRouting
+            {
+                Kind = RoutingKind.Song,
+                Artist = artistRouting.Artist,
+                Title = top.Title,
+                // A row the catalog gave a real duration for carries it, so a scrub bar is
+                // right from the first render; the rest take their real length at play
+                // time, as every outside song does.
+                Duration = top.Duration,
+            };
+            var id = _idRegistry.Register(routing);
+            if (top.Duration is > 0)
+                _idRegistry.RememberLength(id, top.Duration, LengthSource.Deezer);
+            return new Song
+            {
+                Id = id,
+                Title = top.Title,
+                Artist = artistRouting.Artist ?? "",
+                ArtistId = externalId,
+                Album = top.AlbumTitle ?? "",
+                Duration = top.Duration,
+                IsLocal = false,
+                ExternalProvider = ProviderName,
+            };
+        }).ToList();
+    }
+
+    /// <summary>
+    /// The biography the music catalog writes for this artist's name, for an artist page.
+    /// The look-up is keyed by the catalog's own spelling of the id's artist — the search's
+    /// name, not the routing's — so a display-form name ("Phoen!x") resolves through the
+    /// same name search every other page-data call here uses, and the bio that comes back is
+    /// written about the artist the id names, never about a different act that shares
+    /// nothing but a near-miss spelling.
+    /// Null when the id is not an outside artist; empty strings when the key is missing or
+    /// no source has a bio for the name.
+    /// </summary>
+    public async Task<(string Biography, string Summary)?> BiographyAsync(string externalProvider,
+        string externalId, LastFmService lastFm, CancellationToken ct = default)
+    {
+        if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
+        var routing = _idRegistry.Lookup(externalId);
+        if (routing is not { Kind: RoutingKind.Artist } artistRouting) return null;
+        var known = artistRouting.ExternalArtistId;
+        if (string.IsNullOrEmpty(known))
+        {
+            known = await FindCatalogArtistIdAsync(routing.Artist ?? "", ct);
+            if (string.IsNullOrEmpty(known)) return null;
+            // Same carry as the related-artists walk: the next visit asks for no name search.
+            artistRouting.ExternalArtistId = known;
+            _idRegistry.Register(artistRouting);
+        }
+
+        // The catalog's own name for this id: the search's spelling, not the routing's.
+        var hits = await _deezer.SearchArtistsAsync(routing.Artist ?? "", 5, ct);
+        var ownName = hits.FirstOrDefault(hit => hit.DeezerId == known)?.Name ?? routing.Artist ?? "";
+        if (!lastFm.HasApiKey || ownName.Length == 0) return ("", "");
+
+        var bio = await lastFm.GetArtistBiographyAsync(ownName, ct);
+        if (bio is null || bio.Biography.Length == 0) return ("", "");
+        return (bio.Biography, bio.Summary);
+    }
+
     public Task<List<ExternalPlaylist>> SearchPlaylistsAsync(string query, int limit = 20)
         => Task.FromResult(new List<ExternalPlaylist>());
 
