@@ -174,6 +174,38 @@ public sealed class LastFmRadioControllerTests
         Assert.Equal(2, fixture.Handler.ListenBrainzSubmissions.Count);
     }
 
+    [Theory]
+    [InlineData("json")]
+    [InlineData("xml")]
+    public async Task GetSimilarSongs2_SeededWithAnOutsideArtistId_AnswersThatArtistsRadio(string format)
+    {
+        await using var fixture = new RadioWebFactory(lastFmScrobbling: true);
+        // Last.fm's artist radio: similar artists, then their top tracks. The tracks name
+        // the canned local rows the upstream fake answers searches for, so the response
+        // proves the queue was built rather than just requested.
+        fixture.Handler.LastFm.Reads["artist.getsimilar"] =
+            "{\"similarartists\":{\"artist\":[{\"name\":\"Artist One\",\"match\":\"0.9\"}]}}";
+        fixture.Handler.LastFm.Reads["artist.gettoptracks"] =
+            "{\"toptracks\":{\"track\":[{\"name\":\"Song One\",\"duration\":\"180000\","
+            + "\"artist\":{\"name\":\"Artist One\"}}]}}";
+
+        // The id an outside artist row carries: a registry id whose routing is an artist.
+        // ParseSongId reports it as a song like any other, which is what sent it down the
+        // song path, where there is no title to seed Last.fm with and the client got
+        // nothing back — radio from an artist the library does not own, answered empty.
+        var registry = fixture.Services.GetRequiredService<ExternalIdRegistry>();
+        var artistId = registry.Register(new SoulseekRouting
+        { Kind = RoutingKind.Artist, Artist = "Radiohead" });
+        using var client = fixture.CreateClient();
+
+        var body = await client.GetStringAsync(
+            $"/rest/getSimilarSongs2?id={artistId}&u=alice&t=token&s=salt&f={format}&count=5");
+
+        Assert.Contains("local-one", body);
+        Assert.Single(fixture.Handler.LastFm.CallsTo("artist.getsimilar"));
+        Assert.Empty(fixture.Handler.LastFm.CallsTo("track.getsimilar"));
+    }
+
     [Fact]
     public async Task OutsideSongScrobble_IsNotRelayedToNavidrome_ButStillLearned()
     {

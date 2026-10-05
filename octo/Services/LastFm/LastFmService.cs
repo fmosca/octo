@@ -99,6 +99,33 @@ public class LastFmService
         }
     }
 
+    /// <summary>
+    /// Radio from an artist rather than a track: the same similar-artists walk a track seed
+    /// falls back to when Last.fm knows no similar tracks for it. There is no title to seed
+    /// track.getsimilar with here, and asking with an empty one returns nothing, so this goes
+    /// straight to the artists. Cached like a track seed, so a client re-opening the same
+    /// artist's radio does not walk Last.fm again.
+    /// </summary>
+    public async Task<List<SimilarTrack>> GetSimilarTracksForArtistAsync(string artist, int limit = 50,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"artist|{artist}".ToLowerInvariant();
+        if (_cache.TryGetValue(cacheKey, out var cached) && cached.Expiry > DateTime.UtcNow)
+        {
+            _logger.LogDebug("Returning {Count} cached similar tracks for artist {Artist}",
+                cached.Tracks.Count, artist);
+            return cached.Tracks.Take(limit).ToList();
+        }
+
+        // A renamed artist is filed under one name only: Last.fm has nothing under "Ye".
+        var tracks = await GetTopTracksFromSimilarArtistsAsync(
+            SongIdentity.KnownName(artist) ?? artist, limit, cancellationToken);
+
+        _logger.LogInformation("Found {Count} similar tracks for artist {Artist}", tracks.Count, artist);
+        _cache[cacheKey] = (DateTime.UtcNow.AddHours(_settings.EffectiveRadioCacheDurationHours), tracks);
+        return tracks.Take(limit).ToList();
+    }
+
     /// <summary>One track.getsimilar request, read into tracks.</summary>
     private async Task<List<SimilarTrack>> FetchSimilarTracksAsync(string artist, string title, int limit,
         CancellationToken cancellationToken)

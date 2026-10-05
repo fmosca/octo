@@ -1060,6 +1060,14 @@ internal sealed class FakeLastFm : HttpMessageHandler
     public IReadOnlyList<Dictionary<string, string>> CallsTo(string method) =>
         Calls.Where(call => call.GetValueOrDefault("method") == method).ToList();
 
+    /// <summary>
+    /// Answers for Last.fm's read methods, by method name. Reads arrive as GETs with their
+    /// parameters in the query and no signature, unlike the write methods above, which are
+    /// signed POST bodies — so they are answered from here and never touch <see cref="Failures"/>,
+    /// which the scrobble tests drive to make a write fail.
+    /// </summary>
+    public Dictionary<string, string> Reads { get; } = new(StringComparer.Ordinal);
+
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
         RespondAsync(request, cancellationToken);
 
@@ -1068,7 +1076,9 @@ internal sealed class FakeLastFm : HttpMessageHandler
         if (!request.RequestUri!.Host.Equals("ws.audioscrobbler.com", StringComparison.OrdinalIgnoreCase))
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
-        var form = System.Web.HttpUtility.ParseQueryString(body);
+        // A read carries its parameters in the query; a write carries them in the body.
+        var form = System.Web.HttpUtility.ParseQueryString(
+            body.Length > 0 ? body : request.RequestUri.Query);
         var call = form.AllKeys.Where(key => key is not null).ToDictionary(key => key!, key => form[key] ?? "");
         lock (_lock)
         {
@@ -1077,6 +1087,8 @@ internal sealed class FakeLastFm : HttpMessageHandler
         }
         if (Hold is { } hold) await hold(call);
 
+        if (body.Length == 0)
+            return Ok(Reads.GetValueOrDefault(call.GetValueOrDefault("method") ?? "", "{}"));
         if (call.GetValueOrDefault("api_sig") != LastFmScrobbleService.Sign(call, Secret))
             return Error(13, "Invalid method signature supplied");
         if (Failures.TryDequeue(out var failure))

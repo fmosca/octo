@@ -1662,7 +1662,18 @@ public abstract class BaseDownloadService : IDownloadService
     {
         try
         {
-            if (string.IsNullOrEmpty(DownloadPath) || !IOFile.Exists(currentPath)) return new(currentPath, false);
+            if (string.IsNullOrEmpty(DownloadPath)) return new(currentPath, false);
+            if (!IOFile.Exists(currentPath))
+            {
+                // The download is on disk — the resolver found it — just not at the path this
+                // call was handed: something moved it in between. For a Soulseek download that
+                // is slskd finishing its move out of the incomplete directory. Nothing gets
+                // placed, the tagger cannot open it and the history records it with no size,
+                // so say so here instead of dropping the track without a word.
+                Logger.LogWarning(
+                    "Not placing {Path}: it is no longer at that path (moved after it was resolved?)", currentPath);
+                return new(currentPath, false);
+            }
 
             var structure = SubsonicSettings.FolderStructure;
             var target = LayoutTarget(song, requested, Path.GetExtension(currentPath));

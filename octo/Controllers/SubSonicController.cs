@@ -2838,7 +2838,19 @@ public class SubsonicController : ControllerBase
 
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
 
-        if (isExternal)
+        // An outside artist row is a seed too, and this is the case a client reaches by
+        // tapping radio on an artist the library does not own. Its id is a registry id whose
+        // routing is an artist, which ParseSongId cannot tell from a song — it reports every
+        // registry id as one — so the routing's own kind is what says which this is. Sent down
+        // the song path, an artist id has no title to seed Last.fm with, the handler answered
+        // empty, and the client filled the queue with library random instead.
+        var isArtistSeed = isExternal && _idRegistry.Lookup(id) is { Kind: RoutingKind.Artist };
+
+        if (isArtistSeed)
+        {
+            artistName = _idRegistry.Lookup(id)?.Artist ?? "";
+        }
+        else if (isExternal)
         {
             // External song - get metadata from our service
             var song = await _metadataService.GetSongAsync(provider!, externalId!);
@@ -2890,7 +2902,12 @@ public class SubsonicController : ControllerBase
         _logger.LogInformation("Getting similar songs for {Artist} - {Title} (lookup: {LookA} - {LookT})",
             artistName, trackTitle, lookupArtist, lookupTitle);
 
-        var similarTracks = await _lastFmService.GetSimilarTracksAsync(lookupArtist, lookupTitle, count);
+        // An artist seed has no title, and GetSimilarTracksAsync would answer empty for one
+        // (it asks track.getsimilar variants with a blank title, then the similar-artists
+        // walk under the same blank artist spelling — see GetSimilarTracksForArtistAsync).
+        var similarTracks = isArtistSeed
+            ? await _lastFmService.GetSimilarTracksForArtistAsync(lookupArtist, count, HttpContext.RequestAborted)
+            : await _lastFmService.GetSimilarTracksAsync(lookupArtist, lookupTitle, count, HttpContext.RequestAborted);
 
         if (similarTracks.Count == 0)
         {
