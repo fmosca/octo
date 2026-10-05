@@ -21,12 +21,23 @@ Endpoints:
       flat-memory regardless of song length, and so cancellation is
       honored immediately (the upstream connection closes when the
       caller disconnects).
+
+  GET /loudness?video=<videoId>
+      ReplayGain numbers for one video: integrated loudness, sample peak and
+      the gain a client should apply. Measured once per video on a background
+      worker (a full fetch plus a decode), cached in sqlite, and also attached
+      to /search and /meta payloads so Octo can serve it as the client's
+      replayGain without a second round trip. LOUDNESS_TARGET_LUFS (default
+      -18.0, the ReplayGain 2.0 reference), LOUDNESS_QUEUE_MAX (64) and
+      LOUDNESS_TIMEOUT_SEC (300) tune the measurement.
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import queue
 import re
 import shutil
 import sqlite3
@@ -125,6 +136,32 @@ _INFLIGHT: "dict[str, threading.Lock]" = {}
 # the real range GET that follows, instead of a fresh handshake per request.
 _SESSION = requests.Session()
 _SESSION.mount("https://", HTTPAdapter(pool_connections=32, pool_maxsize=64))
+
+# Loudness measurement, for volume normalisation. Octo hands the client
+# OpenSubsonic's replayGain built from these numbers, so a YouTube preview is
+# normalised by the same rule that tags a library file on the host: R128
+# integrated loudness against the ReplayGain 2.0 -18 LUFS reference, capped by
+# the sample peak so a positive gain cannot clip. That is exactly what rsgain's
+# default preset does to the library, and the two agree where they overlap:
+# ffmpeg's ebur128 and rsgain's libebur128 reported the same integrated loudness
+# to 0.01 dB on a tagged file, with the peak guard a few tenths of a dB apart.
+#
+# Measuring costs one full fetch of the audio plus a decode — a second or two of
+# one core for a few minutes of music — so it runs once per video, on a single
+# background worker, never on a request a client is waiting for. Results live in
+# the same sqlite file as the metadata cache, so a restart does not re-measure.
+_LOUDNESS_TARGET_LUFS = float(os.environ.get("LOUDNESS_TARGET_LUFS", "-18.0"))
+# ebur128 has an absolute gate at -70 LUFS and reports that floor instead of failing
+# when nothing in the input reaches it: a silent video, a muted upload or an empty
+# audio track all come back as -70.0 LUFS. -18 - (-70) is a +52 dB gain, so the floor
+# is treated as "no level to measure" rather than a measurement. Real music integrates
+# far above this — the quietest masters sit near -30 LUFS.
+_LOUDNESS_FLOOR_LUFS = float(os.environ.get("LOUDNESS_FLOOR_LUFS", "-50.0"))
+_LOUDNESS_QUEUE_MAX = int(os.environ.get("LOUDNESS_QUEUE_MAX", "64"))
+_LOUDNESS_TIMEOUT_SEC = int(os.environ.get("LOUDNESS_TIMEOUT_SEC", "300"))
+_LOUDNESS_LOCK = threading.Lock()
+_LOUDNESS_QUEUED: "set[str]" = set()
+_LOUDNESS_QUEUE: "queue.Queue[str]" = queue.Queue(maxsize=_LOUDNESS_QUEUE_MAX)
 
 
 def _cache_get(key: str):
@@ -292,7 +329,7 @@ def search():
     cache_key = f"{q.lower()}|{duration_hint or ''}"
     cached = _cache_get(cache_key)
     if cached is not None:
-        return jsonify(**cached)
+        return jsonify(**_with_loudness(dict(cached)))
 
     payload = _search_with_hint(q, duration_hint, bg) if duration_hint is not None else _search_single(q, bg)
     if payload is None:
@@ -301,7 +338,9 @@ def search():
         return jsonify(error="no_hit"), 404
 
     _cache_put(cache_key, payload)
-    return jsonify(**payload)
+    # Loudness is attached on the way out, never cached with the row: a track
+    # resolved before its measurement lands must not keep answering "unmeasured".
+    return jsonify(**_with_loudness(dict(payload)))
 
 
 def _payload_from(data: dict) -> dict:
@@ -439,6 +478,13 @@ def _meta_db_init() -> None:
                 "key TEXT PRIMARY KEY, video_id TEXT, title TEXT, "
                 "duration INTEGER, updated REAL)"
             )
+            # Keyed by video, not by query: the same video is reachable from
+            # several spellings of the same song, and it is measured once.
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS loudness ("
+                "video_id TEXT PRIMARY KEY, lufs REAL, peak_db REAL, "
+                "gain_db REAL, measured REAL)"
+            )
     except Exception as e:  # a broken db must never take the shim down
         log.warning("meta db init failed (%s); persistence disabled", e)
 
@@ -473,7 +519,173 @@ def _meta_db_put(key: str, payload: dict) -> None:
         log.warning("meta db put failed: %s", e)
 
 
+def _loudness_db_get(video_id: str) -> Optional[dict]:
+    """Measured loudness for a video, or None. One indexed read, so payload
+    builders can ask on every resolve without measuring anything themselves."""
+    try:
+        with sqlite3.connect(_META_DB_PATH, timeout=5) as c:
+            c.execute("PRAGMA busy_timeout=5000")
+            row = c.execute(
+                "SELECT lufs, peak_db, gain_db FROM loudness WHERE video_id=?",
+                (video_id,),
+            ).fetchone()
+        if row and row[2] is not None:
+            return {"lufs": row[0], "peak_db": row[1], "gain_db": row[2]}
+    except Exception as e:
+        log.warning("loudness db get failed: %s", e)
+    return None
+
+
+def _loudness_db_put(video_id: str, measured: dict) -> None:
+    try:
+        with _META_DB_LOCK, sqlite3.connect(_META_DB_PATH, timeout=5) as c:
+            c.execute("PRAGMA busy_timeout=5000")
+            c.execute(
+                "INSERT OR REPLACE INTO loudness(video_id, lufs, peak_db, gain_db, measured) "
+                "VALUES(?,?,?,?,?)",
+                (video_id, measured.get("lufs"), measured.get("peak_db"),
+                 measured.get("gain_db"), time.time()),
+            )
+    except Exception as e:
+        log.warning("loudness db put failed: %s", e)
+
+
+def _loudness_enqueue(video_id: str) -> None:
+    """Ask for a measurement, at most once per video per process. A full queue
+    drops the request instead of blocking a request thread: the next resolve of
+    that video asks again, and the worker already has minutes of backlog."""
+    if not video_id or _loudness_db_get(video_id) is not None:
+        return
+    with _LOUDNESS_LOCK:
+        if video_id in _LOUDNESS_QUEUED:
+            return
+        _LOUDNESS_QUEUED.add(video_id)
+    try:
+        _LOUDNESS_QUEUE.put_nowait(video_id)
+    except queue.Full:
+        with _LOUDNESS_LOCK:
+            _LOUDNESS_QUEUED.discard(video_id)
+
+
+_EBUR128_INTEGRATED = re.compile(r"^\s*I:\s*(-?[\d.]+|-inf)\s*LUFS", re.MULTILINE)
+_EBUR128_PEAK = re.compile(r"^\s*Peak:\s*(-?[\d.]+|-inf)\s*dBFS", re.MULTILINE)
+
+
+def _measure_loudness(video_id: str) -> Optional[dict]:
+    """Integrated loudness and sample peak of a video's audio, from the same bytes
+    /stream proxies. None when the upstream could not be read or ffmpeg produced
+    no summary — the video then stays unmeasured rather than being given a guess."""
+    url = _resolve_url(video_id, bg=True)
+    if not url:
+        return None
+    headers = {"Range": "bytes=0-"}
+    if _UPSTREAM_UA:
+        headers["User-Agent"] = _UPSTREAM_UA
+    upstream = _open_upstream(url, headers, video_id)
+    if upstream is None or upstream.status_code not in (200, 206):
+        code = upstream.status_code if upstream is not None else "n/a"
+        if upstream is not None:
+            upstream.close()
+        log.warning("loudness %s: upstream %s", video_id, code)
+        return None
+
+    # The whole body is buffered and handed to subprocess.run rather than being
+    # streamed into a Popen's stdin, because ffmpeg's ebur128 summary is written at
+    # info level: piping stderr without draining it fills the 64 KB pipe buffer on a
+    # long track, ffmpeg then blocks on stderr, stops draining stdin and the writer
+    # waits on it forever. That deadlock is what made the first version measure
+    # nothing at all — two processes asleep on each other, no log line either way.
+    # run() drains both pipes, and the audio of one song is a few MB (the /stream
+    # remux buffers the same bytes the same way).
+    try:
+        body = b"".join(upstream.iter_content(chunk_size=64 * 1024))
+    except Exception as e:
+        log.warning("loudness %s: fetch failed: %s", video_id, e)
+        return None
+    finally:
+        upstream.close()
+
+    try:
+        proc = subprocess.run(
+            [_FFMPEG, "-hide_banner", "-nostdin", "-i", "-", "-map", "0:a:0",
+             "-af", "ebur128=peak=sample", "-f", "null", "-"],
+            input=body, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=_LOUDNESS_TIMEOUT_SEC,
+        )
+        stderr = proc.stderr or b""
+    except subprocess.TimeoutExpired:
+        log.warning("loudness %s: ffmpeg timed out after %ds",
+                    video_id, _LOUDNESS_TIMEOUT_SEC)
+        return None
+    except Exception as e:
+        log.warning("loudness %s: measurement failed: %s", video_id, e)
+        return None
+
+    text = stderr.decode("utf-8", "replace")
+    hit_i = _EBUR128_INTEGRATED.search(text)
+    hit_peak = _EBUR128_PEAK.search(text)
+    if not hit_i or not hit_peak:
+        log.warning("loudness %s: no ebur128 summary in ffmpeg output", video_id)
+        return None
+    try:
+        lufs = float(hit_i.group(1))
+        peak_db = float(hit_peak.group(1))
+    except ValueError:  # cannot happen with the pattern above, but never guess
+        log.warning("loudness %s: unparsable ebur128 summary", video_id)
+        return None
+    # -inf (digital silence) and the -70 LUFS gate floor both mean "there is nothing
+    # here to normalise", and neither is a level a gain may be computed from.
+    if not math.isfinite(lufs) or not math.isfinite(peak_db) or lufs <= _LOUDNESS_FLOOR_LUFS:
+        log.warning("loudness %s: no measurable level (I=%s LUFS, peak=%s dBFS)",
+                    video_id, hit_i.group(1), hit_peak.group(1))
+        return None
+    # Same rule rsgain applies to a library file: move the track to the ReplayGain
+    # 2.0 reference, but never so far up that it clips.
+    gain = min(_LOUDNESS_TARGET_LUFS - lufs, -peak_db)
+    return {"lufs": round(lufs, 2), "peak_db": round(peak_db, 2),
+            "gain_db": round(gain, 2)}
+
+
+def _loudness_worker() -> None:
+    """One measurement at a time, forever. Serial on purpose: a decode is cheap
+    but a burst of them is not, and nothing is waiting on the answer."""
+    while True:
+        video_id = _LOUDNESS_QUEUE.get()
+        try:
+            if _loudness_db_get(video_id) is None:
+                measured = _measure_loudness(video_id)
+                if measured:
+                    _loudness_db_put(video_id, measured)
+                    log.info("loudness %s: %+.2f dB (%.2f LUFS, peak %.2f dBFS)",
+                             video_id, measured["gain_db"], measured["lufs"],
+                             measured["peak_db"])
+        except Exception as e:  # a worker that dies stops all measurement
+            log.warning("loudness worker failed for %s: %s", video_id, e)
+        finally:
+            with _LOUDNESS_LOCK:
+                _LOUDNESS_QUEUED.discard(video_id)
+            _LOUDNESS_QUEUE.task_done()
+
+
+def _with_loudness(payload: dict) -> dict:
+    """Attach the measurement to a resolve payload, and ask for one when the video
+    has none yet. Every path that settles on a video id goes through here, so
+    measuring starts the moment a track is pinned — normally well before it plays."""
+    video_id = payload.get("video_id")
+    if not video_id:
+        return payload
+    measured = _loudness_db_get(video_id)
+    if measured:
+        payload.update(measured)
+        payload["measured"] = True
+    else:
+        payload["measured"] = False
+        _loudness_enqueue(video_id)
+    return payload
+
+
 _meta_db_init()
+threading.Thread(target=_loudness_worker, daemon=True, name="loudness").start()
 
 
 @app.get("/meta")
@@ -495,14 +707,14 @@ def meta():
         c = _META_CACHE.get(key)
         if c is not None:
             _META_CACHE.move_to_end(key)
-            return jsonify(**c)
+            return jsonify(**_with_loudness(dict(c)))
     # Durable backing: resolved in a past search/warm, possibly a past process.
     persisted = _meta_db_get(key)
     if persisted is not None:
         with _META_CACHE_LOCK:
             _META_CACHE[key] = persisted
             _META_CACHE.move_to_end(key)
-        return jsonify(**persisted)
+        return jsonify(**_with_loudness(dict(persisted)))
 
     if duration_hint is not None:
         out = _run([f"ytsearch5:{q}", "--flat-playlist", "--print", "%(.{id,title,duration})j"],
@@ -539,7 +751,22 @@ def meta():
             while len(_META_CACHE) > _SEARCH_CACHE_MAX:
                 _META_CACHE.popitem(last=False)
         _meta_db_put(key, payload)  # persist so it survives restarts, for both modes
-    return jsonify(**payload)
+    return jsonify(**_with_loudness(dict(payload)))
+
+
+@app.get("/loudness")
+def loudness():
+    """ReplayGain numbers for one video, for a caller that has an id and no query
+    (Octo's getSong path). 200 either way: `measured: false` means the background
+    worker has it queued, which is not an error a caller should have to special-case."""
+    video_id = request.args.get("video", "").strip()
+    if not video_id:
+        abort(400, "missing video")
+    measured = _loudness_db_get(video_id)
+    if measured is None:
+        _loudness_enqueue(video_id)
+        return jsonify(video_id=video_id, measured=False)
+    return jsonify(video_id=video_id, measured=True, **measured)
 
 
 def _resolve_url(video_id: str, bg: bool = False) -> Optional[str]:
