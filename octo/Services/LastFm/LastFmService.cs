@@ -375,9 +375,9 @@ public class LastFmService
         }, cancellationToken);
 
     /// <summary>The artist's biography as the catalog's editors wrote it, and the summary
-    /// form many clients show first. Empty when the catalog has none for the name; the
-    /// caller is what decides the name is this artist's.</summary>
-    public record ArtistBio(string Biography, string Summary);
+    /// form many clients show first. <see cref="AnsweredName"/> is the name the endpoint
+    /// itself wrote into the body. Null when the catalog has none for the name.</summary>
+    public record ArtistBio(string Biography, string Summary, string AnsweredName);
 
     public Task<ArtistBio?> GetArtistBiographyAsync(string artist,
         CancellationToken cancellationToken = default) => CachedAsync<ArtistBio?>(
@@ -386,7 +386,8 @@ public class LastFmService
             using var doc = await GetDocumentAsync("artist.getinfo",
                 new Dictionary<string, string> { ["artist"] = artist }, ct);
             if (doc is null || !doc.RootElement.TryGetProperty("artist", out var artistEl)) return null;
-            return new ArtistBio(Text(artistEl, "bio", "content"), Text(artistEl, "bio", "summary"));
+            return new ArtistBio(Text(artistEl, "bio", "content"), Text(artistEl, "bio", "summary"),
+                Text(artistEl, "name"));
         }, cancellationToken);
 
     public Task<List<string>> GetArtistTopTagsAsync(string artist, int limit = 10,

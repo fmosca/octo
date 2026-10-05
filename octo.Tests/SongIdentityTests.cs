@@ -233,7 +233,9 @@ public class SongIdentityTests
     [InlineData("The Weeknd", "Weeknd", true)]
     [InlineData("$uicideboy$", "Suicideboys", true)]
     [InlineData("Kanye West", "Ye", true)]
+    [InlineData("Phoen!x", "Phoenix", true)]
     [InlineData("Bob Marley & The Wailers", "Bob Marley", false)]
+    [InlineData("Phoenix II", "Phoenix", false)]
     [InlineData("Drake feat. Rihanna", "Rihanna", false)]
     public void SameArtistName_IsTheWholeNameNeverAPart(string a, string b, bool same)
         => Assert.Equal(same, SongIdentity.SameArtistName(a, b));

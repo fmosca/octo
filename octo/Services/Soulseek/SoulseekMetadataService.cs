@@ -1087,40 +1087,57 @@ public class SoulseekMetadataService : IMusicMetadataService
     /// row. Each is an outside artist row with a real id, so tapping one opens their page.
     /// Null when the id is not an outside artist.
     /// </summary>
+    /// <summary>The catalog id a routing carries, when it is one: digits only. A non-numeric
+    /// id is a registry id a past build wrote as the catalog id — not trusted, re-resolved.</summary>
+    private static bool IsCatalogId(string? known) =>
+        !string.IsNullOrEmpty(known) && known.All(char.IsAsciiDigit);
+
+    private async Task<string?> SettledCatalogIdAsync(SoulseekRouting routing, CancellationToken ct)
+    {
+        var known = routing.ExternalArtistId;
+        if (IsCatalogId(known)) return known;
+        var settled = await FindCatalogArtistIdAsync(routing.Artist ?? "", ct);
+        if (string.IsNullOrEmpty(settled)) return null;
+        // The routing carries the catalog id from now on: the next visit asks for the
+        // right artist's page directly. Assign, not merge: a poisoned non-numeric id in
+        // the persisted registry must not outlive this resolution, and the id is minted
+        // from the name, so nothing about the client-facing id changes.
+        routing.ExternalArtistId = settled;
+        _idRegistry.Register(routing);
+        return settled;
+    }
+
     public async Task<List<Artist>?> RelatedArtistsAsync(string externalProvider, string externalId,
         int limit = 20, CancellationToken ct = default)
     {
         if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
         var routing = _idRegistry.Lookup(externalId);
         if (routing is not { Kind: RoutingKind.Artist } artistRouting) return null;
-        var known = artistRouting.ExternalArtistId;
-        if (string.IsNullOrEmpty(known))
-        {
-            known = await FindCatalogArtistIdAsync(routing.Artist ?? "", ct);
-            if (string.IsNullOrEmpty(known)) return null;
-            // The routing carries the catalog id from now on: the next visit asks for the
-            // right artist's page directly. Registering keeps the merge behavior (an "id the
-            // listing already resolved" is never forgotten), and the id is minted from the
-            // name, so nothing about the client-facing id changes.
-            routing.ExternalArtistId = known;
-            _idRegistry.Register(routing);
-        }
+        var known = await SettledCatalogIdAsync(artistRouting, ct);
+        if (string.IsNullOrEmpty(known)) return null;
 
         var related = await _deezer.RelatedArtistsAsync(known, limit, ct);
-        return related.Select(hit => new Artist
-        {
-            Id = _idRegistry.Register(new SoulseekRouting
+        // The page's own name must not come back as a row: two acts of one name share a
+        // minted id (it hashes from the name), so a self-named row would overwrite the
+        // page artist's settled catalog id. The catalog id itself still is the page's
+        // artist — keep that one if the catalog lists it among the related.
+        return related
+            .Where(hit => !SongIdentity.SameArtistName(hit.Name, artistRouting.Artist)
+                          || hit.DeezerId == known)
+            .Select(hit => new Artist
             {
-                Kind = RoutingKind.Artist,
-                Artist = hit.Name,
-                ExternalArtistId = hit.DeezerId,
-            }),
-            Name = hit.Name,
-            ImageUrl = hit.PictureUrl,
-            IsLocal = false,
-            ExternalProvider = ProviderName,
-            ExternalId = null,
-        }).ToList();
+                Id = _idRegistry.Register(new SoulseekRouting
+                {
+                    Kind = RoutingKind.Artist,
+                    Artist = hit.Name,
+                    ExternalArtistId = hit.DeezerId,
+                }),
+                Name = hit.Name,
+                ImageUrl = hit.PictureUrl,
+                IsLocal = false,
+                ExternalProvider = ProviderName,
+                ExternalId = null,
+            }).ToList();
     }
 
     /// <summary>The catalog id of the artist this name is, of the candidates one exact name.</summary>
@@ -1143,15 +1160,8 @@ public class SoulseekMetadataService : IMusicMetadataService
         if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
         var routing = _idRegistry.Lookup(externalId);
         if (routing is not { Kind: RoutingKind.Artist } artistRouting) return null;
-        var known = artistRouting.ExternalArtistId;
-        if (string.IsNullOrEmpty(known))
-        {
-            known = await FindCatalogArtistIdAsync(routing.Artist ?? "", ct);
-            if (string.IsNullOrEmpty(known)) return null;
-            // Same carry as the related-artists walk: the next visit asks for no name search.
-            artistRouting.ExternalArtistId = known;
-            _idRegistry.Register(artistRouting);
-        }
+        var known = await SettledCatalogIdAsync(artistRouting, ct);
+        if (string.IsNullOrEmpty(known)) return null;
 
         var tops = await _deezer.TopTracksAsync(known, limit, ct);
         return tops.Select(top =>
@@ -1202,15 +1212,8 @@ public class SoulseekMetadataService : IMusicMetadataService
         if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
         var routing = _idRegistry.Lookup(externalId);
         if (routing is not { Kind: RoutingKind.Artist } artistRouting) return null;
-        var known = artistRouting.ExternalArtistId;
-        if (string.IsNullOrEmpty(known))
-        {
-            known = await FindCatalogArtistIdAsync(routing.Artist ?? "", ct);
-            if (string.IsNullOrEmpty(known)) return null;
-            // Same carry as the related-artists walk: the next visit asks for no name search.
-            artistRouting.ExternalArtistId = known;
-            _idRegistry.Register(artistRouting);
-        }
+        var known = await SettledCatalogIdAsync(artistRouting, ct);
+        if (string.IsNullOrEmpty(known)) return null;
 
         // The catalog's own name for this id: the search's spelling, not the routing's.
         var hits = await _deezer.SearchArtistsAsync(routing.Artist ?? "", 5, ct);
@@ -1218,7 +1221,13 @@ public class SoulseekMetadataService : IMusicMetadataService
         if (!lastFm.HasApiKey || ownName.Length == 0) return ("", "");
 
         var bio = await lastFm.GetArtistBiographyAsync(ownName, ct);
+        // The endpoint fuzzy-matches by name, so the body's artist is the only word on
+        // which act the text is about. "Phoen!x" asked by name can be answered with
+        // "Phoenix"'s page; a mismatched name means someone else's biography. A body
+        // without a name answers for the name asked.
         if (bio is null || bio.Biography.Length == 0) return ("", "");
+        if (bio.AnsweredName.Length > 0 && !SongIdentity.SameArtistName(ownName, bio.AnsweredName))
+            return ("", "");
         return (bio.Biography, bio.Summary);
     }
 

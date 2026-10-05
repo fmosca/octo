@@ -635,6 +635,27 @@ public class SoulseekMetadataServiceTests
     }
 
     [Fact]
+    public async Task RelatedArtists_ARowNamedLikeThePageArtist_DoesNotRebindItsCatalogId()
+    {
+        // The related list carries a row with the page artist's own name (and a different
+        // catalog id). Registering it would overwrite the page's settled id — both act
+        // routings hash to the same registry id, from the name — so it must not mint a row.
+        var svc = BuildService(new()
+        {
+            ["/artist/15/related"] = @"{""data"":[
+                {""id"":32,""name"":""Phoenix""},
+                {""id"":31,""name"":""Foals""}]}",
+        });
+        var id = OutsideArtist("Phoenix", "15");
+
+        var related = await svc.RelatedArtistsAsync(SoulseekMetadataService.ProviderName, id);
+
+        Assert.Equal(["Foals"], related!.Select(a => a.Name));
+        // The page artist's own id survived the visit.
+        Assert.Equal("15", _registry.Lookup(id)!.ExternalArtistId);
+    }
+
+    [Fact]
     public async Task RelatedArtists_TopTracksOrAlienProvider_AnswerNull()
     {
         var svc = BuildService(new());
@@ -699,6 +720,27 @@ public class SoulseekMetadataServiceTests
     }
 
     [Fact]
+    public async Task Biography_AnsweredByAnotherActOfTheName_IsRefused()
+    {
+        // The catalog row is "Phoenix"; Last.fm fuzzy-matched the name to a band whose
+        // body still names itself "Phoenix II". Its text is not this artist's.
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = ArtistSearchJson,
+        });
+        var id = OutsideArtist("Phoenix", "15");
+        var lastFm = BuildLastFm(new()
+        {
+            ["method=artist.getinfo"] = @"{""artist"":{""name"":""Phoenix II"",
+                ""bio"":{""content"":""Someone else's biography.""}}}",
+        });
+
+        var bio = await svc.BiographyAsync(SoulseekMetadataService.ProviderName, id, lastFm);
+
+        Assert.Equal(("", ""), bio!.Value);
+    }
+
+    [Fact]
     public async Task Biography_ANameOfAnotherSpelling_UsesTheCatalogsName()
     {
         // The routing carries the stylized display form; the catalog's row is "Phoen!x".
@@ -722,18 +764,35 @@ public class SoulseekMetadataServiceTests
     }
 
     [Fact]
-    public async Task Biography_MissingKeyOrMissingBio_AnswersEmpty()
+    public async Task Biography_MissingSources_AnswersEmpty()
     {
-        var svc = BuildService(new());
-        var noKey = BuildLastFm(new());
-        Assert.Equal(("", ""), await svc.BiographyAsync(
-            SoulseekMetadataService.ProviderName, OutsideArtist("Phoenix"), noKey) ?? ("", ""));
+        // An artist the catalog resolves, then no biography text for its name: the real
+        // "nothing to show" path, distinct from "not an outside artist" (null).
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = ArtistSearchJson,
+        });
+        var id = OutsideArtist("Phoenix", "15");
         var withKey = BuildLastFm(new()
         {
             ["method=artist.getinfo"] = @"{""artist"":{""name"":""Phoenix"",""bio"":{""content"":""""}}}",
         });
-        Assert.Equal(("", ""), await svc.BiographyAsync(
-            SoulseekMetadataService.ProviderName, OutsideArtist("Phoenix"), withKey) ?? ("", ""));
+
+        var bio = await svc.BiographyAsync(SoulseekMetadataService.ProviderName, id, withKey);
+
+        Assert.NotNull(bio); // An outside artist with an empty page, not an unknown id.
+        Assert.Equal(("", ""), bio!.Value);
+    }
+
+    [Fact]
+    public async Task Biography_AnUnknownCatalogId_AnswersNull()
+    {
+        // No /search/artist route: the name resolves to nothing, so the id is not an
+        // outside artist and the caller relays or answers its own empty.
+        var svc = BuildService(new());
+        var noKey = BuildLastFm(new());
+        Assert.Null(await svc.BiographyAsync(
+            SoulseekMetadataService.ProviderName, OutsideArtist("Phoenix"), noKey));
     }
 
     /// <summary>A Last.fm service answering biography calls from a url map. Its key is set,

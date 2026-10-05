@@ -159,11 +159,12 @@ public class DeezerMetadataService : IDisposable
     /// there. It runs without any one caller's token: a caller giving up stops waiting, and
     /// the others still get their answer.
     /// </summary>
-    private async Task<T> SharedAsync<T>(string key, Func<Task<T>> fetch, CancellationToken ct)
+    private async Task<T> SharedAsync<T>(string key, Func<CancellationToken, Task<T>> fetch,
+        CancellationToken ct)
     {
         var flight = _inFlight.GetOrAdd(key, k => new Lazy<Task<object?>>(async () =>
         {
-            try { return await fetch(); }
+            try { return await fetch(CancellationToken.None); }
             finally { _inFlight.TryRemove(k, out _); }
         }));
         return (T)(await flight.Value.WaitAsync(ct))!;
@@ -489,7 +490,7 @@ public class DeezerMetadataService : IDisposable
         if (TryGetCached<List<ArtistHit>>(key, out var cached)) return Task.FromResult(cached!);
         // An artist page names its artist and lists its albums in two requests at once, and
         // both search for the name. They share one search.
-        return SharedAsync(key, () => FetchArtistSearchAsync(query, limit, key), ct);
+        return SharedAsync<List<ArtistHit>>(key, _ => FetchArtistSearchAsync(query, limit, key), ct);
     }
 
     private async Task<List<ArtistHit>> FetchArtistSearchAsync(string query, int limit, string key)
@@ -542,17 +543,20 @@ public class DeezerMetadataService : IDisposable
         if (string.IsNullOrWhiteSpace(deezerArtistId) || limit <= 0) return new List<RelatedHit>();
         var key = $"arel|{deezerArtistId}|{limit}".ToLowerInvariant();
         if (TryGetCached<List<RelatedHit>>(key, out var cached)) return cached!;
-        return await SharedAsync(key, () => FetchRelatedArtistsAsync(deezerArtistId, limit, key), ct);
+        // No caller's token on the shared flight: one client giving up must not cancel
+        // the fetch for the others waiting on it (the AlbumTrackCountAsync shape).
+        return await SharedAsync<List<RelatedHit>>(key,
+            _ => FetchRelatedArtistsAsync(deezerArtistId, limit, key, CancellationToken.None), ct);
     }
 
-    private async Task<List<RelatedHit>> FetchRelatedArtistsAsync(string deezerArtistId, int limit, string key)
+    private async Task<List<RelatedHit>> FetchRelatedArtistsAsync(string deezerArtistId, int limit,
+        string key, CancellationToken ct)
     {
         var hits = new List<RelatedHit>();
         try
         {
             using var r = await GetJsonAsync(
-                $"{Base}/artist/{Uri.EscapeDataString(deezerArtistId)}/related?limit={limit}",
-                CancellationToken.None, background: true);
+                $"{Base}/artist/{Uri.EscapeDataString(deezerArtistId)}/related?limit={limit}", ct);
             if (r.Transient) return hits;
             if (r.Doc is not null
                 && r.Doc.RootElement.TryGetProperty("data", out var data)
@@ -591,17 +595,19 @@ public class DeezerMetadataService : IDisposable
         if (string.IsNullOrWhiteSpace(deezerArtistId) || limit <= 0) return new List<TopTrack>();
         var key = $"atop|{deezerArtistId}|{limit}".ToLowerInvariant();
         if (TryGetCached<List<TopTrack>>(key, out var cached)) return cached!;
-        return await SharedAsync(key, () => FetchTopTracksAsync(deezerArtistId, limit, key), ct);
+        // No caller's token on the shared flight, like related artists above.
+        return await SharedAsync<List<TopTrack>>(key,
+            _ => FetchTopTracksAsync(deezerArtistId, limit, key, CancellationToken.None), ct);
     }
 
-    private async Task<List<TopTrack>> FetchTopTracksAsync(string deezerArtistId, int limit, string key)
+    private async Task<List<TopTrack>> FetchTopTracksAsync(string deezerArtistId, int limit,
+        string key, CancellationToken ct)
     {
         var hits = new List<TopTrack>();
         try
         {
             using var r = await GetJsonAsync(
-                $"{Base}/artist/{Uri.EscapeDataString(deezerArtistId)}/top?limit={limit}",
-                CancellationToken.None, background: true);
+                $"{Base}/artist/{Uri.EscapeDataString(deezerArtistId)}/top?limit={limit}", ct);
             if (r.Transient) return hits;
             if (r.Doc is not null
                 && r.Doc.RootElement.TryGetProperty("data", out var data)
@@ -979,7 +985,7 @@ public class DeezerMetadataService : IDisposable
         var key = $"tc|{deezerId}";
         if (TryGetCached<int?>(key, out var cached)) return Task.FromResult(cached);
         // Two visits to one page at once ask for the same albums; each album is asked once.
-        return SharedAsync(key, () => FetchAlbumTrackCountAsync(deezerId, key), ct);
+        return SharedAsync<int?>(key, _ => FetchAlbumTrackCountAsync(deezerId, key), ct);
     }
 
     private async Task<int?> FetchAlbumTrackCountAsync(string deezerId, string key)

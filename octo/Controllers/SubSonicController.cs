@@ -3761,17 +3761,48 @@ public class SubsonicController : ControllerBase
         var id = parameters.GetValueOrDefault("id", "");
         var format = parameters.GetValueOrDefault("f", "xml");
         var count = int.TryParse(parameters.GetValueOrDefault("count", "20"), out var parsed) ? parsed : 20;
+
+        // The OpenSubsonic spec keys this endpoint by NAME ("artist"); Arpeggi sends the
+        // artist id. A NAME call is resolved in three steps, in this order: a relay to
+        // Navidrome (a library artist's page is Navidrome's, with its play counts, and
+        // the relay auth-checks), then the catalog when Navidrome answered no rows, then
+        // an empty answer. An id call skips all of that: a registry id is octo's own.
+        var byName = false;
+        var name = parameters.GetValueOrDefault("artist", "");
+        if (id.Length == 0 && name.Length > 0)
+        {
+            byName = true;
+        }
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
 
-        // Library ids are Navidrome's to answer: it knows the artist's plays, and the
-        // relay is also what checks the caller's credentials.
-        if (!isExternal)
+        // The spec's artist NAME must reach Navidrome BEFORE the catalog is consulted: a
+        // name the library holds is the library artist's page, and its play counts are
+        // the answer — catalog rows would shadow them. Relaying also auth-checks. The
+        // catalog fills in only when Navidrome answered no rows for the name.
+        if (byName && !isExternal)
         {
             var relay = await _proxyService.RelaySafeAsync("rest/getTopSongs", parameters);
-            return relay.Success && relay.Body is not null
-                ? File(relay.Body, relay.ContentType ?? $"application/{format}")
-                : _responseBuilder.CreateResponse(format, "topSongs", new { });
+            var relayed = relay.Success && relay.Body is not null
+                ? RelayedTopSongCount(relay.Body, format) : 0;
+            if (relayed > 0)
+                return File(relay.Body, relay.ContentType ?? $"application/{format}");
+            // No rows for the name, or a body without any: fall through to the catalog
+            // as the outside artist the name search itself settles (the service picks
+            // the right catalog artist for the name and remembers its id; the row's
+            // ExternalId is octo's registry id, NOT a catalog id — passing it as one
+            // would poison the routing).
+            var hits = await _metadataService.SearchArtistsAsync(name, 1);
+            if (hits is { Count: > 0 } found)
+            {
+                var routing = new SoulseekRouting { Kind = RoutingKind.Artist, Artist = found[0].Name };
+                id = _idRegistry.Register(routing);
+                (isExternal, _, externalId) = _localLibraryService.ParseSongId(id);
+                provider = SoulseekMetadataService.ProviderName;
+            }
         }
+
+        if (!isExternal)
+            return _responseBuilder.CreateResponse(format, "topSongs", new { });
 
         var songs = await _metadataService.TopTracksAsync(provider!, externalId!, count);
         if (songs is null)
@@ -3782,6 +3813,32 @@ public class SubsonicController : ControllerBase
             ["song"] = songs.Select(s => _responseBuilder.ConvertSongToJson(s)).ToList(),
         };
         return _responseBuilder.CreateMergedResponse(format, "topSongs", body);
+    }
+
+    /// <summary>How many song rows Navidrome's getTopSongs answer carries, its JSON shape
+    /// (topSongs.song) or its XML shape (topSongs > song elements). Zero means the relay
+    /// found nothing for the name — the catalog may still know one.</summary>
+    private static int RelayedTopSongCount(byte[] relayBody, string format)
+    {
+        try
+        {
+            if (format == "xml")
+            {
+                var doc = XDocument.Parse(Encoding.UTF8.GetString(relayBody));
+                return doc.Root?.Element("topSongs")?.Elements("song").Count() ?? 0;
+            }
+            using var json = JsonDocument.Parse(relayBody);
+            if (json.RootElement.TryGetProperty("subsonic-response", out var response)
+                && response.TryGetProperty("topSongs", out var top)
+                && top.TryGetProperty("song", out var songsEl)
+                && songsEl.ValueKind == JsonValueKind.Array)
+                return songsEl.EnumerateArray().Count();
+        }
+        catch (Exception)
+        {
+            // A body we cannot read counts as no rows; the caller falls through.
+        }
+        return 0;
     }
 
     [Route("{**endpoint}")]
@@ -4354,19 +4411,26 @@ public class SubsonicController : ControllerBase
         // that request is the one that asks the catalog for the rest.
         var albums = await OutsideArtistAlbumsAsync(id, artist.Name, knownCountsOnly: true);
 
-        // Best-effort biography: the page's last section. Fetched only when a source is
-        // configured, and never allowed to fail the page.
+        // Best-effort page context: the biography and the similar-artist names, each in
+        // one try. Fetched only when a source is configured, and never allowed to fail
+        // the page. The native artist JSON has no similar-artists field of Navidrome's
+        // own; the compact name+id list is Octo's shape, for a client that reads it.
         string? biography = null;
+        List<Artist>? similar = null;
         try
         {
             if (_lastFmService is not null)
                 biography = (await _metadataService.BiographyAsync(
                     SoulseekMetadataService.ProviderName, id, _lastFmService))?.Biography;
+            similar = await _metadataService.RelatedArtistsAsync(
+                SoulseekMetadataService.ProviderName, id, 12);
         }
-        catch (Exception ex) { _logger.LogDebug("native artist biography failed: {M}", ex.Message); }
+        catch (Exception ex) { _logger.LogDebug("native artist context failed: {M}", ex.Message); }
 
         var bytes = Encoding.UTF8.GetBytes(
-            BuildNativeArtistObject(artist, albums, biography).ToJsonString());
+            BuildNativeArtistObject(artist, albums, biography,
+                similar?.Select(a => new JsonObject { ["id"] = a.Id, ["name"] = a.Name }).ToList()
+            ).ToJsonString());
         Response.StatusCode = 200;
         Response.ContentType = "application/json";
         await Response.Body.WriteAsync(bytes);
@@ -4454,7 +4518,7 @@ public class SubsonicController : ControllerBase
     /// client that draws the artist through getCoverArt with the id is served by Octo too.
     /// </summary>
     private static JsonObject BuildNativeArtistObject(Artist artist, IReadOnlyList<Album> albums,
-        string? biography = null)
+        string? biography = null, List<JsonObject>? similarArtists = null)
     {
         var songCount = albums.Sum(a => a.SongCount ?? 0);
         JsonObject Stats() => new() { ["albumCount"] = albums.Count, ["songCount"] = songCount, ["size"] = 0 };
@@ -4480,6 +4544,7 @@ public class SubsonicController : ControllerBase
             o["largeImageUrl"] = artist.ImageUrl;
         }
         if (!string.IsNullOrEmpty(biography)) o["biography"] = biography;
+        if (similarArtists is { Count: > 0 }) o["similarArtists"] = new JsonArray([.. similarArtists]);
         return o;
     }
 

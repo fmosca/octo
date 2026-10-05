@@ -102,11 +102,24 @@ the critical path.
 
 Artist biography: `getArtistInfo2` for an outside-catalog artist reads last.fm's
 `artist.getinfo` for the artist's name and answers `biography` (plus a
-`biographySummary`); empty means the key is unset or the catalog has no text for
-that name. Library artists still relay Navidrome's own biography (needs Last.fm
-keys in Navidrome). The same biography rides the outside `getArtist` response,
-and the Navidrome-native artist object carries `biography` too. Similar-artist
-rows: outside `getArtist`/`getArtistInfo2` list catalog related artists
-(`RelatedArtistsAsync`), and `getTopSongs` answers an outside artist's most-played
-songs as play-registered songs — Arpeggi asks for it only when the artist
-response carried a `similarArtist` row.
+`biographySummary`); empty means the key is unset, the catalog has no text for
+that name, or the page last.fm answered names a different act (`artist.name` in
+the body is checked with `SongIdentity.SameArtistName`, so a fuzzy match for a
+near-miss spelling cannot ship someone else's text). Library artists still relay
+Navidrome's own biography (needs Last.fm keys in Navidrome). The same biography
+rides the outside `getArtist` response, and the Navidrome-native artist object
+carries `biography` and a compact `similarArtists` list too. Similar-artist rows:
+outside `getArtist`/`getArtistInfo2` list catalog related artists
+(`RelatedArtistsAsync`; a row named like the page artist is skipped, because two
+acts of one name hash to one registry id and the row would re-bind the page's
+settled catalog id), and `getTopSongs` answers an outside artist's most-played
+songs as play-registered songs — by registry id as Arpeggi sends it, or by the
+spec's `artist` name. The per-page budget: `RelatedArtistsAsync` is cached and
+shared like the other artist lookups (first page visit after a deploy or cache
+expiry pays one `/artist/{id}/related` call; 12 rows; about 190 ms measured), and
+`getTopSongs` one `/artist/{id}/top` call (5 rows, about 240 ms). Both run on the
+interactive lane: page-render data on the background lane waits behind cache
+warming and times out, per the `AlbumTrackCountAsync` comment. Last.fm's API terms
+require attributing their data — the summaries and names come from Last.fm; our
+own iOS app shows them inside octo-served pages, and the sources are named here
+for any future surface.
