@@ -151,4 +151,21 @@ public class NavidromeSongPathResolverTests : IDisposable
         Assert.False(NavidromeSongPathResolver.IsInside(Path.Combine(sibling, "Song.flac"), _root));
         Assert.False(NavidromeSongPathResolver.IsInside(_root, _root));
     }
+
+    [Fact]
+    public void Shows_OnlyAPresentRowAtThatFileWithItsSize()
+    {
+        var file = WriteFile("Massive Attack - Teardrop.flac", 4096);
+        NavidromeSongPathResolver.Candidate Row(long size, bool missing, string path = "Massive Attack - Teardrop.flac") =>
+            new("nd-1", path, null, size, "Teardrop", "Massive Attack", "Mezzanine", "flac", 330, PathSource.NativeApi, Missing: missing);
+        var r = Resolver();
+        Assert.True(r.Shows(Row(4096, false), _root, file));
+        Assert.False(r.Shows(Row(4096, true), _root, file));
+        Assert.False(r.Shows(Row(1000, false), _root, file));
+        Assert.False(r.Shows(Row(4096, false, "Other.flac"), _root, file));
+        Assert.False(r.Shows(null, _root, file));
+        using var json = System.Text.Json.JsonDocument.Parse("""{"path":"a.flac","missing":true,"albumArtist":"Massive Attack"}""");
+        var parsed = NavidromeSongPathResolver.FromJson(json.RootElement, "nd-1", PathSource.NativeApi, "libraryPath")!;
+        Assert.Equal((true, "Massive Attack"), (parsed.Missing, parsed.AlbumArtist));
+    }
 }

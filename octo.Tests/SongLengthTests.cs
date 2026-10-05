@@ -270,6 +270,63 @@ public class SongLengthTests
         Assert.Equal(180, song.Duration);
         Assert.Equal("vid-Someone Live Set", fixture.Registry.Lookup(song.Id)!.YouTubeId);
     }
+
+    [Fact]
+    public async Task ResolveTopDurations_InTheBackground_LeavesTheSongAndWritesTheRouting()
+    {
+        var fixture = new LengthFixture { Video = { ["Daft Punk Emotion"] = 417 } };
+        var svc = fixture.Service();
+        var song = (await svc.SearchSongsByArtistTitleAsync("Daft Punk", "Emotion")).Single();
+
+        await svc.ResolveTopDurationsAsync([song], background: true);
+
+        Assert.Equal(180, song.Duration);
+        var routing = fixture.Registry.Lookup(song.Id)!;
+        Assert.Equal(417, routing.Duration);
+        Assert.Equal("vid-Daft Punk Emotion", routing.YouTubeId);
+        Assert.Contains(fixture.Requests, url => url.Contains("/meta") && url.Contains("bg=1"));
+    }
+
+    [Fact]
+    public async Task ResolveTopDurations_ABackgroundPassInFlight_LeavesRoomForAForegroundLookup()
+    {
+        var held = new TaskCompletionSource();
+        var fixture = new LengthFixture { Video = { ["Daft Punk Emotion"] = 417 } };
+        fixture.Hold = uri => uri.Query.Contains("bg=1") ? held.Task : Task.CompletedTask;
+        var svc = fixture.Service();
+        var searched = new List<Song>();
+        for (var i = 0; i < 8; i++) searched.Add((await svc.SearchSongsByArtistTitleAsync("Filler", $"Song {i}")).Single());
+        var song = (await svc.SearchSongsByArtistTitleAsync("Daft Punk", "Emotion")).Single();
+
+        // The pass after a search, stuck on a slow shim with every permit it can take.
+        var background = svc.ResolveTopDurationsAsync(searched, background: true);
+        for (var wait = 0; wait < 200 && fixture.Requests.Count(url => url.Contains("bg=1")) < 2; wait++)
+            await Task.Delay(10);
+
+        // getSong's own lookup still gets a permit and shows the video's length.
+        await svc.ResolveTopDurationsAsync([song]);
+        Assert.Equal(417, song.Duration);
+
+        held.SetResult();
+        await background;
+    }
+
+    [Fact]
+    public async Task ResolveTopDurations_InTheBackground_KeepsTheVideoAPlayPinned()
+    {
+        var fixture = new LengthFixture { Video = { ["Daft Punk Emotion"] = 417 } };
+        var svc = fixture.Service();
+        var song = (await svc.SearchSongsByArtistTitleAsync("Daft Punk", "Emotion")).Single();
+        var routing = fixture.Registry.Lookup(song.Id)!;
+        routing.YouTubeId = "playing-now";
+        routing.Duration = 400;
+
+        await svc.ResolveTopDurationsAsync([song], background: true);
+
+        Assert.Equal("playing-now", routing.YouTubeId);
+        Assert.Equal(400, routing.Duration);
+        Assert.DoesNotContain(fixture.Requests, url => url.Contains("/meta"));
+    }
 }
 
 /// <summary>
@@ -282,6 +339,8 @@ internal sealed class LengthFixture
     public Dictionary<string, int> LastFm { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, int> Video { get; } = new(StringComparer.OrdinalIgnoreCase);
     public System.Collections.Concurrent.ConcurrentQueue<string> Requests { get; } = new();
+    /// <summary>Awaited before a request is answered, so a test can keep some of them in flight.</summary>
+    public Func<Uri, Task>? Hold { get; set; }
     public ExternalIdRegistry Registry { get; } = new();
     public DeezerMetadataService DeezerService { get; }
     private readonly HttpMessageHandler _handler;
@@ -353,12 +412,13 @@ internal sealed class LengthFixture
 
     private sealed class Handler(LengthFixture fixture) : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             fixture.Requests.Enqueue(request.RequestUri!.ToString());
+            if (fixture.Hold is { } hold) await hold(request.RequestUri!);
             var body = Answer(fixture, request.RequestUri!, out var status);
-            return Task.FromResult(new HttpResponseMessage(status)
-            { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+            return new HttpResponseMessage(status)
+            { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         }
     }
 

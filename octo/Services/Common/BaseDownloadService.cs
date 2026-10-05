@@ -5,9 +5,11 @@ using Octo.Models.Settings;
 using Octo.Models.Download;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
+using Octo.Services.Audio;
 using Octo.Services.Local;
 using Octo.Services.Metadata;
 using Octo.Services.Subsonic;
+using Octo.Services.Tagging;
 using TagLib;
 using IOFile = System.IO.File;
 
@@ -86,6 +88,37 @@ public abstract class BaseDownloadService : IDownloadService
         _serviceProvider.GetService<IOptionsMonitor<SoulseekSettings>>()?.CurrentValue ?? new SoulseekSettings();
     private MetadataSettings MetadataSettingsValue =>
         _serviceProvider.GetService<IOptionsMonitor<MetadataSettings>>()?.CurrentValue ?? new MetadataSettings();
+
+    /// <summary>How many transfers may run at once, and the gate they share. Null in tests that
+    /// build a service without one, which is one at a time, as before.</summary>
+    protected DownloadConcurrency? Concurrency => _serviceProvider.GetService<DownloadConcurrency>();
+
+    /// <summary>The Soulseek settings as they are now, for switches a subclass reads live.</summary>
+    protected SoulseekSettings CurrentSoulseekSettings => SoulseekSettingsValue;
+
+    /// <summary>For a subclass that needs an optional service without changing this constructor.</summary>
+    protected T? OptionalService<T>() where T : class => _serviceProvider.GetService<T>();
+
+    // The library file the running replacement replaces. Flows with the call into
+    // DownloadTrackAsync, so a backend that can use it (Lidarr reads the album from its tags)
+    // sees it without a new parameter on every download.
+    private static readonly AsyncLocal<string?> ReplacingPathLocal = new();
+
+    /// <summary>The library file this download replaces, or null for an ordinary download.</summary>
+    protected static string? ReplacingPath => ReplacingPathLocal.Value;
+
+    /// <summary>
+    /// The source a backend fetched a song from, when the format alone does not say: a FLAC
+    /// can be Lidarr's as well as Soulseek's. Weak, so a finished song takes its entry with it.
+    /// </summary>
+    protected static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Song, string> FetchedFrom = new();
+
+    /// <summary>Songs a backend asked to land without a notice of their own: a Lidarr album's
+    /// songs that nobody hearted, and the songs of an album heart, which gets one for the album.</summary>
+    protected static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Song, object> Muted = new();
+
+    private static string SourceLabel(Song song, string ext) =>
+        FetchedFrom.TryGetValue(song, out var source) ? source : ext == "FLAC" ? "Soulseek" : "YouTube";
 
     /// <summary>
     /// Tell the live progress list where a download has got to. It only watches, so it is
@@ -178,10 +211,11 @@ public abstract class BaseDownloadService : IDownloadService
     
     public Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
         bool triggerAlbumDownload, bool forcePermanent, DownloadSource? sourceOverride,
-        CancellationToken cancellationToken, IReadOnlyList<string>? requestedBy = null) =>
+        CancellationToken cancellationToken, IReadOnlyList<string>? requestedBy = null,
+        bool upgradeSearch = false, Octo.Services.Library.ReplacementHandoff? replacement = null) =>
         DownloadSongInternalAsync(externalProvider, externalId, triggerAlbumDownload,
             cancellationToken, forcePermanent, sourceOverride: sourceOverride,
-            requestedBy: requestedBy);
+            requestedBy: requestedBy, upgradeSearch: upgradeSearch, replacement: replacement);
 
     public Task<bool> DownloadAlbumWithSourceAsync(string externalProvider, string albumExternalId,
         DownloadSource source, bool suppressSummary, CancellationToken cancellationToken = default,
@@ -198,6 +232,8 @@ public abstract class BaseDownloadService : IDownloadService
         ActiveDownloads.TryGetValue(songId, out var info);
         return info;
     }
+
+    public bool HasActiveDownloads => ActiveDownloads.Values.Any(info => info.Status == DownloadStatus.InProgress);
     
     public async Task<string?> GetLocalPathIfExistsAsync(string externalProvider, string externalId)
     {
@@ -269,7 +305,7 @@ public abstract class BaseDownloadService : IDownloadService
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Local file path where the track was saved</returns>
     protected abstract Task<string> DownloadTrackAsync(string trackId, Song song, bool suppressNotify,
-        DownloadSource? sourceOverride, CancellationToken cancellationToken);
+        DownloadSource? sourceOverride, bool upgradeSearch, CancellationToken cancellationToken);
 
     /// <summary>Record a completed download in the fetched-songs log. Best-effort:
     /// format + source are derived from the file extension (flac -> Soulseek/lossless,
@@ -313,10 +349,11 @@ public abstract class BaseDownloadService : IDownloadService
                 Album = album ?? string.Empty,
                 Path = localPath,
                 Format = string.IsNullOrEmpty(ext) ? "?" : ext,
-                Source = ext == "FLAC" ? "Soulseek" : "YouTube",
+                Source = SourceLabel(song, ext),
                 CoverArtUrl = cover,
                 SizeBytes = size,
                 TranscodedFrom = song.TranscodedFrom,
+                Tagging = song.TagPlan?.ToReport(),
                 DownloadedAt = DateTime.UtcNow.ToString("o"),
                 RequestedBy = requestedBy is { Count: > 0 } ? [.. requestedBy] : null,
             });
@@ -333,7 +370,7 @@ public abstract class BaseDownloadService : IDownloadService
                     Title = song.Title,
                     Album = album,
                     Format = string.IsNullOrEmpty(ext) ? "?" : ext,
-                    Source = ext == "FLAC" ? "Soulseek" : "YouTube",
+                    Source = SourceLabel(song, ext),
                     CoverArtUrl = cover,
                     SizeBytes = size,
                     // EnrichAsync and WriteMetadataAsync ran before this hook, so these are the
@@ -383,7 +420,9 @@ public abstract class BaseDownloadService : IDownloadService
     protected async Task<string> DownloadSongInternalAsync(string externalProvider, string externalId,
         bool triggerAlbumDownload, CancellationToken cancellationToken = default,
         bool forcePermanent = false, bool suppressNotify = false,
-        DownloadSource? sourceOverride = null, IReadOnlyList<string>? requestedBy = null)
+        DownloadSource? sourceOverride = null, IReadOnlyList<string>? requestedBy = null,
+        AlbumTagContext? albumContext = null, bool upgradeSearch = false,
+        Octo.Services.Library.ReplacementHandoff? replacement = null)
     {
         if (externalProvider != ProviderName)
         {
@@ -407,7 +446,8 @@ public abstract class BaseDownloadService : IDownloadService
         try
         {
             // Check if already downloaded (skip for cache mode as we want to check cache folder)
-            if (!isCache)
+            // A replacement is always a fresh file: an existing one is what is being replaced.
+            if (!isCache && replacement is null)
             {
                 var existingPath = await LocalLibraryService.GetLocalPathForExternalSongAsync(externalProvider, externalId);
                 if (existingPath != null && IOFile.Exists(existingPath))
@@ -417,7 +457,7 @@ public abstract class BaseDownloadService : IDownloadService
                     return existingPath;
                 }
             }
-            else
+            else if (isCache)
             {
                 // For cache mode, check if file exists in cache directory
                 var cachedPath = GetCachedFilePath(externalProvider, externalId);
@@ -491,6 +531,23 @@ public abstract class BaseDownloadService : IDownloadService
             }
             Track(t => t.Describe(externalProvider, externalId, song.Artist, song.Title, song.Album));
 
+            // Never a second copy of a song already in the library; a lossy one is queued for a
+            // higher quality copy instead. Not for a replacement or a Better quality search, which
+            // exist to download a song that is already there.
+            if (!isCache && replacement is null && !upgradeSearch && SubsonicSettings.SkipOwnedSongs
+                && OptionalService<Octo.Services.Library.LibraryOwnership>() is { } ownership
+                && await ownership.FindAsync(song.Artist, song.Title, song.Duration, song.Album, cancellationToken) is { } owned)
+            {
+                var decision = Octo.Services.Library.LibraryOwnership.Decide(owned,
+                    SourceCanBeLossless(sourceOverride), UpgradeAllowed(requestedBy));
+                if (decision == Octo.Services.Library.OwnedDecision.KeepAndUpgrade) QueueUpgradeFor(owned, song, requestedBy!);
+                Logger.LogInformation("'{Artist} - {Title}' is already in your library ({Suffix}) at {Path}; not downloading another copy{Upgrade}",
+                    song.Artist, song.Title, owned.Suffix, owned.AbsolutePath,
+                    decision == Octo.Services.Library.OwnedDecision.KeepAndUpgrade ? ", looking for a higher quality one instead" : "");
+                Track(t => t.Imported(externalProvider, externalId, song.Artist, song.Title, owned.AbsolutePath));
+                return owned.AbsolutePath;
+            }
+
             var downloadInfo = new DownloadInfo
             {
                 SongId = songId,
@@ -526,28 +583,91 @@ public abstract class BaseDownloadService : IDownloadService
             // names the file, which is how every existing library was built.
             var requested = new RequestedIdentity(song.Artist, song.Title, song.Album ?? "", song.Track);
 
-            var landedPath = await DownloadTrackAsync(
-                externalId, song, silence, sourceOverride, cancellationToken);
+            // Parallel only once slskd has proven it files each download in its own folder; until
+            // then the lock is held through the transfer exactly as before. The in-progress marker
+            // above keeps a second request for this song waiting either way, and the limiter counts
+            // every transfer, album walks and hearts outside the queue included.
+            var concurrency = Concurrency;
+            IDisposable? slot = null;
+            if (concurrency?.Current > 1)
+            {
+                DownloadLock.Release();
+                lockHeld = false;
+                slot = await concurrency.Transfers.EnterAsync(CancellationToken.None);
+            }
+            string landedPath;
+            ReplacingPathLocal.Value = replacement?.OriginalPath;
+            try
+            {
+                landedPath = await DownloadTrackAsync(
+                    externalId, song, silence, sourceOverride, upgradeSearch, cancellationToken);
+            }
+            finally
+            {
+                slot?.Dispose();
+            }
+            EnsureOnDisk(landedPath);
+            // Placing, tagging and registering touch the library and the mapping file, and those
+            // stay one at a time.
+            if (!lockHeld)
+            {
+                await DownloadLock.WaitAsync(CancellationToken.None);
+                lockHeld = true;
+            }
             song.LocalPath = landedPath;
             Track(t => t.Stage(externalProvider, externalId, AcquisitionState.Importing));
+            var finalize = System.Diagnostics.Stopwatch.StartNew();
 
-            // Enrich from Deezer before the file is placed: the album it finds names the folder
-            // (#50) and its main artist names the artist folder (#49). Reads only; nothing is
-            // written to the file until it sits where it will stay.
-            await EnrichAsync(song, landedPath, CancellationToken.None);
+            // The loudness is measured while the file is identified: ffmpeg works the disk and
+            // the lookups work the network, so the two overlap. Both finish before the file is
+            // placed, since nothing may read a file while it moves.
+            var loudness = StartLoudness(landedPath);
+
+            // Identify before the file is placed: the album the chooser settles on names the
+            // folder (#50) and its main artist names the artist folder (#49). Reads only; nothing
+            // is written to the file until it sits where it will stay.
+            await IdentifyAsync(song, requested, landedPath, albumContext, CancellationToken.None);
+            await ApplyLoudnessAsync(song, loudness, landedPath);
 
             // Placed from the Song, so the path and the tags come from one decision (#48). The
             // file used to be moved inside DownloadTrackAsync, before any of this was known.
-            var placement = await PlaceInLibraryAsync(song, requested, landedPath);
+            // A library action's replacement is staged where no scan looks, and moved in only once
+            // it carries the original's identity and has passed (W8).
+            var placement = replacement is null
+                ? await PlaceInLibraryAsync(song, requested, landedPath)
+                : StageReplacement(landedPath);
             var localPath = placement.Path;
             song.LocalPath = localPath;
+            // Again after placement: identification takes seconds, and placement hands back the
+            // old path when the file is missing rather than failing.
+            EnsureOnDisk(localPath);
+            if (albumContext is not null && song.TagPlan is not null)
+                albumContext.Loudness[localPath] = song.TagPlan.IntegratedLufs is { } lufs
+                    ? new Loudness(lufs, 0, song.TagPlan.TruePeakDbfs ?? 0) : null;
 
             // Rich tags and real album art, written where the file will stay. Downloads
             // otherwise arrive bare (YouTube: artist/title and a video thumbnail; Soulseek:
             // whatever the peer tagged), so this is what makes every fetched song a
             // properly-tagged library citizen.
+            var writing = System.Diagnostics.Stopwatch.StartNew();
             var cover = await WriteMetadataAsync(localPath, song, CancellationToken.None);
+            if (replacement is not null)
+            {
+                placement = await RevealReplacementAsync(song, requested, localPath, replacement);
+                localPath = placement.Path;
+                song.LocalPath = localPath;
+            }
             if (!isCache) await WriteSidecarsAsync(song, placement, cover, CancellationToken.None);
+            if (song.TagPlan is { } tagPlan)
+            {
+                tagPlan.StageSeconds["write"] = writing.Elapsed.TotalSeconds;
+                tagPlan.StageSeconds["total"] = finalize.Elapsed.TotalSeconds;
+                Logger.LogInformation("{Summary}", tagPlan.Describe(song));
+                if (finalize.Elapsed > FinalizeBudget)
+                    Logger.LogWarning("finalizing '{Artist} - {Title}' took {Seconds:0.0}s; stages: {Stages}",
+                        song.Artist, song.Title, finalize.Elapsed.TotalSeconds,
+                        string.Join(", ", tagPlan.StageSeconds.Select(s => $"{s.Key} {s.Value:0.0}s")));
+            }
 
             downloadInfo.Status = DownloadStatus.Completed;
             downloadInfo.LocalPath = localPath;
@@ -575,7 +695,7 @@ public abstract class BaseDownloadService : IDownloadService
             if (!isCache)
             {
                 await LocalLibraryService.RegisterDownloadedSongAsync(song, localPath);
-                await RecordHistoryAsync(song, localPath, silence, requestedBy);
+                await RecordHistoryAsync(song, localPath, silence || Muted.TryGetValue(song, out _), requestedBy);
                 AskForReview(song, localPath, requestedBy);
                 Track(t => t.Imported(externalProvider, externalId, song.Artist, song.Title, localPath));
 
@@ -635,7 +755,10 @@ public abstract class BaseDownloadService : IDownloadService
                 downloadInfo.Status = DownloadStatus.Failed;
                 downloadInfo.ErrorMessage = ex.Message;
             }
-            Logger.LogError(ex, "Download failed for {SongId}", songId);
+            if (ex is Octo.Services.Library.ReplacementRejectedException)
+                Logger.LogInformation("Replacement download {SongId} refused: {Problem}", songId, ex.Message);
+            else
+                Logger.LogError(ex, "Download failed for {SongId}", songId);
             throw;
         }
         finally
@@ -684,9 +807,45 @@ public abstract class BaseDownloadService : IDownloadService
             tracksToDownload.Select(s => (s.ExternalId!, (string?)s.Artist, (string?)s.Title, (string?)album.Title))));
 
         // Per-track notifications are muted below; these feed one summary instead.
-        int succeeded = 0, lossless = 0, failed = 0;
+        int succeeded = 0, lossless = 0, failed = 0, kept = 0, upgrading = 0;
 
-        foreach (var track in tracksToDownload)
+        // Songs already in the library stay as they are, and a lossy one is queued for a higher
+        // quality copy instead of downloaded again. Only what is missing is looked for, by folder
+        // or song by song.
+        if (SubsonicSettings.SkipOwnedSongs && OptionalService<Octo.Services.Library.LibraryOwnership>() is { } ownership)
+        {
+            var owned = new ConcurrentDictionary<string, Octo.Services.Library.OwnedCopy>(StringComparer.Ordinal);
+            await Parallel.ForEachAsync(tracksToDownload, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (track, ct) =>
+            {
+                if (await ownership.FindAsync(track.Artist, track.Title, track.Duration, track.Album ?? album.Title, ct) is { } copy)
+                    owned[track.ExternalId!] = copy;
+            });
+            var canBeLossless = SourceCanBeLossless(sourceOverride);
+            var mayUpgrade = UpgradeAllowed(requestedBy);
+            foreach (var track in tracksToDownload.Where(t => owned.ContainsKey(t.ExternalId!)))
+            {
+                var copy = owned[track.ExternalId!];
+                if (Octo.Services.Library.LibraryOwnership.Decide(copy, canBeLossless, mayUpgrade)
+                    == Octo.Services.Library.OwnedDecision.KeepAndUpgrade)
+                {
+                    QueueUpgradeFor(copy, track, requestedBy!);
+                    upgrading++;
+                }
+                else kept++;
+                Track(t => t.Imported(ProviderName, track.ExternalId!, track.Artist, track.Title, copy.AbsolutePath));
+            }
+            tracksToDownload = tracksToDownload.Where(t => !owned.ContainsKey(t.ExternalId!)).ToList();
+            if (owned.Count > 0)
+                Logger.LogInformation("Album '{Album}': {Kept} songs already yours, {Upgrading} queued for a higher quality copy, {Left} to download",
+                    album.Title, kept, upgrading, tracksToDownload.Count);
+        }
+
+        // Every track of the walk shares the release the first one settled on, and the walk
+        // measures each track so the album gain can be written once it ends.
+        var albumContext = new AlbumTagContext(albumExternalId, album.Title, album.Artist);
+
+        // One track of the walk. Counters are shared by both lanes below, so they move atomically.
+        async Task OneTrackAsync(Song track)
         {
             try
             {
@@ -697,7 +856,7 @@ public abstract class BaseDownloadService : IDownloadService
                 {
                     Logger.LogDebug("Track {TrackId} already downloaded, skipping", track.ExternalId);
                     Track(t => t.Imported(ProviderName, track.ExternalId!, track.Artist, track.Title, existingPath));
-                    continue;
+                    return;
                 }
 
                 // Check if download is already in progress or recently completed
@@ -707,15 +866,15 @@ public abstract class BaseDownloadService : IDownloadService
                     if (activeDownload.Status == DownloadStatus.InProgress)
                     {
                         Logger.LogDebug("Track {TrackId} download already in progress, skipping", track.ExternalId);
-                        continue;
+                        return;
                     }
-                    
+
                     if (activeDownload.Status == DownloadStatus.Completed)
                     {
                         Logger.LogDebug("Track {TrackId} already downloaded in this session, skipping", track.ExternalId);
                         Track(t => t.Imported(ProviderName, track.ExternalId!, track.Artist, track.Title,
                             activeDownload.LocalPath));
-                        continue;
+                        return;
                     }
                 }
 
@@ -723,9 +882,10 @@ public abstract class BaseDownloadService : IDownloadService
                 var path = await DownloadSongInternalAsync(
                     ProviderName, track.ExternalId!, triggerAlbumDownload: false,
                     cancellationToken, forcePermanent: true, suppressNotify: true,
-                    sourceOverride: sourceOverride, requestedBy: requestedBy);
-                succeeded++;
-                if (path.EndsWith(".flac", StringComparison.OrdinalIgnoreCase)) lossless++;
+                    sourceOverride: sourceOverride, requestedBy: requestedBy,
+                    albumContext: albumContext);
+                Interlocked.Increment(ref succeeded);
+                if (path.EndsWith(".flac", StringComparison.OrdinalIgnoreCase)) Interlocked.Increment(ref lossless);
 
                 // Force a rescan per track so the album fills in progressively in the
                 // client instead of appearing all at once at the end. The per-download
@@ -736,20 +896,92 @@ public abstract class BaseDownloadService : IDownloadService
             catch (Exception ex)
             {
                 Logger.LogWarning(ex, "Failed to download track {TrackId} '{Title}'", track.ExternalId, track.Title);
-                failed++;
+                Interlocked.Increment(ref failed);
                 // Same rule as the summary: a source with another after it stays quiet, and
                 // the next walk picks the track up again.
                 if (!suppressSummary) Track(t => t.Fail(ProviderName, track.ExternalId ?? "", ex.Message));
             }
         }
 
+        // Tracks whose file came from one peer's folder of the album, already queued in one batch,
+        // go one at a time in album order: that peer sends them back to back, so waiting on several
+        // at once would only sit in its queue and run out each wait's quiet window. The rest are
+        // searched song by song, side by side when downloads may run in parallel; the transfer gate
+        // keeps the total to the setting. With nothing prepared and one at a time, this is the walk
+        // as it always was.
+        var prepared = await PrepareAlbumAsync(album, tracksToDownload, sourceOverride, cancellationToken);
+        try
+        {
+            var fromFolder = tracksToDownload.Where(t => prepared.Contains(t.ExternalId!)).ToList();
+            var bySearch = tracksToDownload.Where(t => !prepared.Contains(t.ExternalId!)).ToList();
+            var folderLane = Task.Run(async () =>
+            {
+                foreach (var track in fromFolder) await OneTrackAsync(track);
+            });
+            var searchLane = Parallel.ForEachAsync(bySearch,
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Concurrency?.Current ?? 1) },
+                async (track, _) => await OneTrackAsync(track));
+            await Task.WhenAll(folderLane, searchLane);
+        }
+        finally
+        {
+            await FinishAlbumAsync(prepared);
+        }
+
         Logger.LogInformation("Completed background download for album '{AlbumTitle}'", album.Title);
 
-        var summary = BuildAlbumSummary(album, succeeded, lossless, failed);
+        if (MetadataSettingsValue.ReplayGain) WriteAlbumGain(albumContext, album.Title);
+
+        var summary = BuildAlbumSummary(album, succeeded, lossless, failed, kept, upgrading);
         // Hide an intermediate failure while another source remains, but still report
         // success when an earlier priority step completes the album acquisition.
         if ((!suppressSummary || failed == 0) && summary is not null) Notifications.Notify(summary);
         return failed == 0;
+    }
+
+    /// <summary>
+    /// Queue what an album walk can take from one place in one go, before the walk starts, and
+    /// say which tracks that covers. Each of those tracks still goes through its own download,
+    /// which takes the queued file first. The base takes nothing, so the walk is song by song.
+    /// </summary>
+    protected virtual Task<IReadOnlyCollection<string>> PrepareAlbumAsync(Album album, IReadOnlyList<Song> tracks,
+        DownloadSource? source, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyCollection<string>>(Array.Empty<string>());
+
+    /// <summary>Called when the walk ends, however it ends: let go of whatever was prepared and
+    /// not used.</summary>
+    protected virtual Task FinishAlbumAsync(IReadOnlyCollection<string> prepared) => Task.CompletedTask;
+
+    /// <summary>
+    /// The album gain and peak, written into every file the walk measured, once the walk ends.
+    /// Only when every track was measured: an album gain for half an album is worse than none.
+    /// A rewrite in place, so the library server keeps each file's id.
+    /// </summary>
+    internal void WriteAlbumGain(AlbumTagContext context, string albumTitle)
+    {
+        if (context.Loudness.IsEmpty) return;
+        var album = ReplayGainTags.ForAlbum(context.Loudness.Values.ToList());
+        if (album is null)
+        {
+            Logger.LogInformation("No album gain for '{Album}': not every track could be measured", albumTitle);
+            return;
+        }
+        foreach (var path in context.Loudness.Keys)
+        {
+            try
+            {
+                if (!IOFile.Exists(path)) continue;
+                using var tagFile = TagLib.File.Create(path);
+                TagWriterExtras.SetReplayGain(tagFile, null, null, album.GainDb, album.Peak);
+                tagFile.Save();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("Could not write the album gain to {Path}: {M}", path, ex.Message);
+            }
+        }
+        Logger.LogInformation("Album gain {Gain} (peak {Peak}) written to {Count} tracks of '{Album}'",
+            album.GainText, album.PeakText, context.Loudness.Count, albumTitle);
     }
 
     /// <summary>
@@ -770,8 +1002,8 @@ public abstract class BaseDownloadService : IDownloadService
     /// track whose star triggered the walk got its own DownloadCompleted.
     /// </summary>
     internal static Octo.Services.Notifications.NotificationEvent? BuildAlbumSummary(
-        Album album, int succeeded, int lossless, int failed)
-        => succeeded + failed == 0 ? null : new Octo.Services.Notifications.NotificationEvent
+        Album album, int succeeded, int lossless, int failed, int kept = 0, int upgrading = 0)
+        => succeeded + failed + kept + upgrading == 0 ? null : new Octo.Services.Notifications.NotificationEvent
         {
             Type = Octo.Services.Notifications.NotificationEventType.AlbumCompleted,
             Artist = album.Artist,
@@ -780,22 +1012,63 @@ public abstract class BaseDownloadService : IDownloadService
             TrackCount = succeeded,
             LosslessCount = lossless,
             FailedCount = failed,
+            KeptCount = kept,
+            UpgradingCount = upgrading,
         };
+
+    /// <summary>
+    /// Whether a lossless copy can be looked for: an owned lossy copy is then queued for Better
+    /// quality rather than kept as it is. That runs through the upgrade sources (Soulseek, Lidarr),
+    /// whichever source this download uses. Without them, as before: this download's own source.
+    /// </summary>
+    private bool SourceCanBeLossless(DownloadSource? sourceOverride) =>
+        OptionalService<Octo.Services.Library.UpgradeSources>()?.Ready
+        ?? (sourceOverride ?? SubsonicSettings.DownloadSource) is DownloadSource.Soulseek or DownloadSource.SoulseekThenYouTube;
+
+    /// <summary>Whether Better quality may run for the person who asked: every gate of the action.</summary>
+    private bool UpgradeAllowed(IReadOnlyList<string>? requestedBy) =>
+        requestedBy is { Count: > 0 } askers
+        && OptionalService<Octo.Services.Library.UpgradeQueue>() is not null
+        && OptionalService<IOptionsMonitor<LibraryActionSettings>>()?.CurrentValue is { } actions
+        && actions.Enabled && !actions.DryRun && actions.IsAllowed(askers[0])
+        && actions.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled);
+
+    private void QueueUpgradeFor(Octo.Services.Library.OwnedCopy owned, Song song, IReadOnlyList<string> requestedBy) =>
+        OptionalService<Octo.Services.Library.UpgradeQueue>()?.Add(
+            [new Octo.Services.Library.UpgradeAsk(owned.NavidromeId!, song.Title, song.Artist, song.Album, owned.Suffix)],
+            requestedBy[0], "heart");
     
     #endregion
     
     #region Common Metadata Writing
     
+    /// <summary>The finalize phase runs under the download lock, so past this it is logged with
+    /// its stage timings. Nothing is cut short beyond the per-stage caps.</summary>
+    private static readonly TimeSpan FinalizeBudget = TimeSpan.FromSeconds(20);
+
+    private ReleaseIdentifier? _identifier;
+
+    /// <summary>Resolved per use like the other services; built on the spot where a host did not
+    /// register one, so placement tests need nothing but the provider they already have.</summary>
+    private ReleaseIdentifier Identifier => _identifier ??= _serviceProvider.GetService<ReleaseIdentifier>()
+        ?? new ReleaseIdentifier(_serviceProvider, Microsoft.Extensions.Logging.Abstractions.NullLogger<ReleaseIdentifier>.Instance);
+
+    /// <summary>Whether a landed file came from the video site's staging folder, whose tags are
+    /// an uploader's and not evidence of anything.</summary>
+    internal static bool IsStagedUpload(string path) =>
+        path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Any(segment => string.Equals(segment, Octo.Services.Soulseek.SoulseekDownloadService.IncomingFolderName, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>
-    /// Writes ID3/Vorbis metadata and cover art to the audio file
+    /// Works out what the file is and sets the Song from it. Every candidate release the
+    /// fingerprint service, the music database and the catalog offer is weighed against what was
+    /// asked for and what landed; a sure match sets the album-level tags, a doubtful one only
+    /// fills blanks, the way the catalog always did. Reads only: the tags are written by
+    /// WriteMetadataAsync once the file has been placed. Best-effort; a miss never breaks the
+    /// download.
     /// </summary>
-    /// <summary>
-    /// Fills any missing metadata on <paramref name="song"/> from Deezer. Existing values win (a
-    /// well-tagged Soulseek FLAC is enriched, not overwritten); Deezer fills the gaps and
-    /// supplies the cover. Reads only: the tags are written by WriteMetadataAsync once the file
-    /// has been placed. Best-effort; a miss never breaks the download.
-    /// </summary>
-    protected async Task EnrichAsync(Song song, string filePath, CancellationToken cancellationToken)
+    protected async Task IdentifyAsync(Song song, RequestedIdentity requested, string filePath,
+        AlbumTagContext? album, CancellationToken cancellationToken)
     {
         // Last.fm/YouTube titles often carry a redundant "Artist - " prefix (e.g.
         // "Radiohead - No Surprises") which mislabels the file, so it goes from the written
@@ -804,55 +1077,192 @@ public abstract class BaseDownloadService : IDownloadService
         // tagged with the studio album's cover, track number and year.
         song.Title = StripArtistPrefix(song.Artist, song.Title);
         var queryTitle = song.Title;
+        var settings = MetadataSettingsValue;
 
+        TagPlan? plan = null;
+        try
+        {
+            var request = ReleaseIdentifier.RequestFor(song, song.Artist, queryTitle, requested.Album, requested.Track);
+            plan = await Identifier.IdentifyAsync(song, request, filePath, !IsStagedUpload(filePath), album, cancellationToken);
+            song.TagPlan = plan;
+
+            if (settings.TagRehearsal) plan.ApplyRehearsalTo(song);
+            else
+            {
+                plan.ApplyTo(song);
+                if (plan.AlbumFromCandidate && plan.Fields.TryGetValue("album", out var chosenAlbum)
+                    && plan.Evidence?.File.Album is { Length: > 0 } fileAlbum
+                    && SongIdentity.Key(fileAlbum) != SongIdentity.Key(chosenAlbum.Value))
+                    Logger.LogInformation("'{Album}' replaces the file's own '{FileAlbum}' ({Confidence})",
+                        chosenAlbum.Value, fileAlbum, plan.Confidence);
+            }
+            FillBlanksFromCatalog(song, plan.CatalogBest);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Identification failed for '{Artist} - {Title}'; filling blanks the old way", song.Artist, song.Title);
+            await FillBlanksFromCatalogAsync(song, queryTitle, cancellationToken);
+        }
+
+        FillAlbumFromFile(song, filePath);
+        ApplySingleFallback(song, settings.AlbumFromTitle);
+
+        if (plan is not null && !settings.TagRehearsal)
+        {
+            if (album is not null)
+            {
+                album.Pin(song);
+                album.Capture(plan, song);
+            }
+            else if (SubsonicSettings.FolderStructure == FolderStructure.Organized)
+                PinToSibling(song, requested, filePath);
+        }
+    }
+
+    /// <summary>The old catalog enrichment, asked for on its own when identification itself failed.</summary>
+    private async Task FillBlanksFromCatalogAsync(Song song, string queryTitle, CancellationToken cancellationToken)
+    {
         try
         {
             var deezer = _serviceProvider.GetService<Octo.Services.Metadata.DeezerMetadataService>();
-            if (deezer != null)
-            {
-                var m = await deezer.EnrichTrackFullAsync(song.Artist, queryTitle, cancellationToken);
-                if (m != null)
-                {
-                    // Deezer's main artist names the folder when the request carried a list of
-                    // credits (#49); its contributors give every credited artist a value of
-                    // their own, so Navidrome files a collaboration under each of them.
-                    if (string.IsNullOrEmpty(song.PrimaryArtist) && !string.IsNullOrEmpty(m.ArtistName)) song.PrimaryArtist = m.ArtistName;
-                    if (song.Artists.Count == 0 && m.Contributors is { Count: > 1 } contributors) song.Artists = contributors.ToList();
-                    if (string.IsNullOrEmpty(song.Album) && !string.IsNullOrEmpty(m.AlbumTitle)) song.Album = m.AlbumTitle;
-                    // The album's own artist, not the track's: the two differ on every feature and
-                    // every compilation.
-                    if (string.IsNullOrEmpty(song.AlbumArtist) && (m.AlbumArtistName ?? m.ArtistName) is { Length: > 0 } albumArtist)
-                        song.AlbumArtist = albumArtist;
-                    if (IsVariousArtists(m.AlbumArtistName)
-                        || string.Equals(m.RecordType, "compile", StringComparison.OrdinalIgnoreCase))
-                        song.IsCompilation = true;
-                    if (string.IsNullOrEmpty(song.CoverArtUrlLarge)) song.CoverArtUrlLarge = m.AlbumCoverUrl;
-                    if (!song.Year.HasValue) song.Year = m.Year;
-                    if (!song.Track.HasValue) song.Track = m.TrackNumber;
-                    if (!song.DiscNumber.HasValue) song.DiscNumber = m.DiscNumber;
-                    if (!song.TotalTracks.HasValue) song.TotalTracks = m.TotalTracks;
-                    if (!song.Duration.HasValue) song.Duration = m.Duration;
-                    if (string.IsNullOrEmpty(song.Genre)) song.Genre = m.Genre;
-                    if (string.IsNullOrEmpty(song.Isrc)) song.Isrc = m.Isrc;
-                    if (string.IsNullOrEmpty(song.Label)) song.Label = m.Label;
-                    if (string.IsNullOrEmpty(song.ReleaseDate)) song.ReleaseDate = m.ReleaseDate;
-                }
-            }
+            if (deezer != null) FillBlanksFromCatalog(song, await deezer.EnrichTrackFullAsync(song.Artist, queryTitle, cancellationToken));
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Deezer enrichment for tagging failed for '{Artist} - {Title}'", song.Artist, song.Title);
         }
-
-        FillAlbumFromFile(song, filePath);
-        ApplySingleFallback(song, MetadataSettingsValue.AlbumFromTitle);
     }
 
-    /// <summary>A source's own album tag beats nothing, and beats filing the track under its title.</summary>
+    /// <summary>
+    /// Fills any missing metadata on <paramref name="song"/> from the catalog's best hit.
+    /// Existing values win (a well-tagged Soulseek FLAC is enriched, not overwritten); the
+    /// catalog fills the gaps and supplies the cover. The album's own facts (its cover, its
+    /// compilation flag) are taken only when the hit is the album the song is filed under,
+    /// since the chooser may have put the song on another release than the catalog's first hit.
+    /// </summary>
+    internal static void FillBlanksFromCatalog(Song song, DeezerMetadataService.FullTrackMeta? m)
+    {
+        if (m is null) return;
+        var sameAlbum = string.IsNullOrEmpty(song.Album) || string.IsNullOrEmpty(m.AlbumTitle)
+            || SongIdentity.Key(song.Album) == SongIdentity.Key(m.AlbumTitle);
+
+        // Deezer's main artist names the folder when the request carried a list of
+        // credits (#49); its contributors give every credited artist a value of
+        // their own, so Navidrome files a collaboration under each of them.
+        if (string.IsNullOrEmpty(song.PrimaryArtist) && !string.IsNullOrEmpty(m.ArtistName)) song.PrimaryArtist = m.ArtistName;
+        if (song.Artists.Count == 0 && m.Contributors is { Count: > 1 } contributors) song.Artists = contributors.ToList();
+        if (string.IsNullOrEmpty(song.Album) && !string.IsNullOrEmpty(m.AlbumTitle)) song.Album = m.AlbumTitle;
+        if (sameAlbum)
+        {
+            // The album's own artist, not the track's: the two differ on every feature and
+            // every compilation.
+            if (string.IsNullOrEmpty(song.AlbumArtist) && (m.AlbumArtistName ?? m.ArtistName) is { Length: > 0 } albumArtist)
+                song.AlbumArtist = albumArtist;
+            if (IsVariousArtists(m.AlbumArtistName)
+                || string.Equals(m.RecordType, "compile", StringComparison.OrdinalIgnoreCase))
+                song.IsCompilation = true;
+            if (string.IsNullOrEmpty(song.CoverArtUrlLarge)) song.CoverArtUrlLarge = m.AlbumCoverUrl;
+            if (!song.Year.HasValue) song.Year = m.Year;
+            if (!song.Track.HasValue) song.Track = m.TrackNumber;
+            if (!song.DiscNumber.HasValue) song.DiscNumber = m.DiscNumber;
+            if (!song.TotalTracks.HasValue) song.TotalTracks = m.TotalTracks;
+            if (string.IsNullOrEmpty(song.Label)) song.Label = m.Label;
+            if (string.IsNullOrEmpty(song.Barcode)) song.Barcode = m.Barcode;
+            if (string.IsNullOrEmpty(song.ReleaseDate)) song.ReleaseDate = m.ReleaseDate;
+        }
+        if (!song.Duration.HasValue) song.Duration = m.Duration;
+        if (string.IsNullOrEmpty(song.Genre)) song.Genre = m.Genre;
+        if (string.IsNullOrEmpty(song.Isrc)) song.Isrc = m.Isrc;
+    }
+
+    /// <summary>
+    /// A single joining an album folder that is already there takes that album's release facts
+    /// from one of its files, when the two agree on the album and its artist, so the album the
+    /// library server shows keeps one label, one catalogue number and one year.
+    /// </summary>
+    private void PinToSibling(Song song, RequestedIdentity requested, string currentPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(song.Album) || string.IsNullOrEmpty(DownloadPath)) return;
+            var choice = ChooseLayout(song, requested, SoulseekSettingsValue.NameFromMatch);
+            var target = PathHelper.BuildLayoutPath(FolderStructure.Organized, DownloadPath,
+                string.IsNullOrWhiteSpace(choice.FolderArtist) ? "Unknown Artist" : choice.FolderArtist,
+                choice.Album, PathHelper.FileTitle(choice.Title, choice.FileArtist), choice.Track, Path.GetExtension(currentPath));
+            var dir = Path.GetDirectoryName(target);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            var sibling = Directory.EnumerateFiles(dir)
+                .FirstOrDefault(file => AudioExtensions.Contains(Path.GetExtension(file))
+                    && !string.Equals(Path.GetFullPath(file), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase));
+            if (sibling is null) return;
+
+            var facts = TagWriterExtras.ReadFacts(sibling, tagsAreEvidence: true);
+            if (SongIdentity.Key(facts.Album) != SongIdentity.Key(song.Album)) return;
+            var albumArtist = song.AlbumArtist ?? song.PrimaryArtist ?? song.Artist;
+            if (!string.IsNullOrEmpty(facts.AlbumArtist) && !string.IsNullOrEmpty(albumArtist)
+                && !SongIdentity.SameArtistName(facts.AlbumArtist, albumArtist)) return;
+
+            if (facts.Year is > 0) song.Year = facts.Year;
+            if (!string.IsNullOrEmpty(facts.Label)) song.Label = facts.Label;
+            if (!string.IsNullOrEmpty(facts.CatalogNumber)) song.CatalogNumber = facts.CatalogNumber;
+            if (!string.IsNullOrEmpty(facts.Barcode)) song.Barcode = facts.Barcode;
+            song.TagPlan?.Notes.Add($"album facts taken from the album folder's own '{Path.GetFileName(sibling)}'");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug("could not read the album folder's sibling for {Path}: {M}", currentPath, ex.Message);
+        }
+    }
+
+    /// <summary>Start measuring a landed file, beside identification, when ReplayGain is on.</summary>
+    private Task<Loudness?>? StartLoudness(string path)
+    {
+        var settings = MetadataSettingsValue;
+        if (!settings.ReplayGain) return null;
+        var meter = _serviceProvider.GetService<ILoudnessMeter>();
+        if (meter is null) return null;
+        return Task.Run(() => meter.MeasureAsync(path, settings.EffectiveReplayGainTimeoutSeconds, CancellationToken.None));
+    }
+
+    /// <summary>Wait for the measurement, which has its own cap, and set the song's ReplayGain.</summary>
+    private async Task ApplyLoudnessAsync(Song song, Task<Loudness?>? measurement, string path)
+    {
+        if (measurement is null) return;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Loudness? loudness = null;
+        try
+        {
+            loudness = await measurement;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug("loudness measurement failed for {Path}: {M}", path, ex.Message);
+        }
+        if (song.TagPlan is { } plan)
+        {
+            plan.StageSeconds["loudness"] = clock.Elapsed.TotalSeconds;
+            plan.IntegratedLufs = loudness?.IntegratedLufs;
+            plan.TruePeakDbfs = loudness?.TruePeakDbfs;
+        }
+        var tags = ReplayGainTags.ForTrack(loudness);
+        if (tags is null)
+        {
+            song.TagPlan?.Notes.Add("the loudness could not be measured, so the file has no ReplayGain");
+            return;
+        }
+        song.ReplayGainTrackGainDb = tags.GainDb;
+        song.ReplayGainTrackPeak = tags.Peak;
+    }
+
+    /// <summary>A source's own album tag beats nothing, and beats filing the track under its title.
+    /// Its compilation flag counts only for that album: a song the chooser filed elsewhere is not
+    /// a compilation because the file it came from was ripped from one.</summary>
     private static void FillAlbumFromFile(Song song, string filePath)
     {
         var (album, albumArtist, compilation) = TagWriterExtras.ReadAlbum(filePath);
-        if (compilation || IsVariousArtists(albumArtist)) song.IsCompilation = true;
+        var sameAlbum = string.IsNullOrWhiteSpace(song.Album) || string.IsNullOrWhiteSpace(album)
+            || SongIdentity.Key(song.Album) == SongIdentity.Key(album);
+        if (sameAlbum && (compilation || IsVariousArtists(albumArtist))) song.IsCompilation = true;
         if (!string.IsNullOrWhiteSpace(song.Album) || string.IsNullOrWhiteSpace(album)) return;
         song.Album = album.Trim();
         if (string.IsNullOrEmpty(song.AlbumArtist) && !string.IsNullOrWhiteSpace(albumArtist))
@@ -904,12 +1314,14 @@ public abstract class BaseDownloadService : IDownloadService
     {
         if (settings.Fallback == GenreFallbackSource.MusicBrainz)
         {
-            // The MusicBrainz option rides the AcoustID lookup's meta= response rather than a
-            // second client. Until that is wired up it behaves as Last.fm and says so, because
-            // a setting that appears to work and silently does nothing is worse than one that
-            // is missing.
+            // The release lookup already carries the genres people voted on for the chosen
+            // release. Two votes or more count, so one person's tag cannot name a genre. With
+            // no votes it behaves as Last.fm and says so, because a setting that appears to work
+            // and silently does nothing is worse than one that is missing.
+            var voted = song.TagPlan?.Details?.TopGenres() ?? [];
+            if (voted.Count > 0) return voted;
             Logger.LogInformation(
-                "MusicBrainz genres are not wired up yet; using Last.fm top tags for {Artist} - {Title}",
+                "MusicBrainz lists no voted genres for {Artist} - {Title}; using Last.fm top tags",
                 song.Artist, song.Title);
         }
 
@@ -1041,29 +1453,46 @@ public abstract class BaseDownloadService : IDownloadService
             if (!string.IsNullOrEmpty(song.Copyright))
                 tagFile.Tag.Copyright = song.Copyright;
             
-            var comments = new List<string>();
-            if (!string.IsNullOrEmpty(song.Isrc))
-                comments.Add($"ISRC: {song.Isrc}");
-            
-            if (comments.Count > 0)
-                tagFile.Tag.Comment = string.Join(" | ", comments);
-
             // What the fingerprint proved (#48), so no later pass has to identify this file
             // again. No album id: Navidrome groups albums by MUSICBRAINZ_ALBUMID before the
             // album name, so one track carrying it beside another without it splits an album.
             // The group id is written only when the album really is that release.
             if (!string.IsNullOrEmpty(song.MusicBrainzRecordingId))
                 TagWriterExtras.SetRecordingId(tagFile, song.MusicBrainzRecordingId);
-            if (!string.IsNullOrEmpty(song.MusicBrainzReleaseGroupId)
-                && Octo.Services.Fingerprint.VerificationResult.AlbumIsFromRelease(song))
-                tagFile.Tag.MusicBrainzReleaseGroupId = song.MusicBrainzReleaseGroupId;
-            if (song.MusicBrainzArtistIds.Count == 1) tagFile.Tag.MusicBrainzArtistId = song.MusicBrainzArtistIds[0];
+            var albumIsRelease = !string.IsNullOrEmpty(song.MusicBrainzReleaseGroupId)
+                && Octo.Services.Fingerprint.VerificationResult.AlbumIsFromRelease(song);
+            if (albumIsRelease) tagFile.Tag.MusicBrainzReleaseGroupId = song.MusicBrainzReleaseGroupId;
+            if (song.MusicBrainzArtistIds.Count > 0) TagWriterExtras.SetMulti(tagFile, TagFields.ArtistId, song.MusicBrainzArtistIds);
+            // The flag is album-level: when the chooser set the album, a peer's stale flag from
+            // the compilation the file was ripped from would file the studio album as one.
             if (song.IsCompilation) TagWriterExtras.SetCompilation(tagFile, true);
+            else if (song.TagPlan is { AlbumFromCandidate: true, Rehearsed: false }) TagWriterExtras.SetCompilation(tagFile, false);
+
+            // The rest of what a release is: its code, its label and catalogue number, its barcode,
+            // its kind and status, where and when it came out, and the ids that name it. The code
+            // has its own field now; the "ISRC: x" comment is no longer written, and a comment the
+            // file arrived with is left alone. Every setter skips an empty value.
+            TagWriterExtras.SetText(tagFile, TagFields.Isrc, SongIdentity.NormalizeIsrc(song.Isrc));
+            TagWriterExtras.SetText(tagFile, TagFields.Label, song.Label);
+            TagWriterExtras.SetText(tagFile, TagFields.CatalogNumber, song.CatalogNumber);
+            TagWriterExtras.SetText(tagFile, TagFields.Barcode, song.Barcode);
+            if (song.ReleaseType is { Length: > 0 } releaseType)
+                TagWriterExtras.SetMulti(tagFile, TagFields.ReleaseType, releaseType.Split("; ", StringSplitOptions.RemoveEmptyEntries));
+            TagWriterExtras.SetText(tagFile, TagFields.ReleaseStatus, song.ReleaseStatus);
+            TagWriterExtras.SetText(tagFile, TagFields.ReleaseCountry, song.ReleaseCountry);
+            TagWriterExtras.SetOriginalDate(tagFile, song.OriginalDate);
+            if (albumIsRelease) TagWriterExtras.SetReleaseTrackId(tagFile, song.MusicBrainzReleaseTrackId);
+            if (albumIsRelease) TagWriterExtras.SetMulti(tagFile, TagFields.AlbumArtistId, song.MusicBrainzAlbumArtistIds);
+            TagWriterExtras.SetText(tagFile, TagFields.FingerprintId, song.AcoustId);
+            TagWriterExtras.SetReplayGain(tagFile, song.ReplayGainTrackGainDb, song.ReplayGainTrackPeak,
+                song.ReplayGainAlbumGainDb, song.ReplayGainAlbumPeak);
             
-            // One chain (#51) instead of one Deezer URL: the Cover Art Archive when a fingerprint
-            // named the release, then the catalog's own cover, then Deezer, iTunes and Last.fm by
-            // name, then the file's own art. A cover that is not square counts as missing, and a
-            // letterboxed video frame gives up its centre.
+            // One chain (#51) instead of one Deezer URL: Apple's master of the album, the Cover
+            // Art Archive when a fingerprint named the release, the catalog's own cover, then
+            // Deezer, iTunes and Last.fm by name, then the file's own art; the largest wins. A
+            // cover that is not square counts as missing, and a letterboxed video frame gives up
+            // its centre. The file gets it at 1500 px unless full size is asked for; cover.jpg
+            // gets it whole.
             try
             {
                 var embedded = tagFile.Tag.Pictures.FirstOrDefault(picture => picture.Type == TagLib.PictureType.FrontCover)
@@ -1076,17 +1505,19 @@ public abstract class BaseDownloadService : IDownloadService
                     chosenCover = cover.Bytes;
                     if (!cover.KeepsExisting)
                     {
+                        var embed = MetadataSettingsValue.EmbedFullSizeCovers ? cover.Bytes
+                            : Octo.Services.CoverArt.CoverImage.FitWithin(cover.Bytes, MetadataSettings.EmbeddedCoverSide);
                         tagFile.Tag.Pictures = new TagLib.IPicture[]
                         {
                             new TagLib.Picture
                             {
                                 Type = TagLib.PictureType.FrontCover,
-                                MimeType = Octo.Services.CoverArt.CoverImage.MimeType(cover.Bytes),
+                                MimeType = Octo.Services.CoverArt.CoverImage.MimeType(embed),
                                 Description = "Cover",
-                                Data = new TagLib.ByteVector(cover.Bytes),
+                                Data = new TagLib.ByteVector(embed),
                             },
                         };
-                        Logger.LogInformation("Cover art embedded from {Source}: {Size} bytes", cover.Source, cover.Bytes.Length);
+                        Logger.LogInformation("Cover art embedded from {Source}: {Size} bytes", cover.Source, embed.Length);
                     }
                 }
             }
@@ -1136,19 +1567,21 @@ public abstract class BaseDownloadService : IDownloadService
     /// cover.jpg only in the Organized layout and only in a folder this download created.
     /// Navidrome ranks cover.* above embedded art, so in Flat every download shares one folder,
     /// in ByArtist one folder holds all of an artist's albums, and in an album folder that was
-    /// already there one new track would change the whole album's cover.
+    /// already there one new track would change the whole album's cover. The one exception is
+    /// a cover.jpg Octo wrote itself, in the Organized layout: a later track of the same album
+    /// that found a larger cover replaces it, so a soft first track does not set the album's
+    /// cover for good.
     /// </summary>
     protected Task WriteSidecarsAsync(Song song, Placement placement, byte[]? cover, CancellationToken ct)
     {
         try
         {
-            if (MetadataSettingsValue.WriteCoverFile && cover is { Length: > 0 } && placement.CreatedFolder
+            if (MetadataSettingsValue.WriteCoverFile && cover is { Length: > 0 }
                 && SubsonicSettings.FolderStructure == FolderStructure.Organized
                 && Path.GetDirectoryName(placement.Path) is { Length: > 0 } dir
-                && !Directory.EnumerateFiles(dir, "cover.*").Any()
-                && !Directory.EnumerateFiles(dir, "folder.*").Any())
+                && Octo.Services.CoverArt.CoverFiles.ShouldWrite(dir, cover, placement.CreatedFolder))
             {
-                IOFile.WriteAllBytes(Path.Combine(dir, "cover.jpg"), Octo.Services.CoverArt.CoverImage.ToJpeg(cover));
+                Octo.Services.CoverArt.CoverFiles.Write(dir, cover);
                 Logger.LogInformation("Wrote cover.jpg beside {Path}", placement.Path);
             }
         }
@@ -1201,6 +1634,23 @@ public abstract class BaseDownloadService : IDownloadService
     };
 
     /// <summary>
+    /// Fail a download whose file is not on disk. Everything after the transfer carries on past a
+    /// missing file (placement keeps the path, tagging logs and moves on), which is how a song was
+    /// recorded as downloaded with 0 bytes and never placed (#69). Throwing marks the request
+    /// Failed, writes no history, and lets the failure notice and any fallback source run.
+    /// </summary>
+    internal static void EnsureOnDisk(string? path)
+    {
+        long length = 0;
+        try { if (!string.IsNullOrEmpty(path) && IOFile.Exists(path)) length = new FileInfo(path).Length; }
+        catch { /* a file that cannot be read is no more use than a missing one */ }
+        if (length > 0) return;
+        throw new FileNotFoundException(string.IsNullOrEmpty(path)
+            ? "The download returned no file"
+            : $"The download returned {path}, but there is no audio there", path);
+    }
+
+    /// <summary>
     /// Move a finished download into the configured layout, named by ChooseLayout.
     ///
     /// Never overwrites a different file. A path that is already taken is replaced only when it
@@ -1214,14 +1664,8 @@ public abstract class BaseDownloadService : IDownloadService
         {
             if (string.IsNullOrEmpty(DownloadPath) || !IOFile.Exists(currentPath)) return new(currentPath, false);
 
-            var choice = ChooseLayout(song, requested, SoulseekSettingsValue.NameFromMatch);
             var structure = SubsonicSettings.FolderStructure;
-            // Flat has no folder to scatter, so its file name keeps the whole credit (#49).
-            var artist = structure == FolderStructure.Flat ? choice.FileArtist : choice.FolderArtist;
-            var target = PathHelper.BuildLayoutPath(structure, DownloadPath,
-                string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist,
-                choice.Album, PathHelper.FileTitle(choice.Title, choice.FileArtist),
-                choice.Track, Path.GetExtension(currentPath));
+            var target = LayoutTarget(song, requested, Path.GetExtension(currentPath));
 
             if (string.Equals(Path.GetFullPath(target), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase))
                 return new(currentPath, false);
@@ -1258,6 +1702,61 @@ public abstract class BaseDownloadService : IDownloadService
         {
             Logger.LogWarning(ex, "Could not place {Path} in the configured layout; leaving it where it landed", currentPath);
             return new(currentPath, false);
+        }
+    }
+
+    /// <summary>Where the configured layout files this song, before any clash is looked at.</summary>
+    private string LayoutTarget(Song song, RequestedIdentity requested, string extension)
+    {
+        var choice = ChooseLayout(song, requested, SoulseekSettingsValue.NameFromMatch);
+        var structure = SubsonicSettings.FolderStructure;
+        // Flat has no folder to scatter, so its file name keeps the whole credit (#49).
+        var artist = structure == FolderStructure.Flat ? choice.FileArtist : choice.FolderArtist;
+        return PathHelper.BuildLayoutPath(structure, DownloadPath,
+            string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist,
+            choice.Album, PathHelper.FileTitle(choice.Title, choice.FileArtist), choice.Track, extension);
+    }
+
+    /// <summary>Move a replacement into the incoming dot folder, which Navidrome never scans.</summary>
+    protected Placement StageReplacement(string landedPath)
+    {
+        var incoming = Path.Combine(DownloadPath, Octo.Services.Soulseek.SoulseekDownloadService.IncomingFolderName);
+        Directory.CreateDirectory(incoming);
+        var staged = Path.Combine(incoming, $"replacement-{Guid.NewGuid():N}{Path.GetExtension(landedPath)}");
+        IOFile.Move(landedPath, staged);
+        TryRemoveEmptyParents(Path.GetDirectoryName(landedPath), DownloadPath);
+        return new(staged, false);
+    }
+
+    /// <summary>
+    /// Give the staged replacement the original's identity, let the library action judge it,
+    /// then move it to the original's folder and name in one rename (W8). Nothing may scan it
+    /// before its tags are final: Navidrome would file it as a new song for good. A refused one
+    /// is deleted here, where no scan ever saw it.
+    /// </summary>
+    protected async Task<Placement> RevealReplacementAsync(Song song, RequestedIdentity requested,
+        string staged, Octo.Services.Library.ReplacementHandoff handoff)
+    {
+        try
+        {
+            Octo.Services.Library.KeptIdentityTags.Apply(staged, handoff.Identity);
+            if (await handoff.BeforeReveal(staged) is { } problem)
+                throw new Octo.Services.Library.ReplacementRejectedException(problem);
+
+            var extension = Path.GetExtension(staged);
+            var target = handoff.TargetFor(extension)
+                ?? PathHelper.ResolveUniquePath(LayoutTarget(song, requested, extension));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            IOFile.Move(staged, target);
+            handoff.RevealedPath = target;
+            handoff.OnRevealed?.Invoke(target);
+            Logger.LogInformation("Placed the replacement where the original was: {Path}", target);
+            return new(target, false);
+        }
+        finally
+        {
+            if (handoff.RevealedPath is null)
+                try { if (IOFile.Exists(staged)) IOFile.Delete(staged); } catch { /* swept after a day */ }
         }
     }
 

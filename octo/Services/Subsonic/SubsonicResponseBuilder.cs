@@ -534,6 +534,9 @@ public partial class SubsonicResponseBuilder
         ["updatedAt"] = Utc(row.UpdatedAt),
         ["error"] = row.Error,
         ["libraryId"] = row.LibraryId,
+        // Added for the app's words beside the ring. Older apps ignore them.
+        ["ahead"] = row.Ahead,
+        ["note"] = row.Note,
     };
 
     private static string Utc(DateTime value) =>
@@ -550,7 +553,7 @@ public partial class SubsonicResponseBuilder
     [
         (AcquisitionsExtension, [AcquisitionsExtensionVersion]),
         (LyricsExtension, [LyricsExtensionVersion]),
-        (LibraryActionsExtension, [LibraryActionsExtensionVersion]),
+        (LibraryActionsExtension, [1, LibraryActionsExtensionVersion]),
         ("songLyrics", [1, 2]),
     ];
 

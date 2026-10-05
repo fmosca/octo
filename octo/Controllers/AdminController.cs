@@ -68,6 +68,11 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<GeneratedPlaylistSettings>? _generatedOpts;
     private readonly Octo.Services.Common.AcquisitionTracker? _acquisitions;
     private readonly LastFmScrobbleService? _lastFmScrobbles;
+    private readonly Octo.Services.Library.QualityUpgradeWorker? _qualityUpgrade;
+    private readonly Octo.Services.Library.LibraryReviewSweepWorker? _reviewSweep;
+    private readonly Octo.Services.Soulseek.ISoulseekLink? _soulseekLink;
+    private readonly Octo.Services.Library.UpgradeQueue? _upgradeQueue;
+    private readonly Octo.Services.Common.DownloadConcurrency? _downloadConcurrency;
 
     public AdminController(
         SettingsFileWriter settings,
@@ -109,8 +114,18 @@ public class AdminController : ControllerBase
         Octo.Services.Library.DuplicateScanWorker? duplicates = null,
         IOptionsMonitor<GeneratedPlaylistSettings>? generatedOpts = null,
         Octo.Services.Common.AcquisitionTracker? acquisitions = null,
-        LastFmScrobbleService? lastFmScrobbles = null)
+        LastFmScrobbleService? lastFmScrobbles = null,
+        Octo.Services.Library.QualityUpgradeWorker? qualityUpgrade = null,
+        Octo.Services.Library.LibraryReviewSweepWorker? reviewSweep = null,
+        Octo.Services.Soulseek.ISoulseekLink? soulseekLink = null,
+        Octo.Services.Library.UpgradeQueue? upgradeQueue = null,
+        Octo.Services.Common.DownloadConcurrency? downloadConcurrency = null)
     {
+        _upgradeQueue = upgradeQueue;
+        _downloadConcurrency = downloadConcurrency;
+        _soulseekLink = soulseekLink;
+        _reviewSweep = reviewSweep;
+        _qualityUpgrade = qualityUpgrade;
         _lastFmScrobbles = lastFmScrobbles;
         _acquisitions = acquisitions;
         _generatedOpts = generatedOpts;
@@ -454,15 +469,8 @@ public class AdminController : ControllerBase
             // on the page cannot read it even if something managed to inject some.
             // Secure only over HTTPS, since this is normally reached over plain HTTP
             // on a LAN and a Secure cookie would simply be dropped there.
-            Response.Cookies.Append(BrowseCookieName, token, new CookieOptions
-            {
-                HttpOnly = true,
-                SameSite = SameSiteMode.Strict,
-                Secure = Request.IsHttps,
-                Path = "/api/admin",
-                MaxAge = BrowseSessionStore.Ttl,
-            });
-            return Ok(new { ok = true });
+            Response.Cookies.Append(BrowseCookieName, token, BrowseCookieOptions());
+            return Ok(new { ok = true, user = req.Username });
         }
         catch (Exception ex)
         {
@@ -481,8 +489,7 @@ public class AdminController : ControllerBase
     {
         // Cookie first (how the admin UI authenticates), header second so the
         // endpoint stays usable from curl or a script without one.
-        var session = Request.Cookies[BrowseCookieName] ?? token;
-        if (!_browseSessions.Validate(session))
+        if (BrowseUser(token) is null)
             return Unauthorized(new { error = "Browse session required." });
 
         var result = _browser.Browse(path);
@@ -522,11 +529,106 @@ public class AdminController : ControllerBase
     /// never sent with the Subsonic traffic Octo proxies.</summary>
     internal const string BrowseCookieName = "octo_browse";
 
+    /// <summary>
+    /// The cookie's terms. Secure only over HTTPS, since this is normally reached over plain HTTP
+    /// on a LAN and a Secure cookie would simply be dropped there. Its age is set again on every
+    /// signed-in request, so the browser keeps it exactly as long as the server keeps the session.
+    /// </summary>
+    private CookieOptions BrowseCookieOptions() => new()
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        Secure = Request.IsHttps,
+        Path = "/api/admin",
+        MaxAge = BrowseSessionStore.Ttl,
+    };
+
+    /// <summary>
+    /// The Navidrome admin this request is signed in as, or null. Cookie first (how the admin UI
+    /// signs in), header second so the endpoints stay usable from curl. A live cookie is renewed.
+    /// </summary>
+    private string? BrowseUser(string? headerToken)
+    {
+        var cookie = Request.Cookies[BrowseCookieName];
+        var user = _browseSessions.UserOf(cookie ?? headerToken);
+        if (user is not null && cookie is not null) Response.Cookies.Append(BrowseCookieName, cookie, BrowseCookieOptions());
+        return user;
+    }
+
+    /// <summary>Who this browser is signed in as, for the dashboard's footer. Never prompts.</summary>
+    [HttpGet("browse/session")]
+    public IActionResult BrowseSession() =>
+        BrowseUser(null) is { } user ? Ok(new { signedIn = true, user }) : Ok(new { signedIn = false });
+
+    /// <summary>Sign this browser out: the session is forgotten and the cookie removed.</summary>
+    [HttpPost("browse/signout")]
+    public IActionResult BrowseSignOut()
+    {
+        _browseSessions.Revoke(Request.Cookies[BrowseCookieName]);
+        Response.Cookies.Delete(BrowseCookieName, new CookieOptions { Path = "/api/admin" });
+        return Ok(new { ok = true });
+    }
+
     /// <summary>The running log of songs Octo has fetched, newest first.</summary>
     [HttpGet("downloads")]
     public IActionResult Downloads()
     {
         return Ok(new { downloads = _history.GetRecent(200) });
+    }
+
+    /// <summary>A file inside the music folder, or an artist and a title, to try the matching on.</summary>
+    public sealed record TagPreviewRequest(string? Path, string? Artist, string? Title, string? Album);
+
+    /// <summary>
+    /// How a song would be matched and tagged, without touching anything. Gated on the browse
+    /// sign-in like the other endpoints that read files, and a path is only ever a file inside
+    /// the music folder, resolved in full, with no link on the way.
+    /// </summary>
+    [HttpPost("tags/preview")]
+    public async Task<IActionResult> PreviewTags([FromBody] TagPreviewRequest request,
+        [FromHeader(Name = "X-Octo-Browse-Token")] string? token, CancellationToken ct)
+    {
+        if (!HasBrowseSession(token))
+            return Unauthorized(new { error = "Sign in with your Navidrome admin account first." });
+        if (HttpContext.RequestServices.GetService<Octo.Services.Tagging.TagPreview>() is not { } preview)
+            return StatusCode(503, new { error = "The matching is not available on this host." });
+
+        string? path = null;
+        if (!string.IsNullOrWhiteSpace(request.Path))
+        {
+            var root = _navIdentity.EffectiveDownloadPath(_config["Library:DownloadPath"] ?? "./downloads");
+            path = ResolveUnderRoot(request.Path, root);
+            if (path is null) return BadRequest(new { error = "The path must be a file inside the music folder." });
+        }
+        else if (string.IsNullOrWhiteSpace(request.Artist) || string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest(new { error = "Give a path inside the music folder, or an artist and a title." });
+
+        return Ok(await preview.PreviewAsync(path, request.Artist, request.Title, request.Album, ct));
+    }
+
+    /// <summary>
+    /// The full path of a file that really sits under the root: no ".." out of it, no path of
+    /// its own, and no link on the way, so the preview cannot be pointed at any other file.
+    /// </summary>
+    internal static string? ResolveUnderRoot(string candidate, string root)
+    {
+        try
+        {
+            var full = System.IO.Path.GetFullPath(candidate);
+            var rootFull = System.IO.Path.GetFullPath(root).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+            var relative = System.IO.Path.GetRelativePath(rootFull, full);
+            if (relative == "." || relative.StartsWith("..", StringComparison.Ordinal) || System.IO.Path.IsPathRooted(relative)) return null;
+
+            var info = new FileInfo(full);
+            if (!info.Exists || info.LinkTarget is not null) return null;
+            for (var dir = info.Directory; dir is not null && dir.FullName.Length > rootFull.Length; dir = dir.Parent)
+                if (dir.LinkTarget is not null) return null;
+            return full;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -602,6 +704,7 @@ public class AdminController : ControllerBase
                 ["AdminUsername"] = subsonic.AdminUsername ?? "",
                 ["AdminPassword"] = MaskSecret(subsonic.AdminPassword),
                 ["EnableSearchDiscovery"] = subsonic.EnableSearchDiscovery,
+                ["WaitForSearchDurations"] = subsonic.WaitForSearchDurations,
                 ["EnableSyncCatalog"] = subsonic.EnableSyncCatalog,
                 ["SyncCatalogClients"] = subsonic.SyncCatalogClients,
                 ["SyncCatalogMaxSongs"] = subsonic.SyncCatalogMaxSongs,
@@ -610,8 +713,12 @@ public class AdminController : ControllerBase
                 ["DownloadOnStar"] = subsonic.DownloadOnStar,
                 ["DownloadAlbumOnStar"] = subsonic.DownloadAlbumOnStar,
                 ["RecordRequestedBy"] = subsonic.RecordRequestedBy,
+                ["StarDownloadsForRequester"] = subsonic.StarDownloadsForRequester,
+                ["SkipOwnedSongs"] = subsonic.SkipOwnedSongs,
                 ["WaitForLosslessOnPlay"] = subsonic.WaitForLosslessOnPlay,
                 ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
+                ["DownloadOnPlay"] = subsonic.DownloadOnPlay,
+                ["LidarrAlbumOnPlay"] = subsonic.LidarrAlbumOnPlay,
                 // These two are rendered by the dashboard but were missing here, so their
                 // fields never pre-filled with the saved value.
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
@@ -639,12 +746,18 @@ public class AdminController : ControllerBase
             {
                 ["PublicUrl"] = _serverOpts.CurrentValue.PublicUrl ?? "",
             },
+            ["Updates"] = new Dictionary<string, object>
+            {
+                ["Check"] = UpdateOptions.Check,
+                ["Repo"] = UpdateOptions.Repo ?? "",
+            },
             ["Soulseek"] = new Dictionary<string, object>
             {
                 ["BaseUrl"] = soulseek.BaseUrl ?? "",
                 ["Username"] = soulseek.Username ?? "",
                 ["Password"] = soulseek.Password ?? "",
                 ["SearchWaitSeconds"] = soulseek.SearchWaitSeconds,
+                ["UpgradeSearchWaitSeconds"] = soulseek.UpgradeSearchWaitSeconds,
                 ["MinFileSizeBytes"] = soulseek.MinFileSizeBytes,
                 ["PreferredExtension"] = soulseek.PreferredExtension,
                 ["DownloadTimeoutSeconds"] = soulseek.DownloadTimeoutSeconds,
@@ -659,6 +772,9 @@ public class AdminController : ControllerBase
                 ["AcoustIdTimeoutSeconds"] = soulseek.AcoustIdTimeoutSeconds,
                 ["DetectTranscodes"] = soulseek.DetectTranscodes,
                 ["TranscodeCheckTimeoutSeconds"] = soulseek.TranscodeCheckTimeoutSeconds,
+                ["OutageHoldHours"] = soulseek.OutageHoldHours,
+                ["ParallelDownloads"] = soulseek.ParallelDownloads,
+                ["AlbumFolders"] = soulseek.AlbumFolders,
                 ["SubmitConfirmedFingerprints"] = soulseek.SubmitConfirmedFingerprints,
                 ["AcoustIdUserApiKey"] = soulseek.AcoustIdUserApiKey ?? "",
             },
@@ -720,9 +836,13 @@ public class AdminController : ControllerBase
                 ["NoticePrefix"] = actions.NoticePrefix ?? "",
                 ["ReviewEnabled"] = actions.ReviewEnabled,
                 ["ReviewPlaylistName"] = actions.ReviewPlaylistName ?? "",
+                ["ReviewSweepPerHour"] = actions.ReviewSweepPerHour,
+                ["ReviewSweepOctoDownloads"] = actions.ReviewSweepOctoDownloads,
                 ["DuplicatesEnabled"] = actions.DuplicatesEnabled,
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
+                ["UpgradePerWeek"] = actions.UpgradePerWeek,
+                ["UpgradeSource"] = actions.UpgradeSource.ToString(),
                 ["NoticeMaxTracks"] = actions.NoticeMaxTracks,
                 ["RatingsScope"] = actions.RatingsScope.ToString(),
                 ["AllowedUsers"] = actions.AllowedUsers ?? [],
@@ -746,10 +866,19 @@ public class AdminController : ControllerBase
                 ["UseCoverArtArchive"] = _metadataOpts.CurrentValue.UseCoverArtArchive,
                 ["ReplaceVideoCovers"] = _metadataOpts.CurrentValue.ReplaceVideoCovers,
                 ["WriteCoverFile"] = _metadataOpts.CurrentValue.WriteCoverFile,
+                ["EmbedFullSizeCovers"] = _metadataOpts.CurrentValue.EmbedFullSizeCovers,
                 ["FetchLyrics"] = _metadataOpts.CurrentValue.FetchLyrics,
                 ["LyricsSources"] = _metadataOpts.CurrentValue.LyricsSources ?? "",
                 ["PreferWordTimedLyrics"] = _metadataOpts.CurrentValue.PreferWordTimedLyrics,
                 ["WriteLyricsBesideAllSongs"] = _metadataOpts.CurrentValue.WriteLyricsBesideAllSongs,
+                ["SaveLyricsTo"] = LyricsSaveTo.Normalize(_metadataOpts.CurrentValue.SaveLyricsTo),
+                ["PreferOriginalAlbum"] = _metadataOpts.CurrentValue.PreferOriginalAlbum,
+                ["YearFromOriginalRelease"] = _metadataOpts.CurrentValue.YearFromOriginalRelease,
+                ["PreferredCountries"] = _metadataOpts.CurrentValue.PreferredCountries ?? "",
+                ["ReleaseDetailsLookup"] = _metadataOpts.CurrentValue.ReleaseDetailsLookup,
+                ["ReplayGain"] = _metadataOpts.CurrentValue.ReplayGain,
+                ["ReplayGainTimeoutSeconds"] = _metadataOpts.CurrentValue.ReplayGainTimeoutSeconds,
+                ["TagRehearsal"] = _metadataOpts.CurrentValue.TagRehearsal,
             },
             ["GeneratedPlaylists"] = new Dictionary<string, object>
             {
@@ -1002,7 +1131,8 @@ public class AdminController : ControllerBase
     /// Session-gated, because it lists filenames and usernames. Read-only: there is deliberately
     /// no endpoint here that deletes a quarantined file or applies an action on demand, since
     /// /api/admin has no authentication of its own and those would be the wrong things to leave
-    /// reachable.
+    /// reachable. The one exception is the Better quality page's upgrade queue, which needs a
+    /// Navidrome admin sign-in and acts as that person, who must be on the allowed list.
     /// </summary>
     [HttpGet("library-actions")]
     public IActionResult GetLibraryActions([FromHeader(Name = "X-Octo-Browse-Token")] string? token)
@@ -1058,6 +1188,7 @@ public class AdminController : ControllerBase
                 entry.Album,
                 state = entry.State.ToString(),
                 entry.Reason,
+                origin = entry.Origin.ToString(),
                 entry.Submitted,
                 entry.CreatedUtc,
                 entry.ResolvedUtc,
@@ -1080,6 +1211,213 @@ public class AdminController : ControllerBase
             return BadRequest(new { error = "Octo needs a Navidrome admin credential to read the whole library." });
         _duplicates.RequestScan();
         return Accepted(new { ok = true, queued = true });
+    }
+
+    /// <summary>The library Review sweep (#72): how far it has got and why it is waiting. Counts only.</summary>
+    [HttpGet("review-sweep")]
+    public IActionResult GetReviewSweep() => _reviewSweep is null
+        ? NotFound(new { error = "The library check is not available." }) : Ok(_reviewSweep.Status());
+
+    [HttpPost("review-sweep/start")]
+    public IActionResult StartReviewSweep()
+    {
+        var settings = _libraryActionOpts.CurrentValue;
+        if (_reviewSweep is null || !settings.Enabled || !settings.ReviewEnabled || settings.EffectiveReviewSweepPerHour == 0)
+            return BadRequest(new { error = "Turn on library actions and Review, and set how many songs an hour to check, first." });
+        _reviewSweep.SetPaused(false);
+        return Accepted(new { ok = true });
+    }
+
+    [HttpPost("review-sweep/pause")]
+    public IActionResult PauseReviewSweep()
+    {
+        if (_reviewSweep is null) return NotFound(new { error = "The library check is not available." });
+        _reviewSweep.SetPaused(true);
+        return Accepted(new { ok = true });
+    }
+
+    /// <summary>Check every song again from the start. Songs already asked about stay answered.</summary>
+    [HttpPost("review-sweep/reset")]
+    public IActionResult ResetReviewSweep()
+    {
+        if (_reviewSweep is null) return NotFound(new { error = "The library check is not available." });
+        _reviewSweep.Reset();
+        return Accepted(new { ok = true });
+    }
+
+    /// <summary>The weekly upgrade's last run and next one. Times and an outcome only, no file or
+    /// person, so the admin request guard is enough, like the duplicate scan.</summary>
+    [HttpGet("quality-upgrade")]
+    public IActionResult GetQualityUpgrade() =>
+        _qualityUpgrade is null ? NotFound() : Ok(_qualityUpgrade.Status());
+
+    private const string SignInFirst = "Sign in with your Navidrome admin account first.";
+
+    // The library's lossy songs, listed from Navidrome. Walking a big library takes a while, so the
+    // answer is kept a few minutes; "refresh" asks again.
+    private static readonly object LossyLock = new();
+    private static (DateTime At, IReadOnlyList<Octo.Services.Library.LibrarySongRow> Rows)? _lossyCache;
+    private static readonly TimeSpan LossyFor = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The Better quality page's list: every song in the library that is not lossless, with whether
+    /// Octo got it from YouTube, when the weekly upgrade last tried it, and any job for it now.
+    /// Session-gated, because it lists paths.
+    /// </summary>
+    [HttpGet("lossy")]
+    public async Task<IActionResult> GetLossy([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
+        [FromQuery] string? refresh, CancellationToken ct)
+    {
+        if (!HasBrowseSession(token)) return Unauthorized(new { error = SignInFirst });
+        if (_qualityUpgrade is null) return NotFound();
+        if (!_navIdentity.HasAdminIdentity)
+            return BadRequest(new { error = "Octo needs a Navidrome admin credential to read the whole library." });
+
+        // "1", "true" or "yes": a bool parameter refused "1" with a bare 400 before this ran.
+        var fresh = refresh?.Trim().ToLowerInvariant() is "1" or "true" or "yes";
+        IReadOnlyList<Octo.Services.Library.LibrarySongRow> rows;
+        lock (LossyLock) rows = !fresh && _lossyCache is { } cached && DateTime.UtcNow - cached.At < LossyFor ? cached.Rows : [];
+        if (rows.Count == 0)
+        {
+            var (songs, complete) = await _qualityUpgrade.ListSongs(ct);
+            if (!complete && songs.Count == 0) return StatusCode(502, new { error = "Navidrome did not list the library." });
+            rows = songs.Where(song => !Octo.Services.Library.DuplicateScanWorker.IsLosslessFile(song.Suffix, song.BitRate)).ToList();
+            lock (LossyLock) _lossyCache = (DateTime.UtcNow, rows);
+        }
+
+        // Octo's own record of what it fetched from YouTube, matched by file name, then by path.
+        var youTube = _history.GetRecent(int.MaxValue)
+            .Where(entry => string.Equals(entry.Source, "YouTube", StringComparison.OrdinalIgnoreCase) && entry.Path.Length > 0)
+            .Select(entry => entry.Path.Replace('\\', '/'))
+            .GroupBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        var tried = _qualityUpgrade.Tried().Attempts;
+        var jobs = (_upgradeQueue?.Snapshot() ?? []).ToDictionary(job => job.NavidromeId, StringComparer.Ordinal);
+
+        return Ok(new
+        {
+            total = rows.Count,
+            songs = rows.Select(row =>
+            {
+                var key = Octo.Services.Library.QualityUpgradeWorker.KeyOf(row);
+                var relative = key[..key.LastIndexOf('|')];
+                var fromYouTube = youTube.TryGetValue(Path.GetFileName(relative), out var named)
+                    && named.Any(path => path.EndsWith("/" + relative, StringComparison.OrdinalIgnoreCase) || path == relative);
+                return new
+                {
+                    id = row.Id, title = row.Title, artist = row.Artist, album = row.Album, suffix = row.Suffix,
+                    bitRate = row.BitRate, size = row.Size, path = relative, fromYouTube, attemptKey = key,
+                    lastTried = tried.TryGetValue(key, out var attempt) ? new { atUtc = attempt.AtUtc, outcome = attempt.Outcome } : null,
+                    job = jobs.TryGetValue(row.Id, out var job) ? new { state = job.State, detail = job.Detail } : null,
+                };
+            }),
+        });
+    }
+
+    /// <summary>The upgrade queue, how many run at once and why, Soulseek's state, and the gate.</summary>
+    [HttpGet("upgrades")]
+    public async Task<IActionResult> GetUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token, CancellationToken ct)
+    {
+        var user = BrowseUser(token);
+        if (user is null) return Unauthorized(new { error = SignInFirst });
+        var live = (_acquisitions?.All() ?? [])
+            .GroupBy(row => $"{row.Provider}:{row.ExternalId}")
+            .ToDictionary(group => group.Key, group => group.First());
+        var reading = _soulseekLink is null ? null : await _soulseekLink.ReadAsync(fresh: false, ct);
+        var (up, warning, detail) = Octo.Services.Soulseek.SoulseekLink.Describe(reading, _soulseekOpts.CurrentValue.EffectiveOutageHoldHours);
+        var settings = _libraryActionOpts.CurrentValue;
+        return Ok(new
+        {
+            jobs = (_upgradeQueue?.Snapshot() ?? []).Select(job =>
+            {
+                // The replacement's own download row, while it runs: which stage, and how far.
+                var row = job.AcquisitionKey is { } key && job.State == Octo.Services.Library.UpgradeStates.Working
+                    ? live.GetValueOrDefault(key) : null;
+                return new
+                {
+                    id = job.NavidromeId, job.Title, job.Artist, job.Album, job.Suffix, job.State, job.Detail, job.RequestedBy,
+                    job.Origin, queuedUtc = job.QueuedUtc, updatedUtc = job.UpdatedUtc, startedUtc = job.StartedUtc,
+                    progress = row?.Progress,
+                    stage = row?.State.ToString(),
+                    source = row?.Source,
+                    bytesDone = row?.BytesDone,
+                    bytesTotal = row?.BytesTotal,
+                    note = row?.Note,
+                    result = job.Result,
+                };
+            }),
+            parallel = _downloadConcurrency?.Current ?? 1,
+            // Where an upgrade looks, and whether that source is set up, so the page never assumes.
+            source = UpgradeSourceName,
+            sourceReady = UpgradeSourceReady,
+            plan = UpgradeSourcesNow?.Plan().Select(Octo.Services.Library.UpgradeSources.Word).ToList()
+                ?? (UpgradeSourceReady ? ["Soulseek"] : []),
+            why = _downloadConcurrency?.Why ?? "One at a time.",
+            soulseek = new { ok = up, warning, detail },
+            gate = new
+            {
+                user,
+                enabled = settings.Enabled,
+                allowed = settings.IsAllowed(user),
+                dryRun = settings.DryRun,
+                betterQuality = settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled),
+            },
+        });
+    }
+
+    public sealed record UpgradeQueueRequest(List<Octo.Services.Library.UpgradeAsk>? Songs);
+    public sealed record UpgradeIdsRequest(List<string>? Ids);
+
+    /// <summary>Most songs one press of the page's button may queue.</summary>
+    internal const int MaxUpgradesPerRequest = 2000;
+
+    /// <summary>
+    /// Queue songs for a higher quality copy, acting as the Navidrome admin signed in on this page.
+    /// Refused unless every gate of the Better quality action is open for that person.
+    /// </summary>
+    [HttpPost("upgrades")]
+    public IActionResult QueueUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
+        [FromBody] UpgradeQueueRequest request)
+    {
+        var user = BrowseUser(token);
+        if (user is null) return Unauthorized(new { error = SignInFirst });
+        if (_upgradeQueue is null) return NotFound();
+        var settings = _libraryActionOpts.CurrentValue;
+        if (!settings.IsAllowed(user))
+            return StatusCode(403, new { error = $"{user} is not on the library actions allowed list, so Octo will not change files for them." });
+        var closed = !UpgradeSourceReady
+                ? $"Better quality looks for copies on {UpgradeSourceName}, which is not set up here."
+            : !settings.Enabled ? "Turn on library actions first."
+            : !settings.EffectiveActions().Any(a => a.Action == LibraryAction.BetterQuality && a.Enabled) ? "Turn on the Better quality action first."
+            : settings.DryRun ? "Library actions only rehearse while dry run is on; turn it off first."
+            : null;
+        if (closed is not null) return BadRequest(new { error = closed });
+        var songs = request.Songs ?? [];
+        if (songs.Count == 0) return BadRequest(new { error = "No songs picked." });
+        if (songs.Count > MaxUpgradesPerRequest)
+            return BadRequest(new { error = $"At most {MaxUpgradesPerRequest} songs at a time." });
+        var (jobs, refused) = _upgradeQueue.Add(songs, user, "page");
+        _logger.LogInformation("{User} queued {Count} songs for higher quality from the dashboard", user, jobs.Count);
+        return Accepted(new { ok = true, queued = jobs.Count, refused });
+    }
+
+    /// <summary>Take back songs that have not started.</summary>
+    [HttpPost("upgrades/cancel")]
+    public IActionResult CancelUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token,
+        [FromBody] UpgradeIdsRequest request)
+    {
+        if (!HasBrowseSession(token)) return Unauthorized(new { error = SignInFirst });
+        if (_upgradeQueue is null) return NotFound();
+        return Ok(new { ok = true, cancelled = _upgradeQueue.Cancel(request.Ids ?? []) });
+    }
+
+    /// <summary>Forget finished jobs.</summary>
+    [HttpPost("upgrades/clear")]
+    public IActionResult ClearUpgrades([FromHeader(Name = "X-Octo-Browse-Token")] string? token)
+    {
+        if (!HasBrowseSession(token)) return Unauthorized(new { error = SignInFirst });
+        if (_upgradeQueue is null) return NotFound();
+        return Ok(new { ok = true, cleared = _upgradeQueue.ClearFinished() });
     }
 
     /// <summary>
@@ -1125,8 +1463,7 @@ public class AdminController : ControllerBase
     /// that rewrites or deletes a tag is gated on this rather than being the second
     /// unauthenticated destructive surface.
     /// </summary>
-    private bool HasBrowseSession(string? headerToken) =>
-        _browseSessions.Validate(Request.Cookies[BrowseCookieName] ?? headerToken);
+    private bool HasBrowseSession(string? headerToken) => BrowseUser(headerToken) is not null;
 
     public sealed record GenreBackfillStartRequest(string? Scope, bool DryRun, string? Confirm);
 
@@ -1327,6 +1664,7 @@ public class AdminController : ControllerBase
                 ["AdminUsername"] = subsonic.AdminUsername ?? "",
                 ["AdminPassword"] = MaskSecret(subsonic.AdminPassword),
                 ["EnableSearchDiscovery"] = subsonic.EnableSearchDiscovery,
+                ["WaitForSearchDurations"] = subsonic.WaitForSearchDurations,
                 ["EnableSyncCatalog"] = subsonic.EnableSyncCatalog,
                 ["SyncCatalogClients"] = subsonic.SyncCatalogClients,
                 ["SyncCatalogMaxSongs"] = subsonic.SyncCatalogMaxSongs,
@@ -1335,8 +1673,12 @@ public class AdminController : ControllerBase
                 ["DownloadOnStar"] = subsonic.DownloadOnStar,
                 ["DownloadAlbumOnStar"] = subsonic.DownloadAlbumOnStar,
                 ["RecordRequestedBy"] = subsonic.RecordRequestedBy,
+                ["StarDownloadsForRequester"] = subsonic.StarDownloadsForRequester,
+                ["SkipOwnedSongs"] = subsonic.SkipOwnedSongs,
                 ["WaitForLosslessOnPlay"] = subsonic.WaitForLosslessOnPlay,
                 ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
+                ["DownloadOnPlay"] = subsonic.DownloadOnPlay,
+                ["LidarrAlbumOnPlay"] = subsonic.LidarrAlbumOnPlay,
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
                 ["HeartDownloadSources"] = new JsonArray(
                     subsonic.EffectiveHeartDownloadSources()
@@ -1366,12 +1708,18 @@ public class AdminController : ControllerBase
             {
                 ["PublicUrl"] = server.PublicUrl ?? "",
             },
+            ["Updates"] = new JsonObject
+            {
+                ["Check"] = UpdateOptions.Check,
+                ["Repo"] = UpdateOptions.Repo ?? "",
+            },
             ["Soulseek"] = new JsonObject
             {
                 ["BaseUrl"] = soulseek.BaseUrl ?? "",
                 ["Username"] = soulseek.Username ?? "",
                 ["Password"] = soulseek.Password ?? "",
                 ["SearchWaitSeconds"] = soulseek.SearchWaitSeconds,
+                ["UpgradeSearchWaitSeconds"] = soulseek.UpgradeSearchWaitSeconds,
                 ["MinFileSizeBytes"] = soulseek.MinFileSizeBytes,
                 ["PreferredExtension"] = soulseek.PreferredExtension,
                 ["DownloadTimeoutSeconds"] = soulseek.DownloadTimeoutSeconds,
@@ -1386,6 +1734,9 @@ public class AdminController : ControllerBase
                 ["AcoustIdTimeoutSeconds"] = soulseek.AcoustIdTimeoutSeconds,
                 ["DetectTranscodes"] = soulseek.DetectTranscodes,
                 ["TranscodeCheckTimeoutSeconds"] = soulseek.TranscodeCheckTimeoutSeconds,
+                ["OutageHoldHours"] = soulseek.OutageHoldHours,
+                ["ParallelDownloads"] = soulseek.ParallelDownloads,
+                ["AlbumFolders"] = soulseek.AlbumFolders,
                 ["SubmitConfirmedFingerprints"] = soulseek.SubmitConfirmedFingerprints,
                 ["AcoustIdUserApiKey"] = soulseek.AcoustIdUserApiKey ?? "",
             },
@@ -1447,9 +1798,13 @@ public class AdminController : ControllerBase
                 ["NoticePrefix"] = actions.NoticePrefix ?? "",
                 ["ReviewEnabled"] = actions.ReviewEnabled,
                 ["ReviewPlaylistName"] = actions.ReviewPlaylistName ?? "",
+                ["ReviewSweepPerHour"] = actions.ReviewSweepPerHour,
+                ["ReviewSweepOctoDownloads"] = actions.ReviewSweepOctoDownloads,
                 ["DuplicatesEnabled"] = actions.DuplicatesEnabled,
                 ["DuplicatesPlaylistName"] = actions.DuplicatesPlaylistName ?? "",
                 ["DuplicatesScanHours"] = actions.DuplicatesScanHours,
+                ["UpgradePerWeek"] = actions.UpgradePerWeek,
+                ["UpgradeSource"] = actions.UpgradeSource.ToString(),
                 ["NoticeMaxTracks"] = actions.NoticeMaxTracks,
                 ["RatingsScope"] = actions.RatingsScope.ToString(),
                 ["AllowedUsers"] = JsonSerializer.SerializeToNode(actions.AllowedUsers ?? [])!,
@@ -1473,10 +1828,19 @@ public class AdminController : ControllerBase
                 ["UseCoverArtArchive"] = _metadataOpts.CurrentValue.UseCoverArtArchive,
                 ["ReplaceVideoCovers"] = _metadataOpts.CurrentValue.ReplaceVideoCovers,
                 ["WriteCoverFile"] = _metadataOpts.CurrentValue.WriteCoverFile,
+                ["EmbedFullSizeCovers"] = _metadataOpts.CurrentValue.EmbedFullSizeCovers,
                 ["FetchLyrics"] = _metadataOpts.CurrentValue.FetchLyrics,
                 ["LyricsSources"] = _metadataOpts.CurrentValue.LyricsSources ?? "",
                 ["PreferWordTimedLyrics"] = _metadataOpts.CurrentValue.PreferWordTimedLyrics,
                 ["WriteLyricsBesideAllSongs"] = _metadataOpts.CurrentValue.WriteLyricsBesideAllSongs,
+                ["SaveLyricsTo"] = LyricsSaveTo.Normalize(_metadataOpts.CurrentValue.SaveLyricsTo),
+                ["PreferOriginalAlbum"] = _metadataOpts.CurrentValue.PreferOriginalAlbum,
+                ["YearFromOriginalRelease"] = _metadataOpts.CurrentValue.YearFromOriginalRelease,
+                ["PreferredCountries"] = _metadataOpts.CurrentValue.PreferredCountries ?? "",
+                ["ReleaseDetailsLookup"] = _metadataOpts.CurrentValue.ReleaseDetailsLookup,
+                ["ReplayGain"] = _metadataOpts.CurrentValue.ReplayGain,
+                ["ReplayGainTimeoutSeconds"] = _metadataOpts.CurrentValue.ReplayGainTimeoutSeconds,
+                ["TagRehearsal"] = _metadataOpts.CurrentValue.TagRehearsal,
             },
             ["GeneratedPlaylists"] = new JsonObject
             {
@@ -1620,21 +1984,25 @@ public class AdminController : ControllerBase
         {
             "Subsonic:Url", "Subsonic:StorageMode", "Subsonic:DownloadMode",
             "Subsonic:DownloadOnStar", "Subsonic:DownloadAlbumOnStar",
-            "Subsonic:RecordRequestedBy",
+            "Subsonic:RecordRequestedBy", "Subsonic:StarDownloadsForRequester",
             "Subsonic:WaitForLosslessOnPlay", "Subsonic:LosslessWaitTimeoutSeconds",
+            "Subsonic:DownloadOnPlay", "Subsonic:LidarrAlbumOnPlay",
             "Subsonic:DownloadSource", "Subsonic:AutoDetectDownloadPath", "Subsonic:LibraryPath",
             "Subsonic:FolderStructure",
             "Subsonic:UseLocalStaging", "Subsonic:ExplicitFilter",
             "Subsonic:CacheDurationHours", "Subsonic:EnableExternalPlaylists",
+            "Subsonic:WaitForSearchDurations", "Subsonic:SkipOwnedSongs",
             "Subsonic:PlaylistsDirectory",
             "Library:DownloadPath",
             "Server:PublicUrl",
+            "Updates:Check", "Updates:Repo",
             "Soulseek:BaseUrl", "Soulseek:Username", "Soulseek:Password",
-            "Soulseek:SearchWaitSeconds", "Soulseek:MinFileSizeBytes",
+            "Soulseek:SearchWaitSeconds", "Soulseek:UpgradeSearchWaitSeconds", "Soulseek:MinFileSizeBytes",
             "Soulseek:PreferredExtension", "Soulseek:DownloadTimeoutSeconds",
             "Soulseek:RejectedPeerTtlDays", "Soulseek:FingerprintSeconds",
             "Soulseek:FingerprintTimeoutSeconds", "Soulseek:AcoustIdTimeoutSeconds",
             "Soulseek:DetectTranscodes", "Soulseek:TranscodeCheckTimeoutSeconds",
+            "Soulseek:OutageHoldHours", "Soulseek:ParallelDownloads", "Soulseek:AlbumFolders",
             "Genre:BackfillMaxConsecutiveFailures", "Genre:BackfillExtensions",
             "LibraryActions:Enabled", "LibraryActions:PlaylistsEnabled",
             "LibraryActions:RatingsEnabled", "LibraryActions:PlaylistPrefix",
@@ -1646,6 +2014,8 @@ public class AdminController : ControllerBase
             "LibraryActions:ReviewPlaylistName", "LibraryActions:NoticeMaxTracks",
             "LibraryActions:RatingsScope", "LibraryActions:DuplicatesEnabled",
             "LibraryActions:DuplicatesPlaylistName", "LibraryActions:DuplicatesScanHours",
+            "LibraryActions:UpgradePerWeek", "LibraryActions:UpgradeSource",
+            "LibraryActions:ReviewSweepPerHour", "LibraryActions:ReviewSweepOctoDownloads",
             "Soulseek:SubmitConfirmedFingerprints", "Soulseek:AcoustIdUserApiKey",
             "Genre:Enabled", "Genre:MaxGenres", "Genre:OnEmpty", "Genre:Fallback",
             "Genre:UnknownLabel", "Genre:Mappings", "Genre:Blocklist",
@@ -1666,9 +2036,12 @@ public class AdminController : ControllerBase
             "LastFm:RefreshIntervalHours",
             "LastFm:MinimumPlays", "LastFm:DiscoveryStations",
             "Metadata:Language", "Metadata:AlbumFromTitle", "Metadata:UseCoverArtArchive",
-            "Metadata:ReplaceVideoCovers", "Metadata:WriteCoverFile",
+            "Metadata:ReplaceVideoCovers", "Metadata:WriteCoverFile", "Metadata:EmbedFullSizeCovers",
             "Metadata:FetchLyrics", "Metadata:LyricsSources", "Metadata:PreferWordTimedLyrics",
-            "Metadata:WriteLyricsBesideAllSongs",
+            "Metadata:WriteLyricsBesideAllSongs", "Metadata:SaveLyricsTo",
+            "Metadata:PreferOriginalAlbum", "Metadata:YearFromOriginalRelease", "Metadata:PreferredCountries",
+            "Metadata:ReleaseDetailsLookup", "Metadata:ReplayGain", "Metadata:ReplayGainTimeoutSeconds",
+            "Metadata:TagRehearsal",
             "GeneratedPlaylists:Enabled", "GeneratedPlaylists:Genres", "GeneratedPlaylists:Decades",
             "GeneratedPlaylists:TrackCount", "GeneratedPlaylists:MaxPerArtist", "GeneratedPlaylists:CreateAt",
             "GeneratedPlaylists:RemoveBelow", "GeneratedPlaylists:MaxPlaylists", "GeneratedPlaylists:RefreshHours",
@@ -1804,8 +2177,16 @@ public class AdminController : ControllerBase
     {
         try
         {
-            var ok = await _slskd.IsReachableAsync(ct);
-            return new ServiceProbe(ok, ok ? "reachable" : "unreachable / auth failed");
+            if (_soulseekLink is null)
+            {
+                var ok = await _slskd.IsReachableAsync(ct);
+                return new ServiceProbe(ok, ok ? "reachable" : "unreachable / auth failed");
+            }
+            // slskd answering is not slskd able to search: it can be up and out of Soulseek.
+            var reading = await _soulseekLink.ReadAsync(fresh: true, ct);
+            var (up, warning, detail) = Octo.Services.Soulseek.SoulseekLink.Describe(reading,
+                _soulseekOpts.CurrentValue.EffectiveOutageHoldHours);
+            return new ServiceProbe(up, detail, Warning: warning);
         }
         catch (Exception ex) { return new ServiceProbe(false, ex.Message); }
     }
@@ -1994,6 +2375,18 @@ public class AdminController : ControllerBase
                 ["SessionKey"] = SecretPlaceholder,
                 ["LastFmUser"] = pair.Value.LastFmUser ?? "",
             })));
+
+    /// <summary>Where Better quality looks, from the one place that decides it.</summary>
+    private Octo.Services.Library.UpgradeSources? UpgradeSourcesNow =>
+        HttpContext?.RequestServices.GetService<Octo.Services.Library.UpgradeSources>();
+
+    private bool UpgradeSourceReady =>
+        UpgradeSourcesNow?.Ready ?? Octo.Services.Library.UpgradeSources.SoulseekSetUp(_soulseekOpts.CurrentValue);
+
+    private string UpgradeSourceName => UpgradeSourcesNow?.Name ?? "Soulseek";
+
+    /// <summary>The Updates section as configured now; read when asked, so a save shows at once.</summary>
+    private UpdateSettings UpdateOptions => _config.GetSection("Updates").Get<UpdateSettings>() ?? new UpdateSettings();
 
     /// <summary>The release this build came from, e.g. "2026.07.29". Falls back to the
     /// assembly version if the informational version was not stamped.</summary>

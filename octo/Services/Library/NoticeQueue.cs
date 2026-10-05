@@ -8,6 +8,9 @@ namespace Octo.Services.Library;
 
 public enum NoticeState { Waiting, Queued, Kept, Acted, Dismissed, Expired }
 
+/// <summary>What raised a question. Download is 0 so every entry written before this loads as one.</summary>
+public enum NoticeOrigin { Download, LibrarySweep }
+
 /// <summary>One question Octo is asking one person about one track.</summary>
 public sealed record NoticeEntry
 {
@@ -28,6 +31,10 @@ public sealed record NoticeEntry
 
     /// <summary>Why verification could not decide, which is what makes an answer submittable.</summary>
     public InconclusiveReason Cause { get; init; }
+
+    /// <summary>A library sweep question is never sent to AcoustID: keeping a file says it is
+    /// fine to keep, not that its tags name the right recording.</summary>
+    public NoticeOrigin Origin { get; init; }
 
     public string? Fingerprint { get; init; }
     public int DurationSeconds { get; init; }
@@ -90,7 +97,8 @@ public sealed class NoticeQueue : IDisposable
     /// already asked about is never asked about again, in any state, which is what stops a
     /// dismissal from being undone by the next download of the same file.
     /// </summary>
-    public bool AddReview(string username, string localPath, Song song, VerificationResult verdict)
+    public bool AddReview(string username, string localPath, Song song, VerificationResult verdict,
+        NoticeOrigin origin = NoticeOrigin.Download)
     {
         var key = ReviewKey(username, localPath);
         lock (_lock)
@@ -111,12 +119,17 @@ public sealed class NoticeQueue : IDisposable
                     InconclusiveReason.NoEntry => "AcoustID has never heard this recording",
                     InconclusiveReason.BelowThreshold => "AcoustID was not sure what this is",
                     InconclusiveReason.SourceDisagreed => $"AcoustID thinks this is {verdict.Describe()}",
+                    InconclusiveReason.SoundsLikeAnother => $"Sounds like {verdict.Describe()}, not what its tags say",
+                    InconclusiveReason.LengthOff =>
+                        $"It runs {Clock(verdict.DurationSeconds)}, but the recording it matched runs {Clock(verdict.Match?.DurationSeconds ?? 0)}",
                     _ => "Octo could not check this download",
                 },
                 Cause = verdict.Reason,
-                Fingerprint = verdict.Fingerprint,
+                Origin = origin,
+                // Dropped for a library question, so a Keep on one can never be submitted.
+                Fingerprint = origin == NoticeOrigin.LibrarySweep ? null : verdict.Fingerprint,
                 DurationSeconds = verdict.DurationSeconds,
-                CandidateRecordingId = verdict.CandidateRecordingId,
+                CandidateRecordingId = origin == NoticeOrigin.LibrarySweep ? null : verdict.CandidateRecordingId,
                 FileFormat = Path.GetExtension(localPath).TrimStart('.').ToLowerInvariant(),
                 NextLookupUtc = DateTime.UtcNow,
             };
@@ -124,6 +137,22 @@ public sealed class NoticeQueue : IDisposable
         }
         MarkDirty();
         return true;
+    }
+
+    private static string Clock(int seconds) =>
+        TimeSpan.FromSeconds(Math.Max(0, seconds)).ToString(seconds >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
+
+    /// <summary>Every file a Review question was ever about, open or answered, for anyone.</summary>
+    public IReadOnlySet<string> ReviewedPaths()
+    {
+        lock (_lock)
+            return _entries.Values.Where(entry => entry.Kind == NoticeKind.Review)
+                .Select(entry => entry.LocalPath).ToHashSet(StringComparer.Ordinal);
+    }
+
+    public int OpenCount(NoticeOrigin origin)
+    {
+        lock (_lock) return _entries.Values.Count(entry => entry.IsOpen && entry.Origin == origin);
     }
 
     public IReadOnlyList<NoticeEntry> ForUser(string username, NoticeKind kind)

@@ -389,6 +389,27 @@ public class NavidromePlaylistApiTests
         Assert.Equal("{\"ids\":[\"a\",\"b\"]}", body);
     }
 
+    [Fact]
+    public async Task ListSongs_ANavidromeThatTimesOut_IsNoAnswer()
+    {
+        // HttpClient reports its own timeout as a cancellation the caller never asked for.
+        var navidrome = new SlowNavidrome();
+        Assert.Null(await Api(navidrome).ListSongsAsync(0, 1000, CancellationToken.None));
+    }
+
+    private sealed class SlowNavidrome : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath == "/auth/login")
+                return Task.FromResult(ReviewFixtures.Json("{\"token\":\"jwt\",\"isAdmin\":true,\"username\":\"admin\"}"));
+            if (!request.RequestUri.AbsolutePath.StartsWith("/api/song", StringComparison.Ordinal))
+                return Task.FromResult(ReviewFixtures.Json("[]"));
+            throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout",
+                new TimeoutException());
+        }
+    }
+
     private sealed class CapturingNavidrome(Action<string> capture) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)

@@ -1,5 +1,7 @@
 using System.Text;
 using System.Threading.Channels;
+using Microsoft.Extensions.Options;
+using Octo.Models.Settings;
 
 namespace Octo.Services.Lyrics;
 
@@ -23,10 +25,13 @@ public sealed record LyricsWrite(LyricsWriteOutcome Outcome, LyricsResult? Resul
 /// shows them line by line, and one that knows &lt;mm:ss.xx&gt; word tags (Navidrome among them,
 /// which turns them into OpenSubsonic word cues) gets the words too.
 ///
-/// A .lrc Octo writes opens with [re:Octo], LRC's own "made by" tag, which every reader skips.
-/// It is how Octo knows a file is its own: an instrumental gets nothing, and a sidecar that
-/// already exists, or lyrics already embedded in the file, are never replaced, except that one
-/// of Octo's own line-timed .lrc files may be upgraded to word timing when asked.
+/// A .lrc Octo writes opens with [re:Octo], LRC's own "made by" tag, which every reader skips,
+/// and so do lyrics Octo writes inside a song (LYRICS_SAVE_TO inside or both). It is how Octo
+/// knows lyrics are its own: an instrumental gets nothing, and lyrics Octo did not write, beside
+/// the song or inside it, are never replaced. Asked to upgrade, Octo looks again for a song whose
+/// lyrics are weaker than the sources would choose now (the song's own lyrics rank like any
+/// source, see LYRICS_SOURCES): its own are replaced, and anyone else's get the better ones
+/// beside them, as a .lrc, which Navidrome serves ahead of lyrics in the tags.
 /// </summary>
 public sealed class LyricsSidecarWriter : BackgroundService
 {
@@ -36,20 +41,31 @@ public sealed class LyricsSidecarWriter : BackgroundService
     /// <summary>The first line of every .lrc Octo writes.</summary>
     public const string OctoMark = "[re:Octo]";
 
-    private static readonly string[] SidecarExtensions = [".lrc", ".txt", ".ttml", ".elrc", ".srt", ".yaml", ".yml"];
     private static readonly UTF8Encoding Utf8NoBom = new(false);
 
     private readonly Channel<LyricsJob> _queue =
         Channel.CreateBounded<LyricsJob>(new BoundedChannelOptions(256) { FullMode = BoundedChannelFullMode.DropWrite });
 
+    /// <summary>How long after lyrics are written inside a song Navidrome is asked to scan, so a
+    /// run of writes asks once.</summary>
+    internal static TimeSpan ScanDelay = TimeSpan.FromSeconds(60);
+
     private readonly LyricsService _lyrics;
     private readonly ILogger<LyricsSidecarWriter> _logger;
+    private readonly IOptionsMonitor<MetadataSettings>? _settings;
+    private readonly IServiceScopeFactory? _scopes;
+    private int _scanPending;
 
-    public LyricsSidecarWriter(LyricsService lyrics, ILogger<LyricsSidecarWriter> logger)
+    public LyricsSidecarWriter(LyricsService lyrics, ILogger<LyricsSidecarWriter> logger,
+        IOptionsMonitor<MetadataSettings>? settings = null, IServiceScopeFactory? scopes = null)
     {
         _lyrics = lyrics;
         _logger = logger;
+        _settings = settings;
+        _scopes = scopes;
     }
+
+    private string SaveTo => LyricsSaveTo.Normalize(_settings?.CurrentValue.SaveLyricsTo);
 
     public bool TryEnqueue(LyricsJob job) => _queue.Writer.TryWrite(job);
 
@@ -76,21 +92,20 @@ public sealed class LyricsSidecarWriter : BackgroundService
         (await WriteAsync(job, upgrade: false, ct)).Outcome;
 
     /// <summary>
-    /// Look the song up and write what was found. With <paramref name="upgrade"/>, a line-timed
-    /// .lrc that Octo wrote is looked up again and replaced when word timing turns up; any other
-    /// existing lyrics stay as they are.
+    /// Look the song up and save what was found. A song that already has lyrics is left alone,
+    /// unless <paramref name="upgrade"/>: then it is looked up with its own lyrics ranked among
+    /// the sources, and better ones are saved (see the class summary for where).
     /// </summary>
     internal async Task<LyricsWrite> WriteAsync(LyricsJob job, bool upgrade, CancellationToken ct)
     {
         if (!File.Exists(job.AudioPath)) return new(LyricsWriteOutcome.Gone, null);
-
-        var stem = Stem(job.AudioPath);
-        var upgrading = upgrade && IsOctosLineTimedLrc(stem + ".lrc");
-        if (!upgrading && (SidecarExtensions.Any(extension => File.Exists(stem + extension)) || HasEmbeddedLyrics(job.AudioPath)))
+        var has = SongLyrics.Of(job.AudioPath);
+        if (has.Where != SongLyricsPlace.None && (!upgrade || has.Timing == LyricsTiming.Word || has.Unknown))
             return new(LyricsWriteOutcome.AlreadyThere, null);
 
         var lookup = await _lyrics.FindAsync(
-            new LyricsQuery(job.Artist, job.Title, job.Album, job.DurationSeconds ?? ReadDuration(job.AudioPath)), ct);
+            new LyricsQuery(job.Artist, job.Title, job.Album, job.DurationSeconds ?? ReadDuration(job.AudioPath)), ct,
+            has.Timing);
         if (lookup.Transient)
         {
             if (job.Attempt < MaxAttempts) return new(LyricsWriteOutcome.Retrying, null);
@@ -99,12 +114,13 @@ public sealed class LyricsSidecarWriter : BackgroundService
             return new(LyricsWriteOutcome.GaveUp, null);
         }
 
-        if (upgrading)
+        if (has.Where != SongLyricsPlace.None)
         {
-            if (lookup.Result is not { Timing: LyricsTiming.Word } better) return new(LyricsWriteOutcome.AlreadyThere, null);
-            await WriteFileAsync(stem, better, ct);
-            _logger.LogInformation("Lyrics for '{Artist} - {Title}' upgraded to word timing from {Source}",
-                job.Artist, job.Title, better.Source);
+            if (lookup.Result is not { IsSongsOwn: false } better || better.Timing <= has.Timing
+                || !await SaveAsync(job.AudioPath, better, ct))
+                return new(LyricsWriteOutcome.AlreadyThere, null);
+            _logger.LogInformation("Lyrics for '{Artist} - {Title}' upgraded from {Was} to {Now} from {Source}",
+                job.Artist, job.Title, has.Timing, better.Timing, better.Source);
             return new(LyricsWriteOutcome.Upgraded, better);
         }
 
@@ -114,8 +130,8 @@ public sealed class LyricsSidecarWriter : BackgroundService
                 _logger.LogInformation("{Source} says '{Artist} - {Title}' is instrumental; no lyrics file",
                     instrumental.Source, job.Artist, job.Title);
                 return new(LyricsWriteOutcome.Instrumental, instrumental);
-            case { } found when found.HasSynced || found.HasPlain:
-                await WriteFileAsync(stem, found, ct);
+            case { IsSongsOwn: false } found when found.HasSynced || found.HasPlain:
+                if (!await SaveAsync(job.AudioPath, found, ct)) return new(LyricsWriteOutcome.AlreadyThere, null);
                 _logger.LogInformation("Lyrics for '{Artist} - {Title}' from {Source} ({Timing})",
                     job.Artist, job.Title, found.Source, found.Timing.ToString().ToLowerInvariant());
                 return new(LyricsWriteOutcome.Written, found);
@@ -125,21 +141,106 @@ public sealed class LyricsSidecarWriter : BackgroundService
         }
     }
 
+    /// <summary>What the sources find for a song, its own lyrics ranked among them, without
+    /// saving anything: the lyrics page's preview.</summary>
+    internal Task<LyricsLookup> LookUpAsync(LyricsJob job, LyricsTiming songsOwn, CancellationToken ct) =>
+        _lyrics.FindAsync(new LyricsQuery(job.Artist, job.Title, job.Album, job.DurationSeconds ?? ReadDuration(job.AudioPath)),
+            ct, songsOwn);
+
     /// <summary>
-    /// Replace a song's lyrics file with lyrics someone chose. Only where Octo may write: no
-    /// lyrics file yet, or one Octo wrote; a file the owner put there is never touched.
+    /// Replace a song's lyrics with lyrics someone chose. Only where Octo may write: where the
+    /// song has no lyrics, or only Octo's; lyrics the owner put there are never touched.
     /// </summary>
     internal async Task<bool> ReplaceAsync(string audioPath, LyricsResult chosen, CancellationToken ct)
     {
         if (!File.Exists(audioPath) || (!chosen.HasSynced && !chosen.HasPlain)) return false;
+        var has = SongLyrics.Of(audioPath);
+        if (has.Where != SongLyricsPlace.None && !has.Octos) return false;
+        return await SaveAsync(audioPath, chosen, ct);
+    }
+
+    /// <summary>
+    /// Save lyrics where LYRICS_SAVE_TO says, replacing only Octo's own. Where that is not
+    /// allowed (inside a song whose tags hold someone else's lyrics), they go beside it instead,
+    /// which takes nothing away. False when there was nowhere to put them.
+    /// </summary>
+    private async Task<bool> SaveAsync(string audioPath, LyricsResult found, CancellationToken ct,
+        Action<string, string, string?>? record = null)
+    {
         var stem = Stem(audioPath);
-        var octos = IsOctos(stem + ".lrc");
-        var others = SidecarExtensions.Where(extension => !(octos && extension == ".lrc"))
-            .Any(extension => File.Exists(stem + extension));
-        if (others || HasEmbeddedLyrics(audioPath)) return false;
-        if (octos) File.Delete(stem + ".lrc");
-        await WriteFileAsync(stem, chosen, ct);
-        return true;
+        var saveTo = SaveTo;
+        var inside = saveTo != LyricsSaveTo.Beside && SongLyrics.MayWriteInside(audioPath);
+        var beside = saveTo != LyricsSaveTo.Inside || !inside;
+        var saved = false;
+        if (inside)
+        {
+            record?.Invoke(audioPath, LyricsUndoJournal.Inside, ReadTagLyrics(audioPath));
+            if (WriteInside(audioPath, found))
+            {
+                saved = true;
+                ScanSoon();
+            }
+        }
+        if (beside && SongLyrics.MayWriteBeside(stem, found.HasSynced))
+        {
+            var target = stem + (found.HasSynced ? ".lrc" : ".txt");
+            record?.Invoke(target, LyricsUndoJournal.Beside, File.Exists(target) ? await File.ReadAllTextAsync(target, ct) : null);
+            await WriteFileAsync(stem, found, ct);
+            saved = true;
+        }
+        return saved;
+    }
+
+    /// <summary>
+    /// Save lyrics someone picked on the lyrics page, where LYRICS_SAVE_TO says and Octo may
+    /// write, telling <paramref name="record"/> what each write replaces (path, kind, what was
+    /// there) before it happens. False when there was nowhere Octo may write.
+    /// </summary>
+    internal Task<bool> SaveChosenAsync(string audioPath, LyricsResult found, Action<string, string, string?> record,
+        CancellationToken ct) => SaveAsync(audioPath, found, ct, record);
+
+    /// <summary>
+    /// Put back what one Save replaced. A file Octo added is removed, and only while it is still
+    /// Octo's; lyrics in a song's tags go back only while the tags hold Octo's. False when the
+    /// file has changed since, and was left alone.
+    /// </summary>
+    internal bool Restore(LyricsUndoJournal.Entry entry)
+    {
+        try
+        {
+            if (entry.Kind == LyricsUndoJournal.Inside)
+            {
+                if (!File.Exists(entry.Path) || !SongLyrics.MayWriteInside(entry.Path)) return false;
+                using var file = TagLib.File.Create(entry.Path);
+                file.Tag.Lyrics = entry.Before;
+                file.Save();
+                ScanSoon();
+                return true;
+            }
+            var ours = entry.Path.EndsWith(".lrc", StringComparison.OrdinalIgnoreCase) ? IsOctos(entry.Path) : File.Exists(entry.Path);
+            if (!ours) return false;
+            if (entry.Before is null) File.Delete(entry.Path);
+            else File.WriteAllText(entry.Path, entry.Before, Utf8NoBom);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not put back the lyrics of {Path}: {M}", entry.Path, ex.Message);
+            return false;
+        }
+    }
+
+    private static string? ReadTagLyrics(string audioPath)
+    {
+        try
+        {
+            using var file = TagLib.File.Create(audioPath);
+            return string.IsNullOrEmpty(file.Tag.Lyrics) ? null : file.Tag.Lyrics;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task WriteFileAsync(string stem, LyricsResult found, CancellationToken ct)
@@ -149,6 +250,48 @@ public sealed class LyricsSidecarWriter : BackgroundService
                 OctoMark + "\n" + found.Synced!.Replace("\r\n", "\n").Trim() + "\n", Utf8NoBom, ct);
         else
             await File.WriteAllTextAsync(stem + ".txt", found.Plain!.Replace("\r\n", "\n").Trim() + "\n", Utf8NoBom, ct);
+    }
+
+    /// <summary>The lyrics in the song's own tags, marked as Octo's. False when the file could
+    /// not be written.</summary>
+    private bool WriteInside(string audioPath, LyricsResult found)
+    {
+        try
+        {
+            using var file = TagLib.File.Create(audioPath);
+            var text = found.HasSynced ? found.Synced! : found.Plain!;
+            file.Tag.Lyrics = OctoMark + "\n" + text.Replace("\r\n", "\n").Trim();
+            file.Save();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not write lyrics inside {Path}: {M}", audioPath, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>Navidrome reads a song's tags only when it scans, so one scan is asked for a
+    /// little after lyrics are written inside, once for a run of them.</summary>
+    private void ScanSoon()
+    {
+        if (_scopes is null || Interlocked.Exchange(ref _scanPending, 1) == 1) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(ScanDelay);
+                Interlocked.Exchange(ref _scanPending, 0);
+                using var scope = _scopes.CreateScope();
+                await scope.ServiceProvider.GetRequiredService<Octo.Services.Local.ILocalLibraryService>()
+                    .TriggerLibraryScanAsync();
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Exchange(ref _scanPending, 0);
+                _logger.LogDebug("Scan after writing lyrics inside songs failed: {M}", ex.Message);
+            }
+        });
     }
 
     private static string Stem(string audioPath) =>
@@ -169,19 +312,6 @@ public sealed class LyricsSidecarWriter : BackgroundService
         }
     }
 
-    internal static bool IsOctosLineTimedLrc(string lrcPath)
-    {
-        if (!IsOctos(lrcPath)) return false;
-        try
-        {
-            return !LyricsText.HasWordTags(File.ReadAllText(lrcPath));
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private async Task RetryLaterAsync(LyricsJob job, CancellationToken ct)
     {
         try
@@ -190,19 +320,6 @@ public sealed class LyricsSidecarWriter : BackgroundService
             TryEnqueue(job);
         }
         catch (OperationCanceledException) { /* shutting down */ }
-    }
-
-    internal static bool HasEmbeddedLyrics(string path)
-    {
-        try
-        {
-            using var file = TagLib.File.Create(path);
-            return !string.IsNullOrWhiteSpace(file.Tag.Lyrics);
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private static int? ReadDuration(string path)

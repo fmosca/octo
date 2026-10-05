@@ -56,6 +56,12 @@ public sealed record NotificationEvent
     public int? LosslessCount { get; init; }
     public int? FailedCount { get; init; }
 
+    /// <summary>Songs of the album already in the library, kept as they were.</summary>
+    public int? KeptCount { get; init; }
+
+    /// <summary>Owned songs that were lossy, queued for a higher quality copy instead.</summary>
+    public int? UpgradingCount { get; init; }
+
     /// <summary>
     /// Who asked for this, when Octo could tell. Empty for an acquisition Octo started
     /// itself, and for every event when the setting is off.

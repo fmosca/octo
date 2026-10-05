@@ -84,6 +84,8 @@ builder.Services.Configure<ServerSettings>(
     builder.Configuration.GetSection("Server"));
 builder.Services.Configure<ListenBrainzSettings>(
     builder.Configuration.GetSection("ListenBrainz"));
+builder.Services.Configure<UpdateSettings>(
+    builder.Configuration.GetSection("Updates"));
 // Listens are records of plays that already happened; a slow ListenBrainz must not
 // hold a scrobble response or a radio stream, so the client is short-fused.
 builder.Services.AddHttpClient(Octo.Services.ListenBrainz.ListenBrainzService.ClientName,
@@ -115,6 +117,15 @@ builder.Services.AddHostedService<LastFmRadioRefreshWorker>();
 
 // Soulseek (FLAC source) + YouTube (instant-preview stream source).
 builder.Services.AddSingleton<SoulseekClient>();
+// slskd's Soulseek login, read live, for the dashboard and for downloads that wait out an outage.
+builder.Services.AddSingleton<SoulseekLink>();
+builder.Services.AddSingleton<ISoulseekLink>(sp => sp.GetRequiredService<SoulseekLink>());
+// How many downloads transfer at once: one until slskd has put a download in its own folder.
+builder.Services.AddSingleton<Octo.Services.Common.DownloadConcurrency>();
+// Hearts waiting for Soulseek, on disk beside the other state files so a restart keeps them.
+builder.Services.AddSingleton(sp => new Octo.Services.Common.SoulseekHoldStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "soulseek-holds.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Common.SoulseekHoldStore>>()));
 builder.Services.AddSingleton<YouTubeResolver>();
 
 // Two named HTTP clients for the yt-dlp shim:
@@ -147,7 +158,10 @@ builder.Services.AddSingleton<Octo.Services.Admin.DirectoryBrowser>();
 // Singleton so browse tokens survive between requests; they are in-memory only,
 // so a restart ends every browse session, which is the right trade for a token
 // that grants filesystem visibility.
-builder.Services.AddSingleton<Octo.Services.Admin.BrowseSessionStore>();
+// Dashboard sign-ins, remembered per browser across restarts; only token hashes are written.
+builder.Services.AddSingleton(sp => new Octo.Services.Admin.BrowseSessionStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "browse-sessions.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Admin.BrowseSessionStore>>()));
 builder.Services.AddSingleton<Octo.Services.Metadata.DeezerMetadataService>();
 
 // Deezer's public API allows roughly 50 requests per 5 seconds and signals refusal with
@@ -184,6 +198,19 @@ builder.Services.AddSingleton<Octo.Services.Metadata.GenreBackfillWorker>();
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<Octo.Services.Metadata.GenreBackfillWorker>());
 
+// The cover upgrade: same shape as the genre backfill. Its journal keeps every replaced
+// picture (once per distinct picture, in cover-backups/) so a run can be undone.
+builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.CoverUpgradeStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "cover-upgrade.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.CoverArt.CoverUpgradeStore>>()));
+builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.CoverUpgradeJournal(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "cover-upgrade-journal.jsonl"),
+    sp.GetRequiredService<ILogger<Octo.Services.CoverArt.CoverUpgradeJournal>>()));
+builder.Services.AddSingleton<Octo.Services.CoverArt.IAlbumCoverFinder, Octo.Services.CoverArt.AlbumCoverFinder>();
+builder.Services.AddSingleton<Octo.Services.CoverArt.CoverUpgradeWorker>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<Octo.Services.CoverArt.CoverUpgradeWorker>());
+
 // Resolves a Navidrome song id to a verified file on disk. Read-only and non-destructive on
 // its own; it exists first because nothing that acts on a library file can be trusted until
 // this is proven against a real library.
@@ -192,6 +219,8 @@ builder.Services.AddSingleton<Octo.Services.Library.NavidromeSongPathResolver>()
 // Recovery before anything that needs recovering from: the quarantine and the journal land
 // with the settings, and only then does anything act on a library file.
 builder.Services.AddSingleton<Octo.Services.Library.LibraryActionQuarantine>();
+// Where Better quality looks: Soulseek, Lidarr, or both in that order.
+builder.Services.AddSingleton<Octo.Services.Library.UpgradeSources>();
 builder.Services.AddSingleton<Octo.Services.Library.LibraryActionExecutor>();
 // Scoped, because SubsonicProxyService is: it depends on IHttpContextAccessor.
 builder.Services.AddScoped<Octo.Services.Library.LibraryActionPlaylistProvisioner>();
@@ -225,6 +254,50 @@ builder.Services.AddSingleton(sp => new Octo.Services.Library.GeneratedPlaylistS
     sp.GetRequiredService<ILogger<Octo.Services.Library.GeneratedPlaylistService>>()));
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<Octo.Services.Library.DuplicateScanWorker>());
+// The weekly quality upgrade (#70). What it tried is kept by file, beside the other state files.
+builder.Services.AddSingleton(sp => new Octo.Services.Library.QualityUpgradeStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "quality-upgrade.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.QualityUpgradeStore>>()));
+builder.Services.AddSingleton<Octo.Services.Library.QualityUpgradeWorker>();
+// Songs asked to be found in higher quality, from the apps and the Better quality page.
+builder.Services.AddSingleton(sp => new Octo.Services.Library.UpgradeQueue(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "upgrades.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.UpgradeQueue>>()));
+builder.Services.AddSingleton<Octo.Services.Library.UpgradeWorker>();
+// Whether a newer Octo release is out, and the files that hand Update now to the host helper.
+builder.Services.AddHttpClient(Octo.Services.Updates.ReleaseCheck.ClientName, c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton(sp => new Octo.Services.Updates.ReleaseCheck(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "update", "release.json"),
+    sp.GetRequiredService<IHttpClientFactory>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<UpdateSettings>>(),
+    sp.GetRequiredService<ILogger<Octo.Services.Updates.ReleaseCheck>>()));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Updates.ReleaseCheck>());
+builder.Services.AddSingleton(sp => new Octo.Services.Updates.UpdateHost(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "update"),
+    sp.GetRequiredService<ILogger<Octo.Services.Updates.UpdateHost>>()));
+// Whether a song is already in the library, so nothing downloads a second copy.
+builder.Services.AddSingleton<Octo.Services.Library.LibraryOwnership>();
+// Asked before a heart goes anywhere: a song already in the library is favorited, not fetched.
+builder.Services.AddSingleton<Octo.Services.Library.HeartOwnership>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.UpgradeWorker>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.QualityUpgradeWorker>());
+// The library Review sweep (#72): asks about music that was already there, a few songs an hour,
+// only while nothing downloads. Off until LibraryActions:ReviewSweepPerHour is set.
+builder.Services.AddSingleton(sp => new Octo.Services.Library.ReviewSweepStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "review-sweep.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.ReviewSweepStore>>()));
+builder.Services.AddSingleton(sp => new Octo.Services.Library.LibraryReviewSweepWorker(
+    sp.GetRequiredService<Octo.Services.Library.ReviewSweepStore>(),
+    sp.GetRequiredService<Octo.Services.Library.NoticeQueue>(),
+    new Octo.Services.Library.FingerprintSweepVerifier(sp),
+    sp.GetRequiredService<Octo.Services.Common.IAcquisitionActivity>(),
+    sp.GetRequiredService<ILocalLibraryService>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<LibraryActionSettings>>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<SubsonicSettings>>(),
+    // The resolver's root, the same one review actions resolve inside.
+    () => sp.GetRequiredService<Octo.Services.Library.NavidromeSongPathResolver>().MusicRoot(),
+    sp.GetRequiredService<ILogger<Octo.Services.Library.LibraryReviewSweepWorker>>()));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Library.LibraryReviewSweepWorker>());
 builder.Services.AddHttpClient(Octo.Services.Fingerprint.MusicBrainzClient.ClientName, c =>
 {
     c.BaseAddress = new Uri("https://musicbrainz.org/ws/2/");
@@ -233,6 +306,9 @@ builder.Services.AddHttpClient(Octo.Services.Fingerprint.MusicBrainzClient.Clien
 });
 builder.Services.AddSingleton<Octo.Services.Fingerprint.MusicBrainzClient>();
 
+builder.Services.AddSingleton<Octo.Services.Audio.ILoudnessMeter, Octo.Services.Audio.LoudnessMeter>();
+builder.Services.AddSingleton<Octo.Services.Tagging.ReleaseIdentifier>();
+builder.Services.AddSingleton<Octo.Services.Tagging.TagPreview>();
 builder.Services.AddSingleton<Octo.Services.Fingerprint.AudioFingerprinter>();
 builder.Services.AddSingleton<Octo.Services.Fingerprint.SpectrumAnalyzer>();
 
@@ -264,7 +340,13 @@ builder.Services.AddSingleton<IMusicMetadataService, SoulseekMetadataService>();
 builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
 builder.Services.AddSingleton<LidarrClient>();
 builder.Services.AddSingleton<ILidarrHeartAcquisitionService, LidarrHeartAcquisitionService>();
+// Lidarr as a source for one song at a time (Better quality, wrong song), and which albums a
+// heart or an upgrade is working on, so the two never share one.
+builder.Services.AddSingleton<Octo.Services.Lidarr.LidarrAlbumClaims>();
+builder.Services.AddSingleton<Octo.Services.Lidarr.LidarrImportHandoff>();
+builder.Services.AddSingleton<Octo.Services.Lidarr.ILidarrTrackFetcher, Octo.Services.Lidarr.LidarrTrackFetcher>();
 builder.Services.AddSingleton<HeartAcquisitionCoordinator>();
+builder.Services.AddHostedService<Octo.Services.Common.SoulseekHoldResumer>();
 
 // Discovery results are built once per query and shared. Clients fire several search
 // calls for one typed query, and they all resolve to the same routing objects, so without
@@ -278,18 +360,26 @@ builder.Services.AddSingleton<Octo.Services.Subsonic.SearchSongOrderCache>();
 // Who a request is from when it signs in with an API key and so carries no username.
 builder.Services.AddSingleton<Octo.Services.Subsonic.RequestIdentity>();
 
+// Checks a sign-in with Navidrome before Octo fetches or plays an outside song for it.
+builder.Services.AddSingleton<Octo.Services.Subsonic.CredentialCheck>();
+
 // Completed plays each listener reported lately, so one sent twice is learned from once.
 builder.Services.AddSingleton<Octo.Services.Subsonic.RecentScrobbles>();
 
 // Permanent-copy fetches run here, never inside the request that asked for one. A client
 // giving up on a slow play must not cancel a transfer slskd is going to finish anyway.
 builder.Services.AddSingleton<Octo.Services.Common.TrackAcquisitionQueue>();
+// Whether anything is downloading, for the background library jobs that wait until nothing is.
+builder.Services.AddSingleton<Octo.Services.Common.IAcquisitionActivity>(sp =>
+    new Octo.Services.Common.AcquisitionActivity(sp));
 builder.Services.AddHostedService<Octo.Services.Common.AcquisitionWorker>();
 
 // Where each hearted download has got to, for the app's progress ring (getAcquisitions) and
 // the dashboard. In memory only; it watches the pipeline and never steers it.
 builder.Services.AddSingleton(sp => new Octo.Services.Common.AcquisitionTracker(
     sp.GetRequiredService<ILogger<Octo.Services.Common.AcquisitionTracker>>(), sp));
+// Favorites a starred outside song for whoever starred it once Navidrome shows it (#71).
+builder.Services.AddSingleton<Octo.Services.Common.StarOnArrival>();
 
 // Long enough for an already-downloaded file to finish being tagged and registered, and
 // no longer: sizing this for the transfer itself would tax every restart for a benefit
@@ -325,7 +415,13 @@ builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.CoverArtService(
 // all out via IEnumerable<ICoverArtSource> and queries them sequentially —
 // adding/removing a source is a one-line registration change here.
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.DeezerCoverArtLookup>();
-builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.ITunesCoverArtLookup>();
+// Registered as itself too: downloads and the cover upgrade ask it for an album's master.
+builder.Services.AddSingleton(sp => new Octo.Services.CoverArt.ITunesCoverArtLookup(
+    sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<ILogger<Octo.Services.CoverArt.ITunesCoverArtLookup>>(),
+    // Matches survive a restart, so a library is not sent back to Apple album by album.
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "itunes-masters.json")));
+builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource>(sp =>
+    sp.GetRequiredService<Octo.Services.CoverArt.ITunesCoverArtLookup>());
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.LastFmCoverArtLookup>();
 builder.Services.AddSingleton<Octo.Services.CoverArt.CoverArtAggregator>();
 
@@ -375,6 +471,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Lyri
 builder.Services.AddSingleton(sp => new Octo.Services.Lyrics.LyricsLibraryStore(
     System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "lyrics-library.json"),
     sp.GetRequiredService<ILogger<Octo.Services.Lyrics.LyricsLibraryStore>>()));
+// What the lyrics page's Save wrote over, so Undo can put it back.
+builder.Services.AddSingleton(new Octo.Services.Lyrics.LyricsUndoJournal(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "lyrics-undo.jsonl")));
 builder.Services.AddSingleton<Octo.Services.Lyrics.LyricsLibraryWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Octo.Services.Lyrics.LyricsLibraryWorker>());
 
@@ -394,6 +493,10 @@ var app = builder.Build();
 // Resolved here so it snapshots the values this process actually started with, before the
 // dashboard or first-run automation can change anything.
 app.Services.GetRequiredService<Octo.Services.Admin.RestartTracker>();
+
+// Built now rather than on the first Subsonic request, so it is already listening when the
+// first download finishes.
+app.Services.GetRequiredService<Octo.Services.Common.StarOnArrival>();
 
 // The first list cover loads the fonts and finds the system's fallbacks, which takes a second
 // or two; done here in the background so no client waits for it.

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -19,6 +20,12 @@ public class SoulseekClient
     private string? _jwt;
     private DateTime _jwtExpiresUtc = DateTime.MinValue;
     private readonly SemaphoreSlim _authLock = new(1, 1);
+
+    // slskd runs one search start or one enqueue at a time and answers 429 to a second arriving in
+    // the same moment. With downloads side by side Octo now makes those itself, so its own POSTs
+    // queue here, and only the POST: never a wait on what it started.
+    private readonly SemaphoreSlim _operationGate = new(1, 1);
+    private DateTime _lastSearchStartUtc = DateTime.MinValue;
 
     public SoulseekClient(
         IHttpClientFactory httpClientFactory,
@@ -122,11 +129,84 @@ public class SoulseekClient
     }
 
     /// <summary>
+    /// slskd's own word on the Soulseek network, from the same /api/v0/application call that
+    /// proves slskd is up. During Soulseek's maintenance on 2026-10-03 slskd answered every call
+    /// while sitting in "Disconnecting", and every search failed with "must be connected and
+    /// logged in". Null when slskd did not answer.
+    /// </summary>
+    public async Task<SoulseekServerReading?> ReadServerAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/application", null, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            return ParseServerReading(await resp.Content.ReadAsStringAsync(ct));
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("slskd state not readable at {Base}: {Msg}", Base, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads server.isConnected and server.isLoggedIn, exactly what slskd checks before it will
+    /// start a search, rather than the state words. A shape without them is Unknown, which never
+    /// holds anything back. address and ipEndPoint are left out while disconnected, so nothing
+    /// here depends on them.
+    /// </summary>
+    internal static SoulseekServerReading ParseServerReading(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!TryGetPropertyIgnoreCase(root, "server", out var server) || server.ValueKind != JsonValueKind.Object)
+                return new(SoulseekLinkState.Unknown, null, null, null);
+            var connected = Flag(server, "isConnected");
+            var loggedIn = Flag(server, "isLoggedIn");
+            var link = connected is null || loggedIn is null ? SoulseekLinkState.Unknown
+                : connected.Value && loggedIn.Value ? SoulseekLinkState.LoggedIn
+                : SoulseekLinkState.NotLoggedIn;
+            var state = TryGetPropertyIgnoreCase(server, "state", out var s) && s.ValueKind == JsonValueKind.String
+                ? s.GetString() : null;
+            var username = TryGetPropertyIgnoreCase(root, "user", out var user)
+                && TryGetPropertyIgnoreCase(user, "username", out var u) && u.ValueKind == JsonValueKind.String
+                ? u.GetString() : null;
+            DateTime? next = TryGetPropertyIgnoreCase(root, "connectionWatchdog", out var dog)
+                && TryGetPropertyIgnoreCase(dog, "nextAttemptAt", out var n) && n.ValueKind == JsonValueKind.String
+                && DateTime.TryParse(n.GetString(), CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+                ? at : null;
+            return new(link, state, username, next);
+        }
+        catch (JsonException)
+        {
+            return new(SoulseekLinkState.Unknown, null, null, null);
+        }
+    }
+
+    private static bool? Flag(JsonElement element, string name) =>
+        TryGetPropertyIgnoreCase(element, name, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? v.GetBoolean() : null;
+
+    /// <summary>
     /// Reads slskd's resolved downloads directory from /api/v0/options. Purely a
     /// diagnostic: a null (endpoint missing, redacted, or unexpected shape) must
     /// never gate anything.
     /// </summary>
-    public async Task<string?> GetDownloadsDirectoryAsync(CancellationToken ct = default)
+    public Task<string?> GetDownloadsDirectoryAsync(CancellationToken ct = default) =>
+        GetDirectoryOptionAsync("downloads", ct);
+
+    /// <summary>
+    /// Where slskd writes a transfer before moving it to the downloads directory (#69). Only
+    /// its last folder name is any use: the full path is slskd's view of its own container.
+    /// Null is normal and leaves slskd's default name in force.
+    /// </summary>
+    public Task<string?> GetIncompleteDirectoryAsync(CancellationToken ct = default) =>
+        GetDirectoryOptionAsync("incomplete", ct);
+
+    private async Task<string?> GetDirectoryOptionAsync(string name, CancellationToken ct)
     {
         try
         {
@@ -137,8 +217,8 @@ public class SoulseekClient
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
             if (!TryGetPropertyIgnoreCase(doc.RootElement, "directories", out var dirs)) return null;
-            if (!TryGetPropertyIgnoreCase(dirs, "downloads", out var downloads)) return null;
-            return downloads.ValueKind == JsonValueKind.String ? downloads.GetString() : null;
+            if (!TryGetPropertyIgnoreCase(dirs, name, out var value)) return null;
+            return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         }
         catch (Exception ex)
         {
@@ -164,109 +244,222 @@ public class SoulseekClient
     }
 
     /// <summary>
-    /// Initiates a search and returns as soon as there is an answer, rather than
-    /// always sitting out a fixed wait.
+    /// Runs one Soulseek search through slskd and returns every file it found.
     ///
-    /// Three things can end the wait, whichever comes first:
-    ///   1. <paramref name="enough"/> says the hits so far are already worth acting on,
-    ///   2. slskd reports the search finished, so nothing more is coming,
-    ///   3. SearchWaitSeconds elapses, which is a ceiling rather than a duration.
+    /// slskd keeps a running search's responses in memory and saves them only when the search
+    /// ends (SearchService.cs, slskd 0.26.0), so /responses is empty until then and there is
+    /// nothing to act on early. Octo reads the search's state until slskd ends it, then reads
+    /// the responses once. A search still running at the profile's ceiling is cancelled, not
+    /// abandoned: a cancelled search still saves what it gathered. Octo used to read nothing at
+    /// the ceiling and delete the search, which returned zero hits and left the search running
+    /// in slskd, because DELETE removes only the record.
     ///
-    /// This matters in both directions. Peer responses arrive in a burst around the
-    /// 20s mark, so a fixed wait either cuts the search off before its results exist
-    /// or idles long after they have arrived; and a search that comes back empty
-    /// should fall through to the fallback source immediately instead of making the
-    /// user wait out a timer for an answer that is already known.
+    /// A caller who gives up still gets an OperationCanceledException, as before, so a cancelled
+    /// acquisition is not mistaken for "not on Soulseek"; the slskd search is cancelled behind it.
     /// </summary>
-    /// <param name="enough">
-    /// Decides whether the hits gathered so far are worth committing to. The client
-    /// cannot judge this itself: "usable" means the right format, size and title
-    /// match, which only the caller's ranking knows. Null means wait for completion
-    /// or the ceiling.
-    /// </param>
-    public async Task<List<SoulseekFileHit>> SearchAsync(
-        string query,
-        int limit,
-        CancellationToken ct = default,
-        Func<IReadOnlyList<SoulseekFileHit>, bool>? enough = null)
+    public async Task<List<SoulseekFileHit>> SearchAsync(string query, SearchProfile profile, CancellationToken ct = default)
     {
         var searchId = Guid.NewGuid().ToString();
-        var payload = JsonSerializer.Serialize(new
+        var began = Clock();
+        var ended = false;
+        // Set before the start goes out: a caller who gives up while it is on its way leaves a
+        // search slskd may already have taken, and cancelling one it never made does no harm.
+        var started = true;
+        try
+        {
+            if (!await StartSearchAsync(searchId, query, profile, ct))
+            {
+                started = false;
+                return [];
+            }
+            var status = await WaitForEndAsync(searchId, began.AddSeconds(profile.CeilingSeconds), ct);
+            string reason;
+            if (status is { Ended: true })
+            {
+                reason = "finished";
+            }
+            else
+            {
+                await CancelSearchAsync(searchId);
+                status = await WaitForEndAsync(searchId, Clock() + CancelGrace, ct) ?? status;
+                reason = status is { Ended: true } ? "ceiling, cancelled" : "ceiling, cancel not confirmed";
+            }
+            ended = status is { Ended: true };
+
+            // Read even when the cancel was not confirmed: slskd may have finished since the last
+            // look, and one request is cheap next to the wait already spent.
+            var hits = await ReadResponsesAsync(searchId, ct);
+            _logger.LogInformation(
+                "Soulseek search '{Query}' ({Profile}): {Count} hits after {Elapsed:F1}s ({Reason}; slskd {State}, {Responses} responses)",
+                query, profile.Name, hits.Count, (Clock() - began).TotalSeconds, reason,
+                status?.State ?? "unknown", status?.ResponseCount ?? 0);
+            return hits;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("Soulseek search '{Query}' ({Profile}): given up after {Elapsed:F1}s; cancelling it in slskd",
+                query, profile.Name, (Clock() - began).TotalSeconds);
+            throw;
+        }
+        finally
+        {
+            // In the background, so nobody waits on housekeeping.
+            if (started) LastSearchCleanup = Task.Run(() => CleanUpSearchAsync(searchId, ended));
+        }
+    }
+
+    internal static string SearchPayload(string searchId, string query, SearchProfile profile) =>
+        JsonSerializer.Serialize(new
         {
             id = searchId,
             searchText = query,
-            fileLimit = Math.Max(limit * 5, 50),
-            filterResponses = true
+            // Milliseconds, whatever slskd's own API doc says: it is passed to Soulseek.NET unchanged.
+            searchTimeout = profile.SearchTimeoutMs,
+            responseLimit = profile.ResponseLimit,
+            fileLimit = profile.FileLimit,
+            filterResponses = true,
         });
 
+    private async Task<bool> StartSearchAsync(string searchId, string query, SearchProfile profile, CancellationToken ct)
+    {
         try
         {
-            using var startResp = await SendAsync(
-                HttpMethod.Post,
-                $"{Base}/api/v0/searches",
-                new StringContent(payload, Encoding.UTF8, "application/json"),
-                ct);
-            startResp.EnsureSuccessStatusCode();
+            using var resp = await SendOperationAsync($"{Base}/api/v0/searches",
+                SearchPayload(searchId, query, profile), search: true, ct);
+            resp.EnsureSuccessStatusCode();
+            return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             _logger.LogWarning("Soulseek search start failed: {Msg}", ex.Message);
-            return new List<SoulseekFileHit>();
+            return false;
         }
+    }
 
-        var hits = new List<SoulseekFileHit>();
-        var ceiling = DateTime.UtcNow.AddSeconds(_settings.SearchWaitSeconds);
-        var started = DateTime.UtcNow;
-        var pollIntervalMs = 1000;
-        string stopReason = "ceiling";
+    /// <summary>How many times a POST slskd refused with 429 is sent again, waiting
+    /// SearchStartRetryDelay longer each time.</summary>
+    internal const int OperationRetries = 3;
 
-        while (DateTime.UtcNow < ceiling && !ct.IsCancellationRequested)
+    /// <summary>The least time between two search starts, so searches made side by side reach the
+    /// Soulseek network spaced out rather than in a burst. Only tests shorten it.</summary>
+    internal TimeSpan MinSearchSpacing { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// One POST to slskd's one-at-a-time endpoints (search start, enqueue), through Octo's own gate
+    /// and sent again on 429. A 429 that survives every retry is handed back for the caller to read.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendOperationAsync(string url, string body, bool search, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
         {
-            await Task.Delay(pollIntervalMs, ct);
+            HttpResponseMessage resp;
+            await _operationGate.WaitAsync(ct);
             try
             {
-                using var resp = await SendAsync(
-                    HttpMethod.Get,
-                    $"{Base}/api/v0/searches/{searchId}/responses",
-                    null,
-                    ct);
-                if (!resp.IsSuccessStatusCode) continue;
-
-                var json = await resp.Content.ReadAsStringAsync(ct);
-                hits = ParseResponses(json);
-
-                if (hits.Count >= limit) { stopReason = "hit limit"; break; }
-
-                // Good enough to act on: stop waiting and go download it.
-                if (enough != null && enough(hits)) { stopReason = "found what we needed"; break; }
-
-                // Nothing more is coming. Returning now means an empty search falls
-                // through to the fallback source immediately instead of idling out
-                // the ceiling for an answer that is already settled.
-                if (await IsSearchFinishedAsync(searchId, ct))
+                if (search)
                 {
-                    stopReason = "search finished";
-                    break;
+                    var wait = _lastSearchStartUtc + MinSearchSpacing - DateTime.UtcNow;
+                    if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
                 }
+                resp = await SendAsync(HttpMethod.Post, url, new StringContent(body, Encoding.UTF8, "application/json"), ct);
+                if (search) _lastSearchStartUtc = DateTime.UtcNow;
             }
-            catch (Exception ex)
+            finally
             {
-                _logger.LogDebug("Poll failed (transient): {Msg}", ex.Message);
+                _operationGate.Release();
             }
+            if (resp.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt > OperationRetries) return resp;
+            resp.Dispose();
+            await Task.Delay(SearchStartRetryDelay * attempt, ct);
         }
+    }
 
-        _logger.LogInformation(
-            "Soulseek search '{Query}': {Count} hits after {Elapsed:F1}s ({Reason})",
-            query, hits.Count, (DateTime.UtcNow - started).TotalSeconds, stopReason);
-
-        // Fire-and-forget cleanup so we don't accumulate completed searches
-        _ = Task.Run(async () =>
+    /// <summary>Reads the search's state until it has ended or <paramref name="until"/> passes.
+    /// Returns the last state read, or null when none could be read.</summary>
+    private async Task<SearchStatus?> WaitForEndAsync(string searchId, DateTime until, CancellationToken ct)
+    {
+        SearchStatus? last = null;
+        while (Clock() < until)
         {
-            try { using var _ = await SendAsync(HttpMethod.Delete, $"{Base}/api/v0/searches/{searchId}", null, CancellationToken.None); }
-            catch { /* best effort */ }
-        });
+            await Task.Delay(SearchPollInterval, ct);
+            last = await ReadSearchStatusAsync(searchId, ct) ?? last;
+            if (last is { Ended: true }) break;
+        }
+        return last;
+    }
 
-        return hits;
+    internal sealed record SearchStatus(string State, bool Ended, int ResponseCount);
+
+    private async Task<SearchStatus?> ReadSearchStatusAsync(string searchId, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/searches/{searchId}", null, ct);
+            return resp.IsSuccessStatusCode ? ParseSearchStatus(await resp.Content.ReadAsStringAsync(ct)) : null;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("Soulseek search state read failed (transient): {Msg}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// One read of slskd's search record. Ended means endedAt is set, not that the state says
+    /// Completed: slskd saves Completed the moment the network search stops, and the responses a
+    /// moment later in the same save that sets endedAt. Reading on Completed alone can find the
+    /// empty list from in between.
+    /// </summary>
+    internal static SearchStatus? ParseSearchStatus(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        var state = root.TryGetProperty("state", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() ?? "" : "";
+        var ended = root.TryGetProperty("endedAt", out var e) && e.ValueKind == JsonValueKind.String;
+        var responses = root.TryGetProperty("responseCount", out var r) && r.ValueKind == JsonValueKind.Number
+            && r.TryGetInt32(out var n) ? n : 0;
+        return new SearchStatus(state, ended, responses);
+    }
+
+    private async Task CancelSearchAsync(string searchId)
+    {
+        try { using var _ = await SendAsync(HttpMethod.Put, $"{Base}/api/v0/searches/{searchId}", null, CancellationToken.None); }
+        catch (Exception ex) { _logger.LogDebug("Soulseek search cancel failed: {Msg}", ex.Message); }
+    }
+
+    private async Task<List<SoulseekFileHit>> ReadResponsesAsync(string searchId, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/searches/{searchId}/responses", null, ct);
+            return resp.IsSuccessStatusCode ? ParseResponses(await resp.Content.ReadAsStringAsync(ct)) : [];
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning("Soulseek search responses could not be read: {Msg}", ex.Message);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Removes the search from slskd. One that has not ended is cancelled first: DELETE removes
+    /// only the record, and the search would carry on asking the network for nobody. The short
+    /// wait after the cancel lets slskd save the ended search before its record goes, so that
+    /// save does not fail in slskd's log.
+    /// </summary>
+    private async Task CleanUpSearchAsync(string searchId, bool ended)
+    {
+        try
+        {
+            if (!ended)
+            {
+                await CancelSearchAsync(searchId);
+                await WaitForEndAsync(searchId, Clock() + CancelGrace, CancellationToken.None);
+            }
+            using var _ = await SendAsync(HttpMethod.Delete, $"{Base}/api/v0/searches/{searchId}", null, CancellationToken.None);
+        }
+        catch (Exception ex) { _logger.LogDebug("Soulseek search cleanup failed: {Msg}", ex.Message); }
     }
 
     private List<SoulseekFileHit> ParseResponses(string json)
@@ -291,6 +484,10 @@ public class SoulseekClient
                     : null;
                 int? queueLength = resp.TryGetProperty("queueLength", out var qlEl) && qlEl.ValueKind == JsonValueKind.Number
                     ? qlEl.GetInt32()
+                    : null;
+                bool? freeSlot = resp.TryGetProperty("hasFreeUploadSlot", out var fsEl)
+                    && fsEl.ValueKind is JsonValueKind.True or JsonValueKind.False
+                    ? fsEl.GetBoolean()
                     : null;
 
                 foreach (var file in filesEl.EnumerateArray())
@@ -326,7 +523,8 @@ public class SoulseekClient
                         Length = length,
                         Extension = NormalizeExtension(ext, filename),
                         UploadSpeed = uploadSpeed,
-                        QueueLength = queueLength
+                        QueueLength = queueLength,
+                        HasFreeUploadSlot = freeSlot,
                     });
                 }
             }
@@ -339,39 +537,85 @@ public class SoulseekClient
     }
 
     /// <summary>
-    /// <summary>
-    /// True once slskd says the search has stopped gathering responses.
-    ///
-    /// Deliberately reads the STATUS object rather than inferring completion from
-    /// the responses endpoint, and deliberately is not used to decide whether
-    /// results exist: status reports a responseCount well before /responses will
-    /// return the files, so trusting it for anything except "is it over" makes a
-    /// too-short wait look perfectly healthy.
-    ///
-    /// Any failure returns false, so an unreadable status simply means the caller
-    /// keeps polling until the ceiling rather than giving up early.
+    /// The files in one folder of a peer's share (slskd asks the peer for that folder alone, not
+    /// its whole share). Each comes back with its full remote path, ready to enqueue, and the
+    /// queue and speed of <paramref name="from"/>, the search hit that pointed at the folder.
+    /// Empty when the peer does not answer in time or will not list it.
     /// </summary>
-    private async Task<bool> IsSearchFinishedAsync(string searchId, CancellationToken ct)
+    public async Task<List<SoulseekFileHit>> BrowseFolderAsync(SoulseekFileHit from, string directory, TimeSpan timeout,
+        CancellationToken ct = default)
     {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        limit.CancelAfter(timeout);
         try
         {
-            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/searches/{searchId}", null, ct);
-            if (!resp.IsSuccessStatusCode) return false;
-
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-            if (!doc.RootElement.TryGetProperty("state", out var stateEl)) return false;
-
-            // slskd reports compound states such as "Completed, TimedOut" or
-            // "Completed, ResponseLimitReached"; all of them mean it is done.
-            var state = stateEl.GetString() ?? "";
-            return state.Contains("Completed", StringComparison.OrdinalIgnoreCase)
-                || state.Contains("Cancelled", StringComparison.OrdinalIgnoreCase)
-                || state.Contains("Errored", StringComparison.OrdinalIgnoreCase);
+            using var resp = await SendOperationAsync(
+                $"{Base}/api/v0/users/{Uri.EscapeDataString(from.Username)}/directory",
+                JsonSerializer.Serialize(new { directory }), search: false, limit.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("slskd could not list {User}'s folder {Folder}: HTTP {Code}",
+                    from.Username, directory, (int)resp.StatusCode);
+                return [];
+            }
+            return ParseDirectory(await resp.Content.ReadAsStringAsync(limit.Token), from, directory);
         }
-        catch
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return false;
+            _logger.LogInformation("{User} did not list the folder {Folder} within {Seconds}s", from.Username, directory, timeout.TotalSeconds);
+            return [];
         }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException)
+        {
+            _logger.LogInformation("Could not list {User}'s folder {Folder}: {Message}", from.Username, directory, ex.Message);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// slskd's answer for one folder: a folder object, or a list of them, each with its files. A
+    /// file's name is either its full remote path or its name alone, which is then put under the
+    /// folder it was listed in.
+    /// </summary>
+    internal static List<SoulseekFileHit> ParseDirectory(string json, SoulseekFileHit from, string directory)
+    {
+        var hits = new List<SoulseekFileHit>();
+        using var doc = JsonDocument.Parse(json);
+        IEnumerable<JsonElement> folders = doc.RootElement.ValueKind switch
+        {
+            JsonValueKind.Array => doc.RootElement.EnumerateArray().ToList(),
+            JsonValueKind.Object => [doc.RootElement],
+            _ => [],
+        };
+        foreach (var folder in folders)
+        {
+            var name = folder.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String
+                ? nameEl.GetString() : null;
+            var where = string.IsNullOrWhiteSpace(name) ? directory : name!;
+            if (!folder.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array) continue;
+            foreach (var file in files.EnumerateArray())
+            {
+                var filename = file.TryGetProperty("filename", out var fnEl) ? fnEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(filename)) continue;
+                if (filename.IndexOfAny(['\\', '/']) < 0) filename = where.TrimEnd('\\', '/') + "\\" + filename;
+                int? Int(string key) => file.TryGetProperty(key, out var el) && el.ValueKind == JsonValueKind.Number ? el.GetInt32() : null;
+                hits.Add(new SoulseekFileHit
+                {
+                    Username = from.Username,
+                    Filename = filename,
+                    Size = file.TryGetProperty("size", out var sizeEl) && sizeEl.ValueKind == JsonValueKind.Number ? sizeEl.GetInt64() : 0,
+                    BitRate = Int("bitRate"),
+                    SampleRate = Int("sampleRate"),
+                    BitDepth = Int("bitDepth"),
+                    Length = Int("length"),
+                    Extension = NormalizeExtension(file.TryGetProperty("extension", out var exEl) ? exEl.GetString() : null, filename),
+                    UploadSpeed = from.UploadSpeed,
+                    QueueLength = from.QueueLength,
+                    HasFreeUploadSlot = from.HasFreeUploadSlot,
+                });
+            }
+        }
+        return hits;
     }
 
     /// <summary>
@@ -402,17 +646,89 @@ public class SoulseekClient
             new { filename, size }
         });
 
-        using var resp = await SendAsync(
-            HttpMethod.Post,
-            $"{Base}/api/v0/transfers/downloads/{Uri.EscapeDataString(username)}",
-            new StringContent(body, Encoding.UTF8, "application/json"),
-            ct);
+        using var resp = await SendOperationAsync(
+            $"{Base}/api/v0/transfers/downloads/{Uri.EscapeDataString(username)}", body, search: false, ct);
 
         if (!resp.IsSuccessStatusCode)
         {
             var err = await resp.Content.ReadAsStringAsync(ct);
             throw new Exception($"slskd download enqueue failed: HTTP {(int)resp.StatusCode} {err}");
         }
+    }
+
+    /// <summary>
+    /// Whether this slskd takes batch downloads, which is what lets each download land in a folder
+    /// of Octo's choosing. Null until the first batch has been tried. True once one was accepted,
+    /// and from then on an error is an error. False once slskd answered the batch route as if it
+    /// did not know it, and from then on Octo enqueues the old way without asking again.
+    /// </summary>
+    internal bool? BatchesSupported { get; set; }
+
+    /// <summary>
+    /// Queues files from one peer as one slskd batch, all landing in <paramref name="destination"/>,
+    /// a folder relative to slskd's downloads directory. The answer carries each file's transfer id,
+    /// so the wait can follow that transfer rather than any transfer of the same file name.
+    ///
+    /// An slskd older than batches answers this route through its per-user enqueue (the user named
+    /// "batches"), which rejects the body with 400, or with 404 or 405. Before any batch has worked,
+    /// those mean "no batches here"; after one has, they are real errors.
+    /// </summary>
+    public async Task<BatchEnqueue> EnqueueBatchAsync(string username, IReadOnlyList<(string Filename, long Size)> files,
+        string destination, CancellationToken ct = default)
+    {
+        if (BatchesSupported == false) return BatchEnqueue.NotSupported;
+        using var resp = await SendOperationAsync($"{Base}/api/v0/transfers/downloads/batches",
+            BatchPayload(username, files, destination), search: false, ct);
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        if (resp.IsSuccessStatusCode)
+        {
+            BatchesSupported = true;
+            return ParseBatch(body);
+        }
+        if (BatchesSupported != true && resp.StatusCode is System.Net.HttpStatusCode.BadRequest
+                or System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.MethodNotAllowed)
+        {
+            BatchesSupported = false;
+            _logger.LogInformation("slskd does not take batch downloads (HTTP {Code}); downloads go one at a time, the old way",
+                (int)resp.StatusCode);
+            return BatchEnqueue.NotSupported;
+        }
+        throw new Exception($"slskd batch enqueue failed: HTTP {(int)resp.StatusCode} {body}");
+    }
+
+    internal static string BatchPayload(string username, IReadOnlyList<(string Filename, long Size)> files, string destination) =>
+        JsonSerializer.Serialize(new
+        {
+            id = Guid.NewGuid().ToString(),
+            username,
+            files = files.Select(file => new { filename = file.Filename, size = file.Size }),
+            options = new { destination },
+        });
+
+    /// <summary>Reads a batch answer: batch.transfers carries what slskd queued, failures what it
+    /// would not. Anything unreadable reads as nothing queued.</summary>
+    internal static BatchEnqueue ParseBatch(string json)
+    {
+        var ids = new Dictionary<string, string>(StringComparer.Ordinal);
+        var failures = new List<(string File, string Message)>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (TryGetPropertyIgnoreCase(root, "batch", out var batch)
+                && TryGetPropertyIgnoreCase(batch, "transfers", out var transfers) && transfers.ValueKind == JsonValueKind.Array)
+                foreach (var transfer in transfers.EnumerateArray())
+                    if (transfer.TryGetProperty("filename", out var name) && name.ValueKind == JsonValueKind.String
+                        && TransferId(transfer) is { } id)
+                        ids[name.GetString()!] = id;
+            if (TryGetPropertyIgnoreCase(root, "failures", out var failed) && failed.ValueKind == JsonValueKind.Array)
+                foreach (var failure in failed.EnumerateArray())
+                    failures.Add((
+                        failure.TryGetProperty("filename", out var f) ? f.GetString() ?? "" : "",
+                        failure.TryGetProperty("message", out var m) ? m.GetString() ?? "" : ""));
+        }
+        catch (JsonException) { }
+        return new BatchEnqueue(true, ids, failures);
     }
 
     /// <summary>
@@ -427,10 +743,10 @@ public class SoulseekClient
     /// and anything it throws is swallowed here.
     /// </summary>
     public async Task<SoulseekTransferState> WaitForCompletionAsync(string username, string filename, int? perAttemptTimeoutSeconds = null, CancellationToken ct = default,
-        Action<SoulseekTransferProgress>? onProgress = null)
+        Action<SoulseekTransferProgress>? onProgress = null, string? transferId = null)
     {
         var timeoutSec = perAttemptTimeoutSeconds ?? _settings.DownloadTimeoutSeconds;
-        var deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+        var watch = new TransferWatch(Clock(), TimeSpan.FromSeconds(timeoutSec), MaxTransferTime);
         var seenAtLeastOnce = false;
         var consecutiveMisses = 0;
         // After we've seen the transfer at least once, missing it for this many
@@ -439,9 +755,9 @@ public class SoulseekClient
         // immediately, so without this we'd poll forever.
         const int MaxConsecutiveMissesAfterSeen = 6;  // ~9s at 1500ms cadence
 
-        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        while (!watch.Expired(Clock()) && !ct.IsCancellationRequested)
         {
-            await Task.Delay(1500, ct);
+            await Task.Delay(PollInterval, ct);
 
             try
             {
@@ -463,7 +779,7 @@ public class SoulseekClient
 
                 var json = await resp.Content.ReadAsStringAsync(ct);
                 using var doc = JsonDocument.Parse(json);
-                var transfer = FindTransfer(doc.RootElement, filename);
+                var transfer = FindTransfer(doc.RootElement, filename, transferId);
                 var state = transfer is { } found ? StateOf(found) : null;
                 bool foundThisPoll = state is not null;
                 if (foundThisPoll)
@@ -471,9 +787,11 @@ public class SoulseekClient
                     seenAtLeastOnce = true;
                     consecutiveMisses = 0;
 
+                    var progress = ReadTransferProgress(transfer!.Value);
+                    watch.Saw(progress.BytesTransferred, Clock());
                     if (onProgress is not null)
                     {
-                        try { onProgress(ReadTransferProgress(transfer!.Value)); }
+                        try { onProgress(progress); }
                         catch (Exception ex) { _logger.LogDebug("Transfer progress listener failed: {Msg}", ex.Message); }
                     }
 
@@ -508,9 +826,82 @@ public class SoulseekClient
             }
         }
 
-        _logger.LogWarning("slskd transfer timed out after {Sec}s: {File}", timeoutSec, filename);
+        ct.ThrowIfCancellationRequested();
+
+        // Giving up on this peer. Without a cancel slskd keeps the transfer going, and
+        // a file that lands after the next peer's copy is a second copy in the library.
+        if (await CancelTransferAsync(username, filename, transferId) == SoulseekTransferState.Succeeded)
+        {
+            _logger.LogInformation("slskd transfer finished just as it was given up: {File}", filename);
+            return SoulseekTransferState.Succeeded;
+        }
+        if (watch.HitCeiling(Clock()))
+            _logger.LogWarning("slskd transfer still not done after {Min} minutes; cancelled: {File}",
+                (int)MaxTransferTime.TotalMinutes, filename);
+        else
+            _logger.LogWarning("slskd transfer timed out: nothing new for {Sec}s; cancelled: {File}", timeoutSec, filename);
         return SoulseekTransferState.Errored;
     }
+
+    /// <summary>
+    /// The longest a transfer that keeps moving is waited for. A slow peer with the right
+    /// file is worth waiting on; one that trickles for an hour is not.
+    /// </summary>
+    internal static readonly TimeSpan MaxTransferTime = TimeSpan.FromMinutes(60);
+
+    /// <summary>How often a transfer is polled. Only tests shorten it.</summary>
+    internal TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>The time a transfer's or a search's wait goes by. Only tests replace it.</summary>
+    internal Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>How often a running search's state is read. Only tests shorten it.</summary>
+    internal TimeSpan SearchPollInterval { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long a cancelled search is given to end and save its responses. slskd takes
+    /// well under a second; the rest is slack for a busy disk.</summary>
+    internal static readonly TimeSpan CancelGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>The wait before the one retry of a start slskd refused with 429. Only tests shorten it.</summary>
+    internal TimeSpan SearchStartRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>The latest search's background cleanup. Only tests await it.</summary>
+    internal Task LastSearchCleanup { get; private set; } = Task.CompletedTask;
+
+    /// <summary>
+    /// Cancels a download in slskd and removes it from its list, so it can never land.
+    /// Answers Succeeded instead when the transfer turns out to have just finished, and
+    /// Errored otherwise, including when slskd cannot be asked.
+    /// </summary>
+    public async Task<SoulseekTransferState> CancelTransferAsync(string username, string filename, string? transferId = null)
+    {
+        var user = Uri.EscapeDataString(username);
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/transfers/downloads/{user}", null, CancellationToken.None);
+            if (!resp.IsSuccessStatusCode) return SoulseekTransferState.Errored;
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            if (FindTransfer(doc.RootElement, filename, transferId) is not { } file) return SoulseekTransferState.Errored;
+            var state = StateOf(file);
+            if (state.Contains("Completed", StringComparison.OrdinalIgnoreCase) &&
+                state.Contains("Succeeded", StringComparison.OrdinalIgnoreCase))
+                return SoulseekTransferState.Succeeded;
+            if (TransferId(file) is not { } id) return SoulseekTransferState.Errored;
+            using var cancel = await SendAsync(HttpMethod.Delete,
+                $"{Base}/api/v0/transfers/downloads/{user}/{Uri.EscapeDataString(id)}?remove=true", null, CancellationToken.None);
+            if (!cancel.IsSuccessStatusCode)
+                _logger.LogWarning("slskd refused to cancel {File}: HTTP {Code}", filename, (int)cancel.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not cancel slskd transfer {File}: {Msg}", filename, ex.Message);
+        }
+        return SoulseekTransferState.Errored;
+    }
+
+    /// <summary>The id slskd gives a transfer, for cancelling it.</summary>
+    internal static string? TransferId(JsonElement file) =>
+        file.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
 
     /// <summary>
     /// Finds a transfer's state in an slskd downloads response, or null when the
@@ -543,8 +934,9 @@ public class SoulseekClient
             Long(file, "bytesTransferred"), Long(file, "size"), Double(file, "percentComplete"));
     }
 
-    /// <summary>The file object for a transfer, in either response shape, or null.</summary>
-    internal static JsonElement? FindTransfer(JsonElement root, string filename)
+    /// <summary>The file object for a transfer, in either response shape, or null. With an id, only
+    /// that transfer: an older transfer of the same file from the same peer may still be listed.</summary>
+    internal static JsonElement? FindTransfer(JsonElement root, string filename, string? transferId = null)
     {
         IEnumerable<JsonElement> userGroups = root.ValueKind switch
         {
@@ -564,6 +956,11 @@ public class SoulseekClient
                 if (files.ValueKind != JsonValueKind.Array) continue;
                 foreach (var file in files.EnumerateArray())
                 {
+                    if (transferId is not null)
+                    {
+                        if (TransferId(file) == transferId) return file;
+                        continue;
+                    }
                     var fn = file.TryGetProperty("filename", out var fnEl) ? fnEl.GetString() : null;
                     if (fn != filename) continue;
                     return file;
@@ -572,6 +969,14 @@ public class SoulseekClient
         }
         return null;
     }
+}
+
+/// <summary>What a batch enqueue came to. TransferIds maps each queued file to its transfer id;
+/// Failures are the files slskd would not queue.</summary>
+public sealed record BatchEnqueue(bool Supported, IReadOnlyDictionary<string, string> TransferIds,
+    IReadOnlyList<(string File, string Message)> Failures)
+{
+    public static readonly BatchEnqueue NotSupported = new(false, new Dictionary<string, string>(), []);
 }
 
 public class SoulseekFileHit
@@ -586,6 +991,33 @@ public class SoulseekFileHit
     public string Extension { get; set; } = "";
     public int? UploadSpeed { get; set; }
     public int? QueueLength { get; set; }
+
+    /// <summary>The peer can start sending now rather than queueing us. Per response, like
+    /// QueueLength, so every file one peer offers carries the same value.</summary>
+    public bool? HasFreeUploadSlot { get; set; }
+}
+
+/// <summary>
+/// How long to keep waiting on one transfer. Each time more bytes have arrived, the
+/// quiet window starts again, so a slow peer that keeps sending is waited for. A
+/// transfer with nothing new for the whole window, or still unfinished at the ceiling,
+/// is given up on.
+/// </summary>
+internal sealed class TransferWatch(DateTime started, TimeSpan quiet, TimeSpan ceiling)
+{
+    private DateTime _quietSince = started;
+    private long _bytes;
+
+    public void Saw(long? bytes, DateTime now)
+    {
+        if (bytes is not { } b || b <= _bytes) return;
+        _bytes = b;
+        _quietSince = now;
+    }
+
+    public bool HitCeiling(DateTime now) => now - started >= ceiling;
+
+    public bool Expired(DateTime now) => now - _quietSince >= quiet || HitCeiling(now);
 }
 
 /// <summary>One poll's view of a transfer. PercentComplete is slskd's own, from 0 to 100.</summary>

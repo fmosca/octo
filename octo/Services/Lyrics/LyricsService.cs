@@ -6,7 +6,8 @@ using Octo.Services.Common;
 namespace Octo.Services.Lyrics;
 
 /// <summary>
-/// Lyrics from the sources LYRICS_SOURCES names, in that order (#52). Word timing beats line
+/// Lyrics from the sources LYRICS_SOURCES names, in that order (#52). "song" there is the lyrics
+/// the song already has, which the caller passes in, so they rank like any source. Word timing beats line
 /// timing beats plain text. A synced answer ends the search, unless "prefer word-timed lyrics"
 /// is on and it has only line timing: then later sources are still asked for word timing, and
 /// the line-timed answer is kept in case none has it. A plain answer is always kept in case
@@ -42,22 +43,35 @@ public sealed class LyricsService : IDisposable
     /// <summary>
     /// The best lyrics the sources have. When <paramref name="ct"/> runs out part way (a
     /// client waiting has a budget), the best answer found so far is returned rather than
-    /// nothing, and remembered only briefly.
+    /// nothing, and remembered only briefly. <paramref name="songsOwn"/> is how the lyrics the
+    /// song already has are timed, None when it has none; at "song"'s place in the order they
+    /// answer as <see cref="LyricsResult.SongsOwn"/>, and the caller serves its own copy.
     /// </summary>
-    public async Task<LyricsLookup> FindAsync(LyricsQuery query, CancellationToken ct)
+    public async Task<LyricsLookup> FindAsync(LyricsQuery query, CancellationToken ct,
+        LyricsTiming songsOwn = LyricsTiming.None)
     {
         if (string.IsNullOrWhiteSpace(query.Artist) || string.IsNullOrWhiteSpace(query.Title)) return LyricsLookup.Miss;
 
         var settings = _settings.CurrentValue;
         var preferWords = settings.PreferWordTimedLyrics;
         var key = $"{SongIdentity.MatchKey(query.Artist, query.Title)}|{query.DurationSeconds}"
-            + $"|{string.Join(',', settings.EffectiveLyricsSources)}|{preferWords}";
+            + $"|{string.Join(',', settings.EffectiveLyricsSources)}|{preferWords}|{songsOwn}";
         if (_cache.TryGetValue(key, out LyricsLookup? cached) && cached is not null) return cached;
 
         LyricsResult? best = null;
         var transient = false;
-        foreach (var source in Enabled)
+        foreach (var name in settings.EffectiveLyricsSources)
         {
+            if (name == Octo.Models.Settings.MetadataSettings.SongLyricsSource)
+            {
+                if (songsOwn == LyricsTiming.None) continue;
+                var own = LyricsResult.SongsOwn(songsOwn);
+                if (songsOwn == LyricsTiming.Word || (songsOwn == LyricsTiming.Line && !preferWords))
+                    return Remember(key, new LyricsLookup(own, false), HitTtl);
+                if (best is null || own.Timing > best.Timing) best = own;
+                continue;
+            }
+            if (_sources.FirstOrDefault(s => s.Key == name) is not { } source) continue;
             LyricsLookup lookup;
             try { lookup = await source.FindAsync(query, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)

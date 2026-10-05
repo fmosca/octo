@@ -1,0 +1,15 @@
+# Installed by scripts/updater/install-updater.sh. Updates Octo to the release
+# the dashboard asked for: fetch, build, restart. See octo-updater.sh.
+[Unit]
+Description=Update Octo to the release asked for on the dashboard
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment="OCTO_DIR=@OCTO_DIR@"
+Environment="OCTO_UPDATE_DIR=@UPDATE_DIR@"
+Environment="OCTO_UPDATER_DRYRUN=@DRYRUN@"
+ExecStart=@LIB_DIR@/octo-updater.sh
+TimeoutStartSec=30min
+Nice=10

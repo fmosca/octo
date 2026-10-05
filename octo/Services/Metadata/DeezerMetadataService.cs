@@ -33,7 +33,20 @@ public class DeezerMetadataService : IDisposable
         string? AlbumTitle, string? AlbumCoverUrl, int? Year, int? Duration, string? ArtistName,
         int? TrackNumber, int? DiscNumber, string? Isrc, int? TotalTracks, string? Genre,
         string? Label, string? ReleaseDate, IReadOnlyList<string>? Contributors = null,
-        string? AlbumArtistName = null, string? RecordType = null);
+        string? AlbumArtistName = null, string? RecordType = null)
+    {
+        /// <summary>The track's own title and ids in the catalog, the album's barcode, and what
+        /// the catalog says about the words and the loudness, for the chooser and its report.</summary>
+        public string? Title { get; init; }
+        public string? TrackId { get; init; }
+        public string? AlbumId { get; init; }
+        public string? Barcode { get; init; }
+        public bool? ExplicitLyrics { get; init; }
+        public double? CatalogGain { get; init; }
+    }
+
+    /// <summary>The catalog's ranked answers for one song, or the fact that it did not answer.</summary>
+    public sealed record CatalogCandidates(IReadOnlyList<FullTrackMeta> Hits, bool DidNotAnswer);
 
     /// <summary>One album from a catalog search. Year is not on the search payload;
     /// the detail call fills it.</summary>
@@ -288,71 +301,7 @@ public class DeezerMetadataService : IDisposable
             using var response = r;
             if (r?.Transient == true) return null;
             if (found is JsonElement t)
-            {
-                string? albTitle = null, cover = null, artName = null;
-                var isrc = Str(t, "isrc");
-                long albId = 0;
-                if (t.TryGetProperty("album", out var alb))
-                {
-                    albTitle = Str(alb, "title");
-                    cover = Str(alb, "cover_xl") ?? Str(alb, "cover_big") ?? Str(alb, "cover_medium");
-                    if (alb.TryGetProperty("id", out var aid) && aid.ValueKind == JsonValueKind.Number)
-                        albId = aid.GetInt64();
-                }
-                if (t.TryGetProperty("artist", out var art)) artName = Str(art, "name");
-
-                int? year = null, totalTracks = null;
-                string? genre = null, label = null, releaseDate = null, albumArtist = null, recordType = null;
-                if (albId > 0)
-                {
-                    using var ar = await GetJsonAsync($"{Base}/album/{albId}", ct);
-                    detailUnresolved = ar.Transient;
-                    if (ar.Doc != null)
-                    {
-                        var root = ar.Doc.RootElement;
-                        recordType = Str(root, "record_type");
-                        if (root.TryGetProperty("artist", out var albumArt) && albumArt.ValueKind == JsonValueKind.Object)
-                            albumArtist = Str(albumArt, "name");
-                        releaseDate = Str(root, "release_date");
-                        if (!string.IsNullOrEmpty(releaseDate) && releaseDate.Length >= 4 && int.TryParse(releaseDate[..4], out var yr))
-                            year = yr;
-                        totalTracks = Int(root, "nb_tracks");
-                        label = Str(root, "label");
-                        if (root.TryGetProperty("genres", out var g) && g.TryGetProperty("data", out var gd)
-                            && gd.ValueKind == JsonValueKind.Array && gd.GetArrayLength() > 0)
-                            genre = Str(gd[0], "name");
-                    }
-                }
-
-                // The search hit carries neither the track's position nor anyone but the main
-                // artist, so the track number was never written (#48) and a collaboration was one
-                // artist (#49). The track's own record has both.
-                int? trackNumber = Int(t, "track_position"), discNumber = Int(t, "disk_number");
-                List<string>? contributors = null;
-                if (t.TryGetProperty("id", out var tid) && tid.ValueKind == JsonValueKind.Number)
-                {
-                    using var tr = await GetJsonAsync($"{Base}/track/{tid.GetInt64()}", ct);
-                    detailUnresolved |= tr.Transient;
-                    if (tr.Doc != null)
-                    {
-                        var track = tr.Doc.RootElement;
-                        trackNumber ??= Int(track, "track_position");
-                        discNumber ??= Int(track, "disk_number");
-                        if (track.TryGetProperty("contributors", out var people) && people.ValueKind == JsonValueKind.Array)
-                            contributors = people.EnumerateArray()
-                                .Where(person => Str(person, "role") is null or "Main" or "Featured")
-                                .Select(person => Str(person, "name"))
-                                .Where(name => !string.IsNullOrWhiteSpace(name))
-                                .Select(name => name!)
-                                .Distinct(StringComparer.OrdinalIgnoreCase)
-                                .ToList();
-                    }
-                }
-
-                meta = new FullTrackMeta(albTitle, cover, year, Int(t, "duration"), artName,
-                    trackNumber, discNumber, isrc, totalTracks, genre, label, releaseDate, contributors,
-                    albumArtist, recordType);
-            }
+                (meta, detailUnresolved) = await BuildFullMetaAsync(t, ct);
         }
         catch (Exception ex)
         {
@@ -364,6 +313,134 @@ public class DeezerMetadataService : IDisposable
 
         Put(key, meta, meta is null ? NegativeTtl : PositiveTtl);
         return meta;
+    }
+
+    /// <summary>
+    /// The ranked hits for one song, not only the first: every hit of the first search that
+    /// finds any, in the catalog's order, with the detail calls made for the best
+    /// <paramref name="max"/>. The chooser weighs them against the other sources. A throttled
+    /// catalog answers nothing and says so, and nothing from that call is remembered.
+    /// </summary>
+    public async Task<CatalogCandidates> EnrichTrackCandidatesAsync(string? artist, string? title, int max = 2,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return new([], false);
+        max = Math.Clamp(max, 1, MatchCandidates);
+        var key = $"cands|{artist}|{title}|{max}".ToLowerInvariant();
+        if (TryGetCached<CatalogCandidates?>(key, out var cached) && cached is not null) return cached;
+
+        var hits = new List<FullTrackMeta>();
+        var detailUnresolved = false;
+        try
+        {
+            var (r, found) = await FindTrackHitsAsync(artist, title, ct);
+            using var response = r;
+            if (r?.Transient == true) return new([], true);
+            foreach (var hit in found.Take(max))
+            {
+                var (meta, unresolved) = await BuildFullMetaAsync(hit, ct);
+                detailUnresolved |= unresolved;
+                if (meta is not null) hits.Add(meta);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer candidates '{A} - {T}' failed: {M}", artist, title, ex.Message);
+        }
+
+        var answer = new CatalogCandidates(hits, false);
+        if (!detailUnresolved) Put(key, answer, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        return answer;
+    }
+
+    /// <summary>One search hit made whole: the album's detail (year, genre, label, barcode,
+    /// album artist, kind) and the track's own record (position, contributors, code, words,
+    /// loudness). The second value says a detail call did not answer, so nothing is cached.</summary>
+    private async Task<(FullTrackMeta? Meta, bool DetailUnresolved)> BuildFullMetaAsync(JsonElement t, CancellationToken ct)
+    {
+        var detailUnresolved = false;
+        string? albTitle = null, cover = null, artName = null;
+        var isrc = Str(t, "isrc");
+        long albId = 0;
+        if (t.TryGetProperty("album", out var alb))
+        {
+            albTitle = Str(alb, "title");
+            cover = Str(alb, "cover_xl") ?? Str(alb, "cover_big") ?? Str(alb, "cover_medium");
+            if (alb.TryGetProperty("id", out var aid) && aid.ValueKind == JsonValueKind.Number)
+                albId = aid.GetInt64();
+        }
+        if (t.TryGetProperty("artist", out var art)) artName = Str(art, "name");
+
+        int? year = null, totalTracks = null;
+        string? genre = null, label = null, releaseDate = null, albumArtist = null, recordType = null, barcode = null;
+        if (albId > 0)
+        {
+            using var ar = await GetJsonAsync($"{Base}/album/{albId}", ct);
+            detailUnresolved = ar.Transient;
+            if (ar.Doc != null)
+            {
+                var root = ar.Doc.RootElement;
+                recordType = Str(root, "record_type");
+                if (root.TryGetProperty("artist", out var albumArt) && albumArt.ValueKind == JsonValueKind.Object)
+                    albumArtist = Str(albumArt, "name");
+                releaseDate = Str(root, "release_date");
+                if (!string.IsNullOrEmpty(releaseDate) && releaseDate.Length >= 4 && int.TryParse(releaseDate[..4], out var yr))
+                    year = yr;
+                totalTracks = Int(root, "nb_tracks");
+                label = Str(root, "label");
+                barcode = Str(root, "upc");
+                if (root.TryGetProperty("genres", out var g) && g.TryGetProperty("data", out var gd)
+                    && gd.ValueKind == JsonValueKind.Array && gd.GetArrayLength() > 0)
+                    genre = Str(gd[0], "name");
+            }
+        }
+
+        // The search hit carries neither the track's position nor anyone but the main
+        // artist, so the track number was never written (#48) and a collaboration was one
+        // artist (#49). The track's own record has both.
+        int? trackNumber = Int(t, "track_position"), discNumber = Int(t, "disk_number");
+        List<string>? contributors = null;
+        bool? explicitLyrics = t.TryGetProperty("explicit_lyrics", out var ex0) && ex0.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? ex0.GetBoolean() : null;
+        double? gain = null;
+        string? trackId = null;
+        if (t.TryGetProperty("id", out var tid) && tid.ValueKind == JsonValueKind.Number)
+        {
+            trackId = tid.GetInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            using var tr = await GetJsonAsync($"{Base}/track/{tid.GetInt64()}", ct);
+            detailUnresolved |= tr.Transient;
+            if (tr.Doc != null)
+            {
+                var track = tr.Doc.RootElement;
+                trackNumber ??= Int(track, "track_position");
+                discNumber ??= Int(track, "disk_number");
+                isrc ??= Str(track, "isrc");
+                if (track.TryGetProperty("explicit_lyrics", out var ex1) && ex1.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    explicitLyrics = ex1.GetBoolean();
+                if (track.TryGetProperty("gain", out var gn) && gn.ValueKind == JsonValueKind.Number) gain = gn.GetDouble();
+                if (track.TryGetProperty("contributors", out var people) && people.ValueKind == JsonValueKind.Array)
+                    contributors = people.EnumerateArray()
+                        .Where(person => Str(person, "role") is null or "Main" or "Featured")
+                        .Select(person => Str(person, "name"))
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Select(name => name!)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+            }
+        }
+
+        var meta = new FullTrackMeta(albTitle, cover, year, Int(t, "duration"), artName,
+            trackNumber, discNumber, isrc, totalTracks, genre, label, releaseDate, contributors,
+            albumArtist, recordType)
+        {
+            Title = Str(t, "title"),
+            TrackId = trackId,
+            AlbumId = albId > 0 ? albId.ToString(System.Globalization.CultureInfo.InvariantCulture) : null,
+            Barcode = string.IsNullOrWhiteSpace(barcode) ? null : barcode,
+            ExplicitLyrics = explicitLyrics,
+            CatalogGain = gain,
+        };
+        return (meta, detailUnresolved);
     }
 
     /// <summary>Resolve an artist name to its Deezer name + image.</summary>
@@ -448,10 +525,11 @@ public class DeezerMetadataService : IDisposable
 
     /// <summary>Search the album catalog. Single-track "albums" are dropped: a plain
     /// artist query returns a lot of them and they crowd out real records.</summary>
-    public async Task<List<AlbumHit>> SearchAlbumsAsync(string query, int limit, CancellationToken ct = default)
+    public async Task<List<AlbumHit>> SearchAlbumsAsync(string query, int limit, CancellationToken ct = default,
+        bool keepSingles = false)
     {
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<AlbumHit>();
-        var key = $"as|{query}|{limit}".ToLowerInvariant();
+        var key = $"as|{query}|{limit}|{keepSingles}".ToLowerInvariant();
         if (TryGetCached<List<AlbumHit>>(key, out var cached)) return cached!;
 
         var hits = new List<AlbumHit>();
@@ -476,7 +554,9 @@ public class DeezerMetadataService : IDisposable
 
                     var recordType = Str(a, "record_type");
                     var trackCount = Int(a, "nb_tracks") ?? 0;
-                    if (string.Equals(recordType, "single", StringComparison.OrdinalIgnoreCase) && trackCount <= 2)
+                    // Search lists albums; a one- or two-track single is a song there. The cover
+                    // upgrade keeps them: a library of singles has their covers to replace.
+                    if (!keepSingles && string.Equals(recordType, "single", StringComparison.OrdinalIgnoreCase) && trackCount <= 2)
                         continue;
 
                     var artist = a.TryGetProperty("artist", out var art) ? Str(art, "name") : null;
@@ -836,6 +916,30 @@ public class DeezerMetadataService : IDisposable
         return (year, false);
     }
 
+    /// <summary>
+    /// An album's barcode (UPC), which names one exact release in every store, so the cover
+    /// upgrade can find the same release at Apple in a batch instead of one search an album.
+    /// </summary>
+    public async Task<string?> GetAlbumUpcAsync(string deezerId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deezerId)) return null;
+        var key = $"upc|{deezerId}";
+        if (TryGetCached<string>(key, out var cached)) return string.IsNullOrEmpty(cached) ? null : cached;
+        try
+        {
+            using var r = await GetJsonAsync($"{Base}/album/{Uri.EscapeDataString(deezerId)}", ct);
+            if (r.Transient) return null;
+            var upc = r.Doc is not null ? Str(r.Doc.RootElement, "upc") : null;
+            Put(key, upc ?? "", string.IsNullOrEmpty(upc) ? NegativeTtl : PositiveTtl);
+            return string.IsNullOrEmpty(upc) ? null : upc;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("deezer album {Id} barcode failed: {M}", deezerId, ex.Message);
+            return null;
+        }
+    }
+
     private async Task<DeezerResponse> GetJsonAsync(string url, CancellationToken ct, bool background = false)
     {
         JsonDocument? doc = null;
@@ -905,6 +1009,22 @@ public class DeezerMetadataService : IDisposable
         return (null, null);
     }
 
+    /// <summary>Like <see cref="FindTrackAsync"/>, but every hit that is this song from the first
+    /// search that finds any, in the catalog's order.</summary>
+    private async Task<(DeezerResponse? Response, List<JsonElement> Hits)> FindTrackHitsAsync(string? artist, string? title,
+        CancellationToken ct)
+    {
+        foreach (var variant in SongIdentity.QueryVariants(title, artist).Take(TrackSearches))
+        {
+            var r = await GetJsonAsync($"{Base}/search?q={Uri.EscapeDataString(variant.Text)}&limit={MatchCandidates}", ct);
+            if (r.Transient) return (r, []);
+            var hits = AllMatches(r.Doc, artist, title);
+            if (hits.Count > 0) return (r, hits);
+            r.Dispose();
+        }
+        return (null, []);
+    }
+
     /// <summary>
     /// Deezer no longer supports field-qualified search on the track endpoints. A query
     /// like artist:"X" track:"Y" is now read as free text, so the literal words "artist"
@@ -961,11 +1081,17 @@ public class DeezerMetadataService : IDisposable
     /// as fact. Requiring at least one positive match is what stops a hit that states
     /// nothing at all from matching everything.
     /// </summary>
-    private static JsonElement? BestMatch(JsonDocument? doc, string? artist, string? title)
+    private static JsonElement? BestMatch(JsonDocument? doc, string? artist, string? title) =>
+        AllMatches(doc, artist, title) is { Count: > 0 } hits ? hits[0] : null;
+
+    /// <summary>Every hit that positively matches on artist or title and contradicts on neither,
+    /// in the catalog's order. The first is what <see cref="BestMatch"/> returns.</summary>
+    private static List<JsonElement> AllMatches(JsonDocument? doc, string? artist, string? title)
     {
-        if (doc is null) return null;
+        var hits = new List<JsonElement>();
+        if (doc is null) return hits;
         if (!doc.RootElement.TryGetProperty("data", out var data)
-            || data.ValueKind != JsonValueKind.Array) return null;
+            || data.ValueKind != JsonValueKind.Array) return hits;
 
         foreach (var hit in data.EnumerateArray())
         {
@@ -974,9 +1100,9 @@ public class DeezerMetadataService : IDisposable
                 hit.TryGetProperty("artist", out var a) ? Str(a, "name") : null);
 
             if (titleVerdict == FieldVerdict.Mismatch || artistVerdict == FieldVerdict.Mismatch) continue;
-            if (titleVerdict == FieldVerdict.Match || artistVerdict == FieldVerdict.Match) return hit;
+            if (titleVerdict == FieldVerdict.Match || artistVerdict == FieldVerdict.Match) hits.Add(hit);
         }
-        return null;
+        return hits;
     }
 
     private static JsonElement? FirstData(JsonDocument? doc)

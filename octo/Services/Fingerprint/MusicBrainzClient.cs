@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Caching.Memory;
 using Octo.Services.Common;
+using Octo.Services.Tagging;
 using System.Text.Json;
 
 namespace Octo.Services.Fingerprint;
@@ -25,10 +27,101 @@ public sealed class MusicBrainzClient
     private readonly SemaphoreSlim _gate = new(1, 1);
     private DateTime _lastCallUtc = DateTime.MinValue;
 
+    /// <summary>Release lookups are remembered a day, since an album's tracks ask for the same
+    /// release one by one; searches six hours. Every entry counts as one, so the limit is a count.</summary>
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions { SizeLimit = 2000 });
+    private static readonly TimeSpan ReleaseTtl = TimeSpan.FromHours(24);
+    private static readonly TimeSpan SearchTtl = TimeSpan.FromHours(6);
+
     public MusicBrainzClient(IHttpClientFactory http, ILogger<MusicBrainzClient> logger)
     {
         _http = http;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// One release in full: its label and catalogue number, barcode, status, country, date, its
+    /// group's kind and first release date, every track's position and id, and the genres people
+    /// voted on. Remembered a day, since an album's tracks ask one by one.
+    /// </summary>
+    public async Task<ReleaseDetails?> LookupReleaseAsync(string releaseId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(releaseId)) return null;
+        var key = "release|" + releaseId.Trim().ToLowerInvariant();
+        if (_cache.TryGetValue(key, out ReleaseDetails? cached)) return cached;
+
+        using var doc = await GetAsync(
+            $"release/{Uri.EscapeDataString(releaseId.Trim())}?inc=labels+release-groups+artist-credits+recordings+isrcs+genres&fmt=json",
+            "release lookup", ct);
+        if (doc is null) return null;
+        var details = ReleaseDetails.Parse(doc.RootElement);
+        if (details is not null)
+            _cache.Set(key, details, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = ReleaseTtl });
+        return details;
+    }
+
+    /// <summary>
+    /// Recordings by name and length, for a download the fingerprint service could not name. Up
+    /// to 25, each with its releases and their groups. The answer is the caller's to dispose.
+    /// </summary>
+    public async Task<JsonDocument?> SearchRecordingsAsync(string artist, string title, int durationSeconds, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return null;
+        var key = "search|" + SongIdentity.MatchKey(artist, title) + "|" + durationSeconds;
+        if (_cache.TryGetValue(key, out string? cachedJson) && cachedJson is not null) return JsonDocument.Parse(cachedJson);
+
+        using var doc = await GetAsync(BuildRecordingSearchUrl(artist, title, durationSeconds), "recording search", ct);
+        if (doc is null) return null;
+        var json = doc.RootElement.GetRawText();
+        _cache.Set(key, json, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = SearchTtl });
+        return JsonDocument.Parse(json);
+    }
+
+    /// <summary>The recordings that carry one code, with their releases. The answer is the caller's to dispose.</summary>
+    public async Task<JsonDocument?> LookupIsrcAsync(string isrc, CancellationToken ct)
+    {
+        if (SongIdentity.NormalizeIsrc(isrc) is not { } code) return null;
+        var key = "isrc|" + code;
+        if (_cache.TryGetValue(key, out string? cachedJson) && cachedJson is not null) return JsonDocument.Parse(cachedJson);
+
+        using var doc = await GetAsync($"isrc/{code}?inc=artist-credits+releases+release-groups+media&fmt=json", "code lookup", ct);
+        if (doc is null) return null;
+        var json = doc.RootElement.GetRawText();
+        _cache.Set(key, json, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = SearchTtl });
+        return JsonDocument.Parse(json);
+    }
+
+    /// <summary>
+    /// The search for a recording by name, with a length window of ten seconds either way when
+    /// the length is known. Every name goes through <see cref="EscapeQuery"/>, since a quote, a
+    /// colon or a slash in a title would otherwise change what the query means and the failure
+    /// would read as "no candidate".
+    /// </summary>
+    internal static string BuildRecordingSearchUrl(string artist, string title, int durationSeconds)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(title)) parts.Add($"recording:\"{EscapeQuery(title.Trim())}\"");
+        if (!string.IsNullOrWhiteSpace(artist)) parts.Add($"artist:\"{EscapeQuery(artist.Trim())}\"");
+        if (durationSeconds > 0)
+        {
+            var low = Math.Max(0, durationSeconds - 10) * 1000;
+            var high = (durationSeconds + 10) * 1000;
+            parts.Add($"dur:[{low} TO {high}]");
+        }
+        return $"recording/?query={Uri.EscapeDataString(string.Join(" AND ", parts))}&fmt=json&limit=25";
+    }
+
+    /// <summary>Every character the query language reads as an operator, made literal.</summary>
+    internal static string EscapeQuery(string value)
+    {
+        const string special = "+-&|!(){}[]^\"~*?:\\/";
+        var sb = new System.Text.StringBuilder(value.Length + 8);
+        foreach (var ch in value)
+        {
+            if (special.Contains(ch)) sb.Append('\\');
+            sb.Append(ch);
+        }
+        return sb.ToString();
     }
 
     public async Task<string?> FindRecordingAsync(string artist, string title, int durationSeconds, CancellationToken ct)

@@ -97,6 +97,7 @@ public sealed class LibraryActionEndpointTests
 
         public FakeNavidrome Navidrome { get; }
         public LibraryActionJournal Journal { get; } = new();
+        public UpgradeQueue Upgrades { get; } = new();
         public string SongFile { get; }
         public string Quarantine => Path.Combine(_directory, ".octo-trash");
 
@@ -129,6 +130,8 @@ public sealed class LibraryActionEndpointTests
                 // In memory, so a test never writes a journal beside a real settings file.
                 services.RemoveAll<LibraryActionJournal>();
                 services.AddSingleton(Journal);
+                services.RemoveAll<UpgradeQueue>();
+                services.AddSingleton(Upgrades);
             });
         }
 
@@ -198,7 +201,7 @@ public sealed class LibraryActionEndpointTests
                 e => e.GetProperty("versions").EnumerateArray().Select(v => v.GetInt32()).ToList());
         Assert.Contains("formPost", extensions.Keys);
         Assert.Contains("octoAcquisitions", extensions.Keys);
-        if (listed) Assert.Equal([1], extensions["octoLibraryActions"]);
+        if (listed) Assert.Equal([1, 2], extensions["octoLibraryActions"]);
         else Assert.DoesNotContain("octoLibraryActions", extensions.Keys);
     }
 
@@ -237,7 +240,7 @@ public sealed class LibraryActionEndpointTests
         Assert.Equal("octo", envelope.GetProperty("type").GetString());
         Assert.True(envelope.GetProperty("openSubsonic").GetBoolean());
         var actions = envelope.GetProperty("libraryActions");
-        Assert.Equal(["actions", "allowed", "dryRun", "enabled", "keepDays"],
+        Assert.Equal(["actions", "allowed", "dryRun", "enabled", "keepDays", "parallel", "upgradeSource"],
             actions.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
         Assert.True(actions.GetProperty("enabled").GetBoolean());
         Assert.True(actions.GetProperty("allowed").GetBoolean());
@@ -464,5 +467,129 @@ public sealed class LibraryActionEndpointTests
         Assert.Contains("API key", action.GetProperty("detail").GetString());
         Assert.Equal(1, factory.Navidrome.Pings);
         AssertUntouched(factory);
+    }
+
+    // octoLibraryActions v2: upgrade and getUpgrades
+
+    private static Dictionary<string, string?> BetterQualityOn(bool dryRun = false, bool slskd = true) => new()
+    {
+        // Better quality searches Soulseek, so it is offered only where slskd is set up.
+        ["Soulseek:Username"] = slskd ? "slskd-user" : "",
+        ["Soulseek:Password"] = slskd ? "slskd-pass" : "",
+        ["LibraryActions:Actions:1:Action"] = "BetterQuality",
+        ["LibraryActions:Actions:1:Enabled"] = "true",
+        ["LibraryActions:DryRun"] = dryRun ? "true" : "false",
+    };
+
+    [Fact]
+    public async Task GetLibraryActions_ListsUpgradeOnlyWhileBetterQualityIsOn()
+    {
+        await using (var off = new LibraryActionWebFactory())
+        {
+            using var client = off.CreateClient();
+            using var doc = await GetJson(client, $"/rest/getLibraryActions.view?{Auth("alice")}");
+            var actions = Envelope(doc).GetProperty("libraryActions");
+            Assert.Equal(["remove"], actions.GetProperty("actions").EnumerateArray().Select(a => a.GetString()));
+            Assert.Equal(1, actions.GetProperty("parallel").GetInt32());
+        }
+        await using (var on = new LibraryActionWebFactory(BetterQualityOn()))
+        {
+            using var client = on.CreateClient();
+            using var doc = await GetJson(client, $"/rest/getLibraryActions.view?{Auth("alice")}");
+            Assert.Equal(["remove", "upgrade"],
+                Envelope(doc).GetProperty("libraryActions").GetProperty("actions").EnumerateArray().Select(a => a.GetString()));
+        }
+    }
+
+    [Fact]
+    public async Task Upgrade_IsQueuedAtOnce_AndListedForTheCallerFirst()
+    {
+        await using var factory = new LibraryActionWebFactory(BetterQualityOn());
+        using var client = factory.CreateClient();
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        using var doc = await GetJson(client, $"/rest/libraryAction.view?id=nd-1&action=upgrade&{Auth("alice")}");
+        watch.Stop();
+
+        var action = Action(doc);
+        Assert.Equal("nd-1", action.GetProperty("id").GetString());
+        Assert.Equal("upgrade", action.GetProperty("action").GetString());
+        Assert.Equal("queued", action.GetProperty("state").GetString());
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), $"answered after {watch.Elapsed}");
+        var job = Assert.Single(factory.Upgrades.Snapshot());
+        Assert.Equal("alice", job.RequestedBy);
+        Assert.Equal("app", job.Origin);
+        AssertUntouched(factory);
+
+        using var listed = await GetJson(client, $"/rest/getUpgrades.view?{Auth("alice")}");
+        var row = Assert.Single(Envelope(listed).GetProperty("upgrades").EnumerateArray());
+        Assert.Equal("nd-1", row.GetProperty("id").GetString());
+        Assert.Equal("queued", row.GetProperty("state").GetString());
+        Assert.Equal(["album", "artist", "detail", "id", "progress", "state", "title", "updatedAt"],
+            row.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
+
+        using var someoneElse = await GetJson(client, $"/rest/getUpgrades.view?{Auth("bob")}");
+        Assert.Empty(Envelope(someoneElse).GetProperty("upgrades").EnumerateArray());
+    }
+
+    [Theory]
+    [InlineData("bob", false, "allowed list")]
+    [InlineData("alice", true, "dry run")]
+    public async Task Upgrade_ThatCouldNotChangeAnything_IsSkippedWithTheReason(string user, bool dryRun, string reason)
+    {
+        await using var factory = new LibraryActionWebFactory(BetterQualityOn(dryRun));
+        using var client = factory.CreateClient();
+        using var doc = await GetJson(client, $"/rest/libraryAction.view?id=nd-1&action=upgrade&{Auth(user)}");
+        var action = Action(doc);
+        Assert.Equal("skipped", action.GetProperty("state").GetString());
+        Assert.Contains(reason, action.GetProperty("detail").GetString());
+        Assert.Empty(factory.Upgrades.Snapshot());
+    }
+
+    [Fact]
+    public async Task Upgrade_WithBetterQualityOff_IsSkipped()
+    {
+        await using var factory = new LibraryActionWebFactory();
+        using var client = factory.CreateClient();
+        using var doc = await GetJson(client, $"/rest/libraryAction.view?id=nd-1&action=upgrade&{Auth("alice")}");
+        Assert.Contains("Better quality", Action(doc).GetProperty("detail").GetString());
+        Assert.Empty(factory.Upgrades.Snapshot());
+    }
+
+    [Fact]
+    public async Task WithoutSlskdSetUp_UpgradeIsNotOffered_AndAskingIsSkipped()
+    {
+        await using var factory = new LibraryActionWebFactory(BetterQualityOn(slskd: false));
+        using var client = factory.CreateClient();
+        using var actions = await GetJson(client, $"/rest/getLibraryActions.view?{Auth("alice")}");
+        var described = Envelope(actions).GetProperty("libraryActions");
+        Assert.DoesNotContain("upgrade", described.GetProperty("actions").EnumerateArray().Select(a => a.GetString()));
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, described.GetProperty("upgradeSource").ValueKind);
+
+        using var doc = await GetJson(client, $"/rest/libraryAction.view?id=nd-1&action=upgrade&{Auth("alice")}");
+        var action = Action(doc);
+        Assert.Equal("skipped", action.GetProperty("state").GetString());
+        Assert.Contains("not set up", action.GetProperty("detail").GetString());
+        Assert.Empty(factory.Upgrades.Snapshot());
+    }
+
+    [Fact]
+    public async Task GetLibraryActions_NamesWhereAnUpgradeLooks()
+    {
+        await using var factory = new LibraryActionWebFactory(BetterQualityOn());
+        using var client = factory.CreateClient();
+        using var doc = await GetJson(client, $"/rest/getLibraryActions.view?{Auth("alice")}");
+        Assert.Equal("Soulseek", Envelope(doc).GetProperty("libraryActions").GetProperty("upgradeSource").GetString());
+    }
+
+    [Fact]
+    public async Task GetUpgrades_WrongPassword_IsError40()
+    {
+        await using var factory = new LibraryActionWebFactory(BetterQualityOn());
+        using var client = factory.CreateClient();
+        using var doc = await GetJson(client, $"/rest/getUpgrades.view?{Auth("alice", "wrong")}");
+        var envelope = Envelope(doc);
+        Assert.Equal("failed", envelope.GetProperty("status").GetString());
+        Assert.Equal(40, envelope.GetProperty("error").GetProperty("code").GetInt32());
     }
 }

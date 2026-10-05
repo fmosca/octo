@@ -19,6 +19,15 @@ public enum LibraryRatingScope { Auto, NoticeOnly, Global }
 /// <summary>The playlists Octo fills to ask a person something (#47, #53).</summary>
 public enum NoticeKind { Review, Duplicates }
 
+/// <summary>Where Better quality looks for a lossless copy.</summary>
+public enum UpgradeSourceChoice
+{
+    /// <summary>Every source that is set up: Soulseek first, then Lidarr for what Soulseek cannot find.</summary>
+    Auto,
+    Soulseek,
+    Lidarr,
+}
+
 public sealed class LibraryActionDefinition
 {
     public LibraryAction Action { get; set; }
@@ -156,6 +165,21 @@ public class LibraryActionSettings
     public string ReviewPlaylistName { get; set; } = "Review";
 
     /// <summary>
+    /// How many songs already in the library the Review playlist checks an hour (#72). 0, the
+    /// default, is off. Downloads are checked as they arrive; this asks about music that was
+    /// already there, and only while nothing is downloading.
+    /// Environment variable: LIBRARY_ACTIONS_REVIEW_SWEEP_PER_HOUR
+    /// </summary>
+    public int ReviewSweepPerHour { get; set; } = 0;
+
+    /// <summary>
+    /// Check Octo's own downloads too. Off by default: those were checked when they arrived, as
+    /// long as download verification was on then.
+    /// Environment variable: LIBRARY_ACTIONS_REVIEW_SWEEP_OCTO_DOWNLOADS
+    /// </summary>
+    public bool ReviewSweepOctoDownloads { get; set; } = false;
+
+    /// <summary>
     /// A "Duplicates" playlist per allowed user: recordings the library holds more than once,
     /// side by side, the copy worth keeping first. Octo only points them out; nothing is removed
     /// unless you remove it (#53).
@@ -187,7 +211,30 @@ public class LibraryActionSettings
     /// </summary>
     public LibraryRatingScope RatingsScope { get; set; } = LibraryRatingScope.Auto;
 
+    /// <summary>
+    /// Songs a week Octo tries to upgrade to lossless by itself, spread evenly across the week, one
+    /// at a time, through Better quality. 0 is off. Needs Better quality switched on, and runs as
+    /// the first person on AllowedUsers.
+    /// Environment variable: LIBRARY_ACTIONS_UPGRADE_PER_WEEK
+    /// </summary>
+    public int UpgradePerWeek { get; set; } = 0;
+
+    /// <summary>
+    /// Where Better quality looks for a lossless copy (default: Auto). Auto uses every source that
+    /// is set up, Soulseek first and then Lidarr for what Soulseek cannot find; Soulseek or Lidarr
+    /// uses only that one.
+    /// Environment variable: LIBRARY_ACTIONS_UPGRADE_SOURCE
+    /// </summary>
+    public UpgradeSourceChoice UpgradeSource { get; set; } = UpgradeSourceChoice.Auto;
+
+    public int EffectiveUpgradePerWeek => Math.Clamp(UpgradePerWeek, 0, 500);
+
     public int EffectiveNoticeMaxTracks => Math.Clamp(NoticeMaxTracks, 1, 500);
+
+    /// <summary>0 is off. The ceiling is one file every ten seconds: the mount and the decoder are
+    /// the limit, not AcoustID, and a gap that long keeps a download's lookup from ever queueing
+    /// behind more than one of the sweep's.</summary>
+    public int EffectiveReviewSweepPerHour => ReviewSweepPerHour <= 0 ? 0 : Math.Min(ReviewSweepPerHour, 360);
 
     public TimeSpan EffectiveDuplicatesScanInterval => TimeSpan.FromHours(Math.Clamp(DuplicatesScanHours, 1, 168));
 

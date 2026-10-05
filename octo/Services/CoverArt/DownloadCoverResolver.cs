@@ -15,9 +15,13 @@ public sealed record CoverChoice(byte[] Bytes, string Source, bool KeepsExisting
 /// so anything Deezer did not know was written with no art, while the aggregator that already
 /// knew iTunes and Last.fm sat unused beside it.
 ///
-/// In order: the Cover Art Archive when a fingerprint named the release the album tag describes,
-/// the catalog's own cover, the aggregator by name, and last the file's own art. A cover that is
-/// not square counts as missing, and a letterboxed video frame gives up its centre.
+/// Asked in order: Apple's master of the same album (often 3000 px, and only on a strict match),
+/// the Cover Art Archive when a fingerprint named the release the album tag describes, the
+/// catalog's own cover, the aggregator by name, and last the file's own art. The
+/// first one at least <see cref="SharpSide"/> wide wins at once; otherwise the largest one seen
+/// does. Taking the first usable one let a 500 px archive scan or a peer's 200 px thumbnail
+/// beat the catalog's 1000 px cover. A cover that is not square counts as missing, and a
+/// letterboxed video frame gives up its centre only when nothing else was found.
 /// </summary>
 public sealed class DownloadCoverResolver
 {
@@ -25,15 +29,22 @@ public sealed class DownloadCoverResolver
     /// phase runs under the download lock.</summary>
     private static readonly TimeSpan CatalogTimeout = TimeSpan.FromSeconds(8);
 
+    /// <summary>Big enough to stop looking: the catalog's own covers are 1000 px. Apple's master,
+    /// asked first, is usually far larger, and is what a match there gets.</summary>
+    internal const int SharpSide = 1000;
+
     private readonly CoverArtArchiveLookup _archive;
     private readonly CoverArtAggregator _aggregator;
     private readonly IHttpClientFactory _http;
     private readonly IOptionsMonitor<MetadataSettings> _settings;
     private readonly ILogger<DownloadCoverResolver> _logger;
+    private readonly ITunesCoverArtLookup? _itunes;
 
     public DownloadCoverResolver(CoverArtArchiveLookup archive, CoverArtAggregator aggregator,
-        IHttpClientFactory http, IOptionsMonitor<MetadataSettings> settings, ILogger<DownloadCoverResolver> logger)
+        IHttpClientFactory http, IOptionsMonitor<MetadataSettings> settings, ILogger<DownloadCoverResolver> logger,
+        ITunesCoverArtLookup? itunes = null)
     {
+        _itunes = itunes;
         _archive = archive;
         _aggregator = aggregator;
         _http = http;
@@ -45,6 +56,32 @@ public sealed class DownloadCoverResolver
     {
         var settings = _settings.CurrentValue;
         var requireSquare = settings.ReplaceVideoCovers;
+        CoverChoice? best = null;
+        var bestSide = 0;
+
+        // True when this one is sharp enough to stop; otherwise it is kept if it is the biggest.
+        bool Offer(byte[]? bytes, string source, bool keepsExisting = false)
+        {
+            if (!CoverImage.IsUsable(bytes, requireSquare) || CoverImage.Measure(bytes!) is not { } size) return false;
+            var side = Math.Min(size.Width, size.Height);
+            if (side > bestSide)
+            {
+                best = new CoverChoice(bytes!, source, keepsExisting);
+                bestSide = side;
+            }
+            return side >= SharpSide;
+        }
+
+        // A compilation's album artist is nobody Apple would list it under.
+        if (_itunes is not null && !song.IsCompilation)
+        {
+            // A barcode the chooser found names one release outright, so Apple is asked by it
+            // first and the master lookup below answers from that match without a search.
+            if (song.Barcode is { Length: > 0 } barcode && !string.IsNullOrWhiteSpace(song.Album))
+                await _itunes.PrimeByBarcodeAsync([(song.PrimaryArtist ?? song.Artist, song.Album, barcode)], null, ct);
+            var master = await _itunes.TryFetchAlbumMasterAsync(song.PrimaryArtist ?? song.Artist, song.Album, song.Title, ct);
+            if (Offer(master, "iTunes")) return best;
+        }
 
         // Only when the album tag IS the release the fingerprint matched: a download tagged with
         // a compilation's name must not get the original album's cover.
@@ -53,13 +90,13 @@ public sealed class DownloadCoverResolver
             && VerificationResult.AlbumIsFromRelease(song))
         {
             var archived = await _archive.TryFetchAsync(song.MusicBrainzReleaseId, song.MusicBrainzReleaseGroupId, ct);
-            if (CoverImage.IsUsable(archived, requireSquare)) return new(archived!, "Cover Art Archive", false);
+            if (Offer(archived, "Cover Art Archive")) return best;
         }
 
         if ((song.CoverArtUrlLarge ?? song.CoverArtUrl) is { Length: > 0 } url)
         {
             var catalog = await DownloadAsync(url, ct);
-            if (CoverImage.IsUsable(catalog, requireSquare)) return new(catalog!, "the catalog", false);
+            if (Offer(catalog, "the catalog")) return best;
         }
 
         try
@@ -72,19 +109,25 @@ public sealed class DownloadCoverResolver
                 Album = song.Album,
             };
             var aggregated = await _aggregator.GetCoverAsync(routing, background: true, ct);
-            if (CoverImage.IsUsable(aggregated, requireSquare)) return new(aggregated!, "a cover search", false);
+            if (Offer(aggregated, "a cover search")) return best;
         }
         catch (Exception ex)
         {
             _logger.LogDebug("cover search failed for {Artist} - {Title}: {M}", song.Artist, song.Title, ex.Message);
         }
 
-        if (embedded is { Length: > 0 })
+        if (embedded is { Length: > 0 }) Offer(embedded, "the file itself", keepsExisting: true);
+        if (best is not null)
         {
-            if (CoverImage.IsUsable(embedded, requireSquare)) return new(embedded, "the file itself", true);
-            if (requireSquare && CoverImage.CropToSquare(embedded) is { } cropped && CoverImage.IsUsable(cropped, true))
-                return new(cropped, "the centre of a video frame", false);
+            if (bestSide < SharpSide)
+                _logger.LogInformation("Best cover for {Artist} - {Title} is {Side} px, from {Source}",
+                    song.Artist, song.Title, bestSide, best.Source);
+            return best;
         }
+
+        if (embedded is { Length: > 0 } && requireSquare
+            && CoverImage.CropToSquare(embedded) is { } cropped && CoverImage.IsUsable(cropped, true))
+            return new(cropped, "the centre of a video frame", false);
         return null;
     }
 

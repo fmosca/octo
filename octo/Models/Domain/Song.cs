@@ -176,6 +176,47 @@ public class Song
 
     public bool IsCompilation { get; set; }
 
+    /// <summary>The catalogue number the label gave the release.</summary>
+    public string? CatalogNumber { get; set; }
+
+    /// <summary>The release's barcode (UPC or EAN).</summary>
+    public string? Barcode { get; set; }
+
+    /// <summary>The kind of release, lowercase, as the music database says it: "album", "single", "album; compilation".</summary>
+    public string? ReleaseType { get; set; }
+
+    /// <summary>The release's status, lowercase: "official", "promotion", "bootleg".</summary>
+    public string? ReleaseStatus { get; set; }
+
+    /// <summary>The two-letter country the release came out in ("XW" for worldwide).</summary>
+    public string? ReleaseCountry { get; set; }
+
+    /// <summary>When the recording first came out, as a full date when known (YYYY-MM-DD), else a year.</summary>
+    public string? OriginalDate { get; set; }
+
+    /// <summary>The id of this track on the chosen release, which taggers and the library server both read.</summary>
+    public string? MusicBrainzReleaseTrackId { get; set; }
+
+    /// <summary>The ids of the release's album artists, one per credit.</summary>
+    public List<string> MusicBrainzAlbumArtistIds { get; set; } = new();
+
+    /// <summary>The fingerprint service's id for the audio, once it confirmed the recording.</summary>
+    public string? AcoustId { get; set; }
+
+    /// <summary>ReplayGain from the measured loudness: the gain in dB that brings the track to the
+    /// reference level, and its peak as a fraction of full scale. Album values come from an album walk.</summary>
+    public double? ReplayGainTrackGainDb { get; set; }
+    public double? ReplayGainTrackPeak { get; set; }
+    public double? ReplayGainAlbumGainDb { get; set; }
+    public double? ReplayGainAlbumPeak { get; set; }
+
+    /// <summary>
+    /// How the download was identified and what the tags came from, carried through the download
+    /// so the fetched-songs log can show it. Never serialised.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Octo.Services.Tagging.TagPlan? TagPlan { get; set; }
+
     /// <summary>
     /// What AcoustID said about the downloaded file. Carried on the Song because
     /// DownloadSongInternalAsync threads ONE instance through download, tagging and placement.

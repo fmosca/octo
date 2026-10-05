@@ -28,8 +28,17 @@ services:
       Subsonic__DownloadAlbumOnStar: ${DOWNLOAD_ALBUM_ON_STAR:-true}
       # Name the user who starred a track on its history entry and notification.
       Subsonic__RecordRequestedBy: ${RECORD_REQUESTED_BY:-true}
+      # Also favorite a hearted song in Navidrome once it downloads, for whoever hearted it.
+      # Off by default: a heart on a song you do not have only downloads it. A heart on a song
+      # you already have is always a favorite.
+      Subsonic__StarDownloadsForRequester: ${STAR_DOWNLOADS_FOR_REQUESTER:-false}
+      # Never download a song already in the library; a lossy copy is queued for a
+      # higher quality one instead.
+      Subsonic__SkipOwnedSongs: ${SKIP_OWNED_SONGS:-true}
       Subsonic__WaitForLosslessOnPlay: ${WAIT_FOR_LOSSLESS_ON_PLAY:-false}
       Subsonic__LosslessWaitTimeoutSeconds: ${LOSSLESS_WAIT_TIMEOUT_SECONDS:-0}
+      Subsonic__DownloadOnPlay: ${DOWNLOAD_ON_PLAY:-false}
+      Subsonic__LidarrAlbumOnPlay: ${LIDARR_ALBUM_ON_PLAY:-false}
       Subsonic__FolderStructure: ${FOLDER_STRUCTURE:-Flat}
       Subsonic__DownloadSource: ${DOWNLOAD_SOURCE:-Soulseek}
       Subsonic__UseLocalStaging: ${USE_LOCAL_STAGING:-false}
@@ -37,6 +46,7 @@ services:
       Subsonic__CacheDurationHours: ${CACHE_DURATION_HOURS:-1}
       Subsonic__EnableExternalPlaylists: ${ENABLE_EXTERNAL_PLAYLISTS:-false}
       Subsonic__EnableSearchDiscovery: ${ENABLE_SEARCH_DISCOVERY:-true}
+      Subsonic__WaitForSearchDurations: ${WAIT_FOR_SEARCH_DURATIONS:-true}
       # Clients that sync the library and search offline (Symfonium) get your radio
       # stations' tracks appended to the sync, so discovery reaches them too.
       Subsonic__EnableSyncCatalog: ${ENABLE_SYNC_CATALOG:-true}
@@ -54,6 +64,7 @@ services:
       Soulseek__Username: ${SLSKD_USERNAME:-slskd}
       Soulseek__Password: ${SLSKD_PASSWORD:-slskd}
       Soulseek__SearchWaitSeconds: ${SLSKD_SEARCH_WAIT_SECONDS:-30}
+      Soulseek__UpgradeSearchWaitSeconds: ${SLSKD_UPGRADE_SEARCH_WAIT_SECONDS:-90}
       Soulseek__MinFileSizeBytes: ${SLSKD_MIN_FILE_SIZE_BYTES:-5242880}
       Soulseek__PreferredExtension: ${SLSKD_PREFERRED_EXTENSION:-flac}
       Soulseek__DownloadTimeoutSeconds: ${SLSKD_DOWNLOAD_TIMEOUT_SECONDS:-180}
@@ -71,6 +82,15 @@ services:
       Soulseek__FingerprintSeconds: ${SLSKD_FINGERPRINT_SECONDS:-120}
       Soulseek__FingerprintTimeoutSeconds: ${SLSKD_FINGERPRINT_TIMEOUT_SECONDS:-30}
       Soulseek__AcoustIdTimeoutSeconds: ${SLSKD_ACOUSTID_TIMEOUT_SECONDS:-10}
+      # Hours a heart waits while slskd is up but not logged in to Soulseek (server
+      # maintenance), before it uses the next source. 0 means do not wait.
+      Soulseek__OutageHoldHours: ${SLSKD_OUTAGE_HOLD_HOURS:-6}
+      # Downloads that may transfer at once (1 to 6). Each lands in its own folder, and Octo
+      # keeps to one at a time until slskd has proven it. 1 is the old behaviour.
+      Soulseek__ParallelDownloads: ${SLSKD_PARALLEL_DOWNLOADS:-3}
+      # An album heart takes one peer's folder of the album in one batch, then searches song
+      # by song only for what it lacks. false is the old song by song walk.
+      Soulseek__AlbumFolders: ${SLSKD_ALBUM_FOLDERS:-true}
       # Send AcoustID the fingerprints you confirmed with Keep, so the next person gets a
       # confident match. Needs your personal AcoustID key (acoustid.org, after signing in).
       Soulseek__SubmitConfirmedFingerprints: ${ACOUSTID_SUBMIT:-false}
@@ -150,10 +170,17 @@ services:
       # settle. Answer with Keep (5 stars) or an action; removing a track answers too.
       LibraryActions__NoticePrefix: ${LIBRARY_ACTIONS_NOTICE_PREFIX:-▸ }
       LibraryActions__ReviewEnabled: ${LIBRARY_ACTIONS_REVIEW:-false}
+      # Also check songs already in the library, this many an hour (0 is off). Only while nothing
+      # downloads, only the library keeper is asked, and at most 50 such questions wait at once.
+      LibraryActions__ReviewSweepPerHour: ${LIBRARY_ACTIONS_REVIEW_SWEEP_PER_HOUR:-0}
+      LibraryActions__ReviewSweepOctoDownloads: ${LIBRARY_ACTIONS_REVIEW_SWEEP_OCTO_DOWNLOADS:-false}
       # Recordings the library holds more than once, side by side, the copy worth keeping first.
       # Octo only points them out; nothing is removed unless you remove it.
       LibraryActions__DuplicatesEnabled: ${LIBRARY_ACTIONS_DUPLICATES:-false}
       LibraryActions__DuplicatesScanHours: ${LIBRARY_ACTIONS_DUPLICATES_SCAN_HOURS:-24}
+      LibraryActions__UpgradePerWeek: ${LIBRARY_ACTIONS_UPGRADE_PER_WEEK:-0}
+      # Where Better quality looks: Auto (Soulseek, then Lidarr), Soulseek or Lidarr.
+      LibraryActions__UpgradeSource: ${LIBRARY_ACTIONS_UPGRADE_SOURCE:-Auto}
       LibraryActions__NoticeMaxTracks: ${LIBRARY_ACTIONS_NOTICE_MAX:-100}
       # Auto: stars only act on tracks in Octo's playlists while Review or Duplicates is on.
       LibraryActions__RatingsScope: ${LIBRARY_ACTIONS_RATINGS_SCOPE:-Auto}
@@ -169,13 +196,26 @@ services:
       Metadata__UseCoverArtArchive: ${COVER_ART_ARCHIVE:-true}
       Metadata__ReplaceVideoCovers: ${REPLACE_VIDEO_COVERS:-true}
       Metadata__WriteCoverFile: ${COVER_FILE:-true}
+      # Embed covers at full size (often 3000 px) instead of 1500 px. cover.jpg is full size either way.
+      Metadata__EmbedFullSizeCovers: ${FULL_SIZE_COVERS:-false}
+      # Release matching: the original album and year for a song that arrived without an
+      # album, release details from MusicBrainz, ReplayGain from a loudness measurement,
+      # and a rehearsal mode that reports without writing the matched tags.
+      Metadata__PreferOriginalAlbum: ${PREFER_ORIGINAL_ALBUM:-true}
+      Metadata__YearFromOriginalRelease: ${YEAR_FROM_ORIGINAL_RELEASE:-true}
+      Metadata__PreferredCountries: ${PREFERRED_COUNTRIES:-}
+      Metadata__ReleaseDetailsLookup: ${RELEASE_DETAILS_LOOKUP:-true}
+      Metadata__ReplayGain: ${REPLAYGAIN:-true}
+      Metadata__ReplayGainTimeoutSeconds: ${REPLAYGAIN_TIMEOUT_SECONDS:-45}
+      Metadata__TagRehearsal: ${TAG_REHEARSAL:-false}
       # Lyrics: a .lrc (synced) or .txt (plain) beside each download, and live lyrics
       # for songs as they play. kugou and netease are unofficial APIs; netease only
       # runs if listed, and leaving kugou out switches it off.
       Metadata__FetchLyrics: ${LYRICS_FETCH:-false}
-      Metadata__LyricsSources: ${LYRICS_SOURCES:-kugou,lrclib,lyricsovh}
+      Metadata__LyricsSources: ${LYRICS_SOURCES:-song,kugou,lrclib,lyricsovh}
       Metadata__PreferWordTimedLyrics: ${LYRICS_PREFER_WORD_TIMED:-true}
       Metadata__WriteLyricsBesideAllSongs: ${LYRICS_WRITE_BESIDE_ALL:-false}
+      Metadata__SaveLyricsTo: ${LYRICS_SAVE_TO:-beside}
 
       # ----- Notifications (ntfy / Discord webhook) — both optional -----
       Notifications__NtfyUrl: ${NTFY_URL:-}
@@ -186,11 +226,18 @@ services:
       Notifications__NotifyLosslessFallback: ${NOTIFY_LOSSLESS_FALLBACK:-true}
       Notifications__NotifyDownloadFailed: ${NOTIFY_DOWNLOAD_FAILED:-true}
       Notifications__NotifyAlbumCompleted: ${NOTIFY_ALBUM_COMPLETED:-true}
+      # ----- Updates -----
+      # Ask GitHub every 6 hours whether a newer Octo release is out, and say so on
+      # the dashboard. With the update helper on the host, the dashboard can also
+      # install it (see "Updating" in the README).
+      Updates__Check: ${UPDATES_CHECK:-true}
+      Updates__Repo: ${UPDATES_REPO:-winters27/octo}
     volumes:
       - ${DOWNLOAD_PATH:-./downloads}:/music
-      # Editable settings file — admin UI writes here, ASP.NET hot-reloads on
-      # change. Bind-mounted to host so values survive `docker compose up`.
-      - ./octo-config:/app/config
+      # Editable settings file: the admin UI writes here, ASP.NET hot-reloads on
+      # change. Bind-mounted to host so values survive `docker compose up`. The
+      # update helper watches its update/ folder.
+      - ${OCTO_CONFIG_DIR:-./octo-config}:/app/config
     depends_on:
       - yt-dlp-shim
       - slskd
@@ -269,7 +316,7 @@ services:
       SLSKD_USERNAME: ${SLSKD_USERNAME:-slskd}
       SLSKD_PASSWORD: ${SLSKD_PASSWORD:-slskd}
     volumes:
-      - ./slskd-state:/app
+      - ${SLSKD_STATE_DIR:-./slskd-state}:/app
       - ${DOWNLOAD_PATH:-./downloads}:/music
 
 volumes:

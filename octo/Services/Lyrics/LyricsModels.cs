@@ -17,11 +17,25 @@ public sealed record LyricsResult(string Source, string? Synced, string? Plain, 
     public bool HasPlain => !string.IsNullOrWhiteSpace(Plain);
     public bool HasWordTiming => HasSynced && LyricsText.HasWordTags(Synced);
 
-    public LyricsTiming Timing => Instrumental ? LyricsTiming.None
+    public LyricsTiming Timing => SongTiming is { } song ? song
+        : Instrumental ? LyricsTiming.None
         : HasWordTiming ? LyricsTiming.Word
         : HasSynced ? LyricsTiming.Line
         : HasPlain ? LyricsTiming.Plain
         : LyricsTiming.None;
+
+    /// <summary>
+    /// Set on a stand-in for the lyrics the song already has (in its tags or a file beside it),
+    /// which Navidrome serves and Octo only ranks: how they are timed. The text stays Navidrome's.
+    /// </summary>
+    public LyricsTiming? SongTiming { get; init; }
+
+    /// <summary>Whether this stands in for the song's own lyrics: serve Navidrome's.</summary>
+    public bool IsSongsOwn => SongTiming is not null;
+
+    /// <summary>A stand-in for the song's own lyrics, timed as given.</summary>
+    public static LyricsResult SongsOwn(LyricsTiming timing) =>
+        new(Octo.Models.Settings.MetadataSettings.SongLyricsSource, null, null, false) { SongTiming = timing };
 
     /// <summary>The candidate these lyrics came from ("kugou:..."), so a pin can name it.</summary>
     public string? CandidateId { get; init; }

@@ -8,6 +8,51 @@ namespace Octo.Services.Lyrics;
 
 public enum LyricsLibraryStatus { Idle, Running, Completed, Cancelled, Interrupted, Failed }
 
+/// <summary>
+/// What a run does. Walk looks every song up and saves what it finds in one pass. The dashboard's
+/// lyrics page goes in steps instead, as the soft covers wall does: Scan reads the songs and
+/// lists the ones with no lyrics or weaker ones, changing nothing; Preview looks up the picked
+/// songs, changing nothing; Save writes what Preview found for the picked songs; Undo puts back
+/// everything Save wrote.
+/// </summary>
+public enum LyricsLibraryMode { Walk, Scan, Preview, Save, Undo }
+
+/// <summary>One song on the lyrics page's list, and what each step made of it.</summary>
+public sealed class LyricsLibraryRow
+{
+    public string Id { get; set; } = "";
+    public string Path { get; set; } = "";
+    public string Artist { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string? Album { get; set; }
+
+    /// <summary>What the song has now: none, plain or line.</summary>
+    public string Has { get; set; } = "none";
+
+    /// <summary>weak (listed by a scan), found, none (nothing better), busy (no service answered),
+    /// saved, kept (nothing to change by the time it was saved), blocked (only lyrics Octo may not
+    /// replace), failed.</summary>
+    public string Result { get; set; } = "weak";
+
+    public string? Source { get; set; }
+    public string? Kind { get; set; }
+    public string? CandidateId { get; set; }
+    public string? Doubt { get; set; }
+    public List<string> Preview { get; set; } = [];
+
+    /// <summary>The lyrics a preview found, kept for Save; never sent to the dashboard.</summary>
+    public string? FoundSynced { get; set; }
+    public string? FoundPlain { get; set; }
+
+    public LyricsResult? Found => FoundSynced is null && FoundPlain is null
+        ? null
+        : new LyricsResult(Source ?? "found", FoundSynced, FoundPlain, false) { CandidateId = CandidateId, Doubt = Doubt };
+
+    /// <summary>A short id for a file, the same on every scan.</summary>
+    public static string IdOf(string path) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(path)))[..16].ToLowerInvariant();
+}
+
 /// <summary>A lyric the job wrote but is not sure of, for someone to look at.</summary>
 public sealed record LyricsReviewEntry(
     string Path, string Artist, string Title, string? Album, int? DurationSeconds,
@@ -22,8 +67,20 @@ public sealed class LyricsLibraryRun
     /// songs" was on when the run started.</summary>
     public string Scope { get; set; } = "OctoDownloads";
 
-    /// <summary>Also look again for word timing where Octo wrote line-timed lyrics.</summary>
+    /// <summary>Also look again where a song's lyrics are weaker than the sources would choose
+    /// now: plain, or line-timed while word timing is preferred.</summary>
     public bool Upgrade { get; set; }
+
+    public LyricsLibraryMode Mode { get; set; } = LyricsLibraryMode.Walk;
+
+    /// <summary>The songs a scan listed, with what Preview and Save made of them.</summary>
+    public List<LyricsLibraryRow> Rows { get; set; } = [];
+
+    /// <summary>The rows picked for Preview or Save; null for a scan or a walk.</summary>
+    public List<string>? Picked { get; set; }
+
+    /// <summary>Songs a scan found with word-timed lyrics already.</summary>
+    public int WordAlready { get; set; }
 
     public DateTime? StartedUtc { get; set; }
     public DateTime? FinishedUtc { get; set; }
@@ -49,7 +106,7 @@ public sealed class LyricsLibraryRun
     public List<LyricsReviewEntry> Review { get; set; } = [];
 
     public bool CanResume => Status is LyricsLibraryStatus.Cancelled or LyricsLibraryStatus.Interrupted
-        && Cursor < Queue.Count;
+        && Mode != LyricsLibraryMode.Undo && Cursor < Queue.Count;
 }
 
 /// <summary>
@@ -150,18 +207,81 @@ public sealed class LyricsLibraryStore : IDisposable
     }
 }
 
-public sealed record LyricsLibraryRequest(bool Upgrade, bool Resume = false);
+public sealed record LyricsLibraryRequest(bool Upgrade, bool Resume = false,
+    LyricsLibraryMode Mode = LyricsLibraryMode.Walk, string? Scope = null, List<string>? Picked = null);
+
+/// <summary>
+/// What Save wrote over, so Undo can put it back: a lyrics file beside a song (Before null when
+/// there was none) or the lyrics in its tags. Kept beside the run state, one line per write.
+/// </summary>
+public sealed class LyricsUndoJournal
+{
+    public const string Beside = "beside";
+    public const string Inside = "inside";
+
+    public sealed record Entry(string Path, string Kind, string? Before, string RunId, DateTime AtUtc);
+
+    private readonly string? _path;
+    private readonly List<Entry> _memory = [];
+    private readonly object _lock = new();
+
+    public LyricsUndoJournal(string? path = null) => _path = string.IsNullOrWhiteSpace(path) ? null : path;
+
+    public bool HasEntries
+    {
+        get
+        {
+            lock (_lock) return _path is null ? _memory.Count > 0 : File.Exists(_path) && new FileInfo(_path).Length > 0;
+        }
+    }
+
+    public void Record(string path, string kind, string? before, string runId)
+    {
+        var entry = new Entry(path, kind, before, runId, DateTime.UtcNow);
+        lock (_lock)
+        {
+            if (_path is null) { _memory.Add(entry); return; }
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(_path)!);
+            File.AppendAllText(_path, JsonSerializer.Serialize(entry) + "\n");
+        }
+    }
+
+    public IReadOnlyList<Entry> ReadAll()
+    {
+        lock (_lock)
+        {
+            if (_path is null) return _memory.ToList();
+            if (!File.Exists(_path)) return [];
+            return File.ReadAllLines(_path)
+                .Where(line => line.Length > 0)
+                .Select(line => { try { return JsonSerializer.Deserialize<Entry>(line); } catch { return null; } })
+                .OfType<Entry>()
+                .ToList();
+        }
+    }
+
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _memory.Clear();
+            if (_path is not null && File.Exists(_path)) File.Delete(_path);
+        }
+    }
+}
 
 /// <summary>
 /// "Find lyrics for the library": walks the songs that have no lyrics file and no lyrics in
-/// their tags, and writes a lyrics file beside each one the sources have. One song at a time
+/// their tags, and saves lyrics for each one the sources have (LYRICS_SAVE_TO says where). With
+/// the upgrade box ticked, songs whose lyrics are weaker than the sources would choose are looked
+/// up again too. One song at a time
 /// with a pause between, so a library of thousands never floods a lyrics service; stoppable
 /// from the dashboard, and resumable after a stop or a restart from where it was.
 ///
 /// Where it writes follows the rule the downloads follow: beside the songs Octo downloaded, and
 /// beside every library song only when "Write lyrics files beside all library songs" is on.
 /// </summary>
-public sealed class LyricsLibraryWorker : BackgroundService
+public sealed partial class LyricsLibraryWorker : BackgroundService
 {
     /// <summary>The pause after each song that needed a lookup.</summary>
     internal static TimeSpan Gap = TimeSpan.FromSeconds(1.5);
@@ -186,13 +306,14 @@ public sealed class LyricsLibraryWorker : BackgroundService
     private int _pending;
 
     public LyricsLibraryWorker(LyricsLibraryStore store, LyricsSidecarWriter writer, IOptionsMonitor<MetadataSettings> settings,
-        IServiceScopeFactory scopes, Octo.Services.Library.NavidromeSongPathResolver paths, ILogger<LyricsLibraryWorker> logger)
-        : this(store, writer, settings, scopes, paths.MusicRoot, logger)
+        IServiceScopeFactory scopes, Octo.Services.Library.NavidromeSongPathResolver paths, LyricsUndoJournal journal,
+        ILogger<LyricsLibraryWorker> logger)
+        : this(store, writer, settings, scopes, paths.MusicRoot, logger, journal)
     {
     }
 
     internal LyricsLibraryWorker(LyricsLibraryStore store, LyricsSidecarWriter writer, IOptionsMonitor<MetadataSettings> settings,
-        IServiceScopeFactory scopes, Func<string> musicRoot, ILogger<LyricsLibraryWorker> logger)
+        IServiceScopeFactory scopes, Func<string> musicRoot, ILogger<LyricsLibraryWorker> logger, LyricsUndoJournal? journal = null)
     {
         _store = store;
         _writer = writer;
@@ -200,7 +321,13 @@ public sealed class LyricsLibraryWorker : BackgroundService
         _scopes = scopes;
         _musicRoot = musicRoot;
         _logger = logger;
+        _journal = journal ?? new LyricsUndoJournal();
     }
+
+    private readonly LyricsUndoJournal _journal;
+
+    /// <summary>Whether Save wrote anything Undo can put back.</summary>
+    public bool CanUndo => _journal.HasEntries;
 
     public LyricsLibraryRun Current => _store.Current;
 
@@ -253,6 +380,12 @@ public sealed class LyricsLibraryWorker : BackgroundService
 
     internal async Task RunAsync(LyricsLibraryRequest request, CancellationToken stoppingToken)
     {
+        var mode = request.Resume ? _store.Current.Mode : request.Mode;
+        if (mode != LyricsLibraryMode.Walk)
+        {
+            await RunStepAsync(request, mode, stoppingToken);
+            return;
+        }
         _cancelRequested = false;
         var current = _store.Current;
         List<string> queue;
@@ -270,6 +403,7 @@ public sealed class LyricsLibraryWorker : BackgroundService
             {
                 RunId = Guid.NewGuid().ToString("N")[..12],
                 Status = LyricsLibraryStatus.Running,
+                Mode = LyricsLibraryMode.Walk,
                 Scope = whole ? "WholeLibrary" : "OctoDownloads",
                 Upgrade = request.Upgrade,
                 StartedUtc = DateTime.UtcNow,
@@ -339,7 +473,10 @@ public sealed class LyricsLibraryWorker : BackgroundService
                         run.Written++;
                         if (write.Result?.Timing == LyricsTiming.Word) run.WordTimed++;
                         break;
-                    case LyricsWriteOutcome.Upgraded: run.Upgraded++; run.WordTimed++; break;
+                    case LyricsWriteOutcome.Upgraded:
+                        run.Upgraded++;
+                        if (write.Result?.Timing == LyricsTiming.Word) run.WordTimed++;
+                        break;
                     case LyricsWriteOutcome.AlreadyThere: run.AlreadyHad++; break;
                     case LyricsWriteOutcome.NotFound: run.NotFound++; break;
                     case LyricsWriteOutcome.Instrumental: run.Instrumental++; break;

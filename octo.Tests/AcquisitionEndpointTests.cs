@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -25,12 +26,18 @@ public sealed class AcquisitionEndpointTests
     private sealed class FakeNavidrome : HttpMessageHandler
     {
         public int Pings;
+        public ConcurrentQueue<string> Stars { get; } = new();
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var uri = request.RequestUri!;
             var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
             var json = query["f"] == "json";
+            if (uri.AbsolutePath.EndsWith("/rest/star", StringComparison.Ordinal) || uri.AbsolutePath.EndsWith("/rest/star.view", StringComparison.Ordinal))
+            {
+                Stars.Enqueue($"{query["u"]}:{query["id"]}");
+                return Task.FromResult(Json("""{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome"}}"""));
+            }
             if (uri.AbsolutePath.EndsWith("/rest/ping", StringComparison.Ordinal))
             {
                 Interlocked.Increment(ref Pings);
@@ -59,7 +66,11 @@ public sealed class AcquisitionEndpointTests
     private sealed class AcquisitionWebFactory : WebApplicationFactory<Program>
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "octo-acq-web-" + Guid.NewGuid());
+        private readonly IReadOnlyDictionary<string, string?> _settings;
         public FakeNavidrome Navidrome { get; } = new();
+
+        public AcquisitionWebFactory(IReadOnlyDictionary<string, string?>? settings = null) =>
+            _settings = settings ?? new Dictionary<string, string?>();
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -72,7 +83,7 @@ public sealed class AcquisitionEndpointTests
                     ["Soulseek:BaseUrl"] = "http://127.0.0.1:1",
                     ["YouTube:ShimUrl"] = "http://127.0.0.1:1",
                     ["Library:DownloadPath"] = _directory,
-                }));
+                }).AddInMemoryCollection(_settings));
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<IHostedService>();
@@ -90,8 +101,8 @@ public sealed class AcquisitionEndpointTests
         }
     }
 
-    private static string Auth(string user, string token = "good") =>
-        $"u={user}&t={token}&s=salt&v=1.16.1&c=octo-android";
+    private static string Auth(string user, string token = "good", string client = "octo-android") =>
+        $"u={user}&t={token}&s=salt&v=1.16.1&c={client}";
 
     private static void Seed(AcquisitionTracker tracker)
     {
@@ -121,8 +132,8 @@ public sealed class AcquisitionEndpointTests
         var row = Assert.Single(rows);
 
         Assert.Equal(
-            ["album", "artist", "bytesDone", "bytesTotal", "error", "id", "libraryId", "progress",
-             "source", "startedAt", "state", "title", "updatedAt"],
+            ["ahead", "album", "artist", "bytesDone", "bytesTotal", "error", "id", "libraryId", "note",
+             "progress", "source", "startedAt", "state", "title", "updatedAt"],
             row.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
         Assert.Equal("3kX9Qm", row.GetProperty("id").GetString());
         Assert.Equal("Daft Punk", row.GetProperty("artist").GetString());
@@ -182,6 +193,85 @@ public sealed class AcquisitionEndpointTests
         Assert.Equal("Massive Attack", row.GetProperty("artist").GetString());
         Assert.Equal("Teardrop", row.GetProperty("title").GetString());
         Assert.Empty(factory.Tracker.ForUser("bob"));
+    }
+
+    private static string RegisterTeardrop(AcquisitionWebFactory factory) =>
+        factory.Services.GetRequiredService<Octo.Services.Soulseek.ExternalIdRegistry>()
+            .Register(new Octo.Services.Soulseek.SoulseekRouting
+            {
+                Kind = Octo.Services.Soulseek.RoutingKind.Song,
+                Artist = "Massive Attack", Title = "Teardrop", Album = "Mezzanine", Duration = 330,
+            });
+
+    private static async Task<int> HeldAfterStar(AcquisitionWebFactory factory, string client)
+    {
+        using var http = factory.CreateClient();
+        var id = RegisterTeardrop(factory);
+
+        using var doc = JsonDocument.Parse(await http.GetStringAsync($"/rest/star.view?{Auth("alice", client: client)}&f=json&id={id}"));
+
+        Assert.Equal("ok", doc.RootElement.GetProperty("subsonic-response").GetProperty("status").GetString());
+        // The download is asked for either way; only the favorite depends on who starred it.
+        Assert.Single(factory.Tracker.ForUser("alice"));
+        return factory.Services.GetRequiredService<StarOnArrival>().Held;
+    }
+
+    /// <summary>A song already in Navidrome carries Navidrome's own id, so its heart is
+    /// Navidrome's favorite, sent on as the person who hearted it, and nothing downloads.</summary>
+    [Fact]
+    public async Task StarringALibrarySong_IsANavidromeFavoriteAndDownloadsNothing()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/rest/star.view?{Auth("alice", client: "Symfonium")}&f=json&id=nd-42");
+
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Equal(["alice:nd-42"], factory.Navidrome.Stars);
+        Assert.True(factory.Services.GetRequiredService<TrackAcquisitionQueue>().IsIdle);
+        Assert.Empty(factory.Tracker.All());
+        Assert.Equal(0, factory.Services.GetRequiredService<StarOnArrival>().Held);
+    }
+
+    /// <summary>Octo's own apps sync their favorites as stars on library songs. Those reach
+    /// Navidrome exactly as before: the heart rules for outside songs never touch them.</summary>
+    [Fact]
+    public async Task StarringALibrarySongFromTheOctoApp_IsRelayedAsBefore()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/rest/star.view?{Auth("alice", client: "Octo")}&f=json&id=nd-42");
+
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Equal(["alice:nd-42"], factory.Navidrome.Stars);
+        Assert.True(factory.Services.GetRequiredService<TrackAcquisitionQueue>().IsIdle);
+        Assert.Equal(0, factory.Services.GetRequiredService<StarOnArrival>().Held);
+    }
+
+    [Fact]
+    public async Task StarFromTheOctoApp_HoldsNoSignIn()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        Assert.Equal(0, await HeldAfterStar(factory, "Octo"));
+    }
+
+    [Fact]
+    public async Task StarFromAnotherClient_HoldsTheSignIn()
+    {
+        await using var factory = new AcquisitionWebFactory();
+        Assert.Equal(1, await HeldAfterStar(factory, "Symfonium"));
+    }
+
+    [Fact]
+    public async Task StarWithDownloadFavoritesOff_StillHoldsTheSignIn()
+    {
+        // The song may turn out to be in the library already, and that heart is always a favorite.
+        await using var factory = new AcquisitionWebFactory(new Dictionary<string, string?>
+        {
+            ["Subsonic:StarDownloadsForRequester"] = "false",
+        });
+        Assert.Equal(1, await HeldAfterStar(factory, "Symfonium"));
     }
 
     [Fact]

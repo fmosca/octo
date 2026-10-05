@@ -35,16 +35,22 @@ public class SoulseekSettings
     /// responseCount well before /responses will hand the files over, so a status
     /// poll makes short waits look adequate when they are not.
     ///
-    /// This is a CEILING, not a duration: the search returns as soon as it has
-    /// enough usable candidates to choose from, or as soon as slskd says the search
-    /// has finished. A short value is therefore still a hard cap on finding
-    /// anything, while a generous one costs nothing when results arrive early or
-    /// when the search comes back empty.
+    /// This is a CEILING, not a duration. slskd ends most searches itself, after 15 s
+    /// with no new answer or at the response or file limit, and Octo reads the answers
+    /// then. A search still running at the ceiling is cancelled, which makes slskd hand
+    /// over everything it gathered, so a long search costs time but never its results.
     ///
     /// Star-triggered downloads are fire-and-forget, so the wait costs the user
     /// nothing; it only delays the file landing.
     /// </summary>
     public int SearchWaitSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// The search ceiling for Better quality and the weekly upgrade. Longer than SearchWaitSeconds
+    /// because these searches exist for songs the quick search did not find.
+    /// Environment variable: SLSKD_UPGRADE_SEARCH_WAIT_SECONDS
+    /// </summary>
+    public int UpgradeSearchWaitSeconds { get; set; } = 90;
 
     /// <summary>
     /// Minimum file size in bytes to consider a search hit a real lossless file.
@@ -58,10 +64,10 @@ public class SoulseekSettings
     public string PreferredExtension { get; set; } = "flac";
 
     /// <summary>
-    /// Max time to wait (seconds) for a download to complete before giving up on that
-    /// peer and trying the next one. Per attempt, not per track: a track that has to
-    /// walk all five candidates can spend this five times over. A peer that rejects
-    /// outright is detected in seconds and does not wait this out.
+    /// How long (seconds) a download may go without a new byte before Octo gives up on
+    /// that peer, cancels the transfer in slskd and tries the next one. A peer that
+    /// keeps sending is waited for however slow it is, up to an hour. Per attempt, not
+    /// per track. A peer that rejects outright is detected in seconds.
     /// </summary>
     public int DownloadTimeoutSeconds { get; set; } = 180;
 
@@ -168,6 +174,32 @@ public class SoulseekSettings
     public int TranscodeCheckTimeoutSeconds { get; set; } = 20;
 
     /// <summary>
+    /// How long a Soulseek-first download waits while slskd is not logged in to the Soulseek
+    /// network, before it goes to the next source. slskd answering is not slskd being able to
+    /// search: during Soulseek's maintenance on 2026-10-03 it answered for three hours while
+    /// every search failed, and a hearted album landed as YouTube MP3s. Six hours covers a
+    /// normal maintenance window. 0 turns the wait off. Read live, no restart needed.
+    /// Environment variable: SLSKD_OUTAGE_HOLD_HOURS
+    /// </summary>
+    public int OutageHoldHours { get; set; } = 6;
+
+    /// <summary>
+    /// How many downloads may transfer at once. Each Soulseek download lands in its own folder,
+    /// which is what makes this safe; until slskd has put one there, Octo keeps to one at a time
+    /// whatever this says. Placing files into the library stays one at a time either way. 1 is the
+    /// old behaviour exactly. Read live.
+    /// Environment variable: SLSKD_PARALLEL_DOWNLOADS
+    /// </summary>
+    public int ParallelDownloads { get; set; } = 3;
+
+    /// <summary>
+    /// An album heart searches the album once and takes one peer's folder of it in one batch, then
+    /// searches song by song only for what that folder lacks. Off is the old song by song walk.
+    /// Environment variable: SLSKD_ALBUM_FOLDERS
+    /// </summary>
+    public bool AlbumFolders { get; set; } = true;
+
+    /// <summary>
     /// Send AcoustID the fingerprints a person confirmed with Keep, so the next person who
     /// downloads that recording gets Confirmed instead of Inconclusive (#47). Only a fingerprint
     /// whose MusicBrainz recording is unambiguous, only after a human kept it, and never one
@@ -193,6 +225,13 @@ public class SoulseekSettings
     public int EffectiveFingerprintTimeoutSeconds => Math.Clamp(FingerprintTimeoutSeconds, 5, 300);
     public int EffectiveAcoustIdTimeoutSeconds => Math.Clamp(AcoustIdTimeoutSeconds, 2, 120);
     public int EffectiveTranscodeCheckTimeoutSeconds => Math.Clamp(TranscodeCheckTimeoutSeconds, 5, 300);
+    public int EffectiveUpgradeSearchWaitSeconds => Math.Clamp(UpgradeSearchWaitSeconds, 30, 300);
+
+    /// <summary>Two days at most: past that the next source is the better answer.</summary>
+    public int EffectiveOutageHoldHours => Math.Clamp(OutageHoldHours, 0, 48);
+
+    /// <summary>Six at most: more peers at once gains little and spends the Soulseek network's patience.</summary>
+    public int EffectiveParallelDownloads => Math.Clamp(ParallelDownloads, 1, 6);
 
     /// <summary>
     /// Below 50 an AcoustID score is noise and acting on it manufactures false rejections;

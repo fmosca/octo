@@ -297,10 +297,12 @@ public sealed class DuplicateScanWorker : BackgroundService
             .ToList();
     }
 
+    internal static bool IsLossless(LibraryTrack track) => IsLosslessFile(track.Suffix, track.BitRate);
+
     /// <summary>ALAC arrives as m4a, told apart from AAC only by its bitrate.</summary>
-    internal static bool IsLossless(LibraryTrack track) =>
-        LosslessSuffixes.Contains(track.Suffix)
-        || (track.Suffix.Equals("m4a", StringComparison.OrdinalIgnoreCase) && track.BitRate > 500);
+    internal static bool IsLosslessFile(string suffix, int bitRate) =>
+        LosslessSuffixes.Contains(suffix)
+        || (suffix.Equals("m4a", StringComparison.OrdinalIgnoreCase) && bitRate > 500);
 
     private static string? Str(JsonElement element, string name) =>
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;

@@ -37,7 +37,7 @@ Octo is a proxy, so it works with your Navidrome server and the Subsonic apps yo
 <tr><td width="33%"><img src="docs/images/players/phone-search.webp" alt="Search in the Octo Android app"></td><td width="33%"><img src="docs/images/players/phone-album.webp" alt="An album in the Octo Android app"></td><td width="33%"><img src="docs/images/players/phone-player.webp" alt="The player in the Octo Android app"></td></tr>
 </table>
 
-The desktop app runs on Windows and Linux, and the Android app on Android 10 and newer. They need Octo 2026.09.29 or newer, and they work as regular players with Navidrome too. Download them from [Octo for Windows and Linux](https://github.com/winters27/octo/releases/tag/desktop-v1.1.0) and [Octo for Android](https://github.com/winters27/octo/releases/tag/android-v1.1.0); the source is at [winters27/octo-player](https://github.com/winters27/octo-player).
+The desktop app runs on Windows and Linux, and the Android app on Android 10 and newer. They need Octo 2026.09.29 or newer, and they work as regular players with Navidrome too. Download them from [Octo for Windows and Linux](https://github.com/winters27/octo/releases/tag/desktop-v1.3.2) and [Octo for Android](https://github.com/winters27/octo/releases/tag/android-v1.2.4), or add [Octo's F-Droid repository](https://winters27.github.io/octo/fdroid/) so the Android app updates through F-Droid, Droid-ify or Neo Store. The source is at [winters27/octo-player](https://github.com/winters27/octo-player).
 
 ## What Octo does
 
@@ -91,6 +91,7 @@ The installer asks for your Navidrome URL (and, optionally, Last.fm and Soulseek
 **When it's done:**
 
 - Point your Subsonic apps at `http://<your-host>:5274`, **not** Navidrome's own address.
+- Octo checks your Navidrome sign-in before it plays or fetches a song from outside your library; while it cannot reach Navidrome, those songs are refused.
 - Open the admin dashboard at **`http://<your-host>:5274/admin`** to manage every setting from the browser, with no config files to edit by hand.
   It is unauthenticated, so keep Octo on a trusted network. See [Admin dashboard](#admin-dashboard).
 - If a client reports the server is unreachable, that is Octo telling you setup is not finished: its ping response spells out exactly what to fix (usually the Navidrome URL).
@@ -145,13 +146,39 @@ clients speak JSON, some (DSub) only XML.
 
 ## Updating
 
+Octo checks GitHub every 6 hours for a newer release. When one is out, the dashboard says so at the top of every page, and **About** shows what's new.
+
+### From the dashboard
+
+On Linux with systemd, the installer offers a small update helper. With it, **About → Update now** installs the new release: the helper fetches it, builds it, and restarts Octo, and the dashboard shows each step.
+
+- Octo itself never gets access to Docker. It can only ask, by writing a file in its config folder, and only for the newest published release.
+- The helper builds the new release before it stops anything, so a failed build leaves Octo running as it was. If the new release will not stay up, the helper goes back to the old one.
+- It leaves the folder alone when Octo's own files have local changes. Your `.env`, `docker-compose.override.yml` and config are not Octo's files, so they never block it.
+
+To add the helper to an existing install, or take it off again:
+
 ```bash
-git pull && ./install.sh
+scripts/updater/install-updater.sh
 ```
 
-Re-running the installer keeps your existing answers.
+```bash
+scripts/updater/install-updater.sh --remove
+```
 
-Octo builds from source, so `git pull` is what actually updates it. `docker compose pull` only refreshes slskd.
+### By hand
+
+Without the helper, **About** shows the command for the new release. From the Octo folder:
+
+```bash
+git fetch --tags && git checkout --detach 2026.10.05 && docker compose build && docker compose up -d
+```
+
+Octo builds from source, so this is what actually updates it. `docker compose pull` only refreshes slskd. Re-running `./install.sh` also works and keeps your existing answers.
+
+If you track `main` instead of releases, `git checkout main && git pull && ./install.sh` still works.
+
+To turn the release check off, set `UPDATES_CHECK=false`, or switch off **Look for new releases** under **About**.
 
 ### Which version am I on
 
@@ -225,11 +252,11 @@ Navidrome's radio plays songs from your existing library. Octo's radio reaches *
 
 ### Is my data going anywhere?
 
-Octo's per-user play ledger and station snapshots stay in `/app/config/lastfm-radio-state.json`. It sends Last.fm only the artist, title, and tag lookups needed to build recommendations; it does not send the ledger, Navidrome credentials, usernames, or stream URLs. Continuous Radio URLs contain opaque, expiring in-memory session tokens rather than Navidrome credentials. YouTube and Soulseek receive the ordinary outbound lookups needed for preview/acquisition. Once a listener connects Last.fm on the dashboard, Octo also sends that listener's plays (outside songs, and library songs unless left to Navidrome; artist, title, album and time) to their own Last.fm account, and with a ListenBrainz token set it sends the same plays to ListenBrainz.
+Octo's per-user play ledger and station snapshots stay in `/app/config/lastfm-radio-state.json`. It sends Last.fm only the artist, title, and tag lookups needed to build recommendations; it does not send the ledger, Navidrome credentials, usernames, or stream URLs. Continuous Radio URLs contain opaque, expiring in-memory session tokens rather than Navidrome credentials. Every 6 hours Octo asks GitHub for its own release list, sending nothing but its version in the request's user agent; `UPDATES_CHECK=false` stops it. YouTube and Soulseek receive the ordinary outbound lookups needed for preview/acquisition. Once a listener connects Last.fm on the dashboard, Octo also sends that listener's plays (outside songs, and library songs unless left to Navidrome; artist, title, album and time) to their own Last.fm account, and with a ListenBrainz token set it sends the same plays to ListenBrainz.
 
 ### Do downloaded songs get tagged correctly?
 
-Yes. Soulseek peers share full FLAC files with their existing ID3 tags intact. Octo organizes them per your `FolderStructure` setting (`Flat`, `ByArtist` or `Organized`), then triggers a Navidrome rescan so they appear in your library exactly like everything else you own.
+Yes. Every download is identified before it is filed: the fingerprint service's answer, the music database and Deezer each offer the releases the song could be from, and every one is weighed against what was asked for and what the file is. A sure match tags the file with the full release set (album, original date, label, catalogue number, barcode, release type and status, the recording and release ids), measures its loudness for ReplayGain, and gives it the largest cover the cover chain can find. A doubtful match keeps the name that was asked for, fills only what is missing, and goes to the Review playlist as before. The Fetched songs page shows, under each row, which release won, by how much, and where each field came from. Octo then organizes the file per your `FolderStructure` setting (`Flat`, `ByArtist` or `Organized`) and triggers a Navidrome rescan, so it appears in your library exactly like everything else you own. The details are under [Tags, covers and lyrics](#tags-covers-and-lyrics).
 
 ### Can it run on a Raspberry Pi?
 
@@ -248,7 +275,7 @@ Use **Streams & hearts → Heart download priority** in the admin UI to order So
 
 Lidarr works at album level, so enabling it for song hearts still fetches the song's full album. It is last and disabled by default; configure its URL, API key, root folder, and profiles on the Lidarr page, then enable the heart types you want in the priority list.
 
-To stop downloading altogether, turn off both heart types for every source. On an env-only installation, set `Subsonic__DownloadOnStar=false` and `Subsonic__DownloadAlbumOnStar=false`. A heart on a song Octo found for you then downloads nothing and is not kept, because Navidrome has no such song to favourite.
+To stop downloading altogether, turn off both heart types for every source. On an env-only installation, set `Subsonic__DownloadOnStar=false` and `Subsonic__DownloadAlbumOnStar=false`. A heart on a song Octo found for you then downloads nothing and is not kept, because Navidrome has no such song to favorite.
 
 `RECORD_REQUESTED_BY` (on by default) names the Subsonic user who asked for each download on
 its entry in **Fetched songs** and on the download notification, so on a shared library you can
@@ -257,6 +284,15 @@ downloading lists both, because the second star joins the transfer already runni
 starting a second one. Acquisitions Octo starts itself are unattributed, as are all entries
 written before this existed. Turning it off stops the username being captured at all rather
 than hiding it afterwards, so nothing downstream holds it; names already written stay.
+
+A heart on a song you already have is a favorite in Navidrome, straight away, and downloads
+nothing. A heart on a song you do not have only downloads it; heart it again once it is in your
+library to make it a favorite. `STAR_DOWNLOADS_FOR_REQUESTER` (off by default) makes Octo also
+favorite a download when it lands, for the person who hearted it; an album heart then
+favorites the album. Octo's own apps are left out,
+because their star button means Add. The person's sign-in is held in memory
+with the download until the song arrives (a password is first turned into a token, so the
+password itself is never held), and a restart drops it.
 
 ### Why is Octo a refactor of [octo-radiostarr](https://github.com/winters27/octo-radiostarr)?
 
@@ -355,6 +391,9 @@ default, and the feature stays inert even when on until at least one username is
 allowlist in the dashboard: **an empty allowlist means nobody, never everybody.** The action
 names, which actions exist, and which star count maps to which action are all editable, and
 five stars means Keep, which removes nothing, so the top of the scale is never destructive.
+A replacement (Better quality, Wrong version, Wrong song) takes the original's place in
+Navidrome: it keeps the original's file name, title, album and album artist tags, so its plays,
+favorites and playlist places stay with it. The action history says whether Navidrome kept it.
 
 `LIBRARY_ACTIONS_DRY_RUN` is on by default, so the first run of a newly enabled install is a
 rehearsal you can read before anything is real. Nothing is ever deleted outright: removed files
@@ -362,6 +401,16 @@ move to `LIBRARY_ACTIONS_TRASH_DIR` under the music folder, with a sidecar manif
 works even if the action journal is lost, and only the retention sweep
 (`LIBRARY_ACTIONS_TRASH_DAYS`, 0 to keep forever) really deletes. `LIBRARY_ACTIONS_POLL_SECONDS`
 and `LIBRARY_ACTIONS_MAX_PER_CYCLE` bound how fast actions are noticed and applied.
+
+`LIBRARY_ACTIONS_UPGRADE_PER_WEEK` (0, the default, is off) has Octo upgrade that many lossy
+songs a week to lossless by itself, through Better quality, spread evenly across the week and
+one at a time. It needs library actions on, Better quality switched on, someone on the
+allowlist (it acts as the first person there) and Octo's Navidrome admin credential to read the
+library. It waits while anything else is downloading, takes songs it has never tried first, and
+leaves a song alone for four weeks after trying it. With dry run on it only rehearses. Better
+quality and this weekly upgrade search Soulseek for up to `SLSKD_UPGRADE_SEARCH_WAIT_SECONDS`
+(default 90, 30 to 300) instead of the usual `SLSKD_SEARCH_WAIT_SECONDS`, because they look for
+songs the quick search did not find. A change to it applies after a restart.
 
 Two things to know before turning ratings on. Clearing a rating afterwards needs the rating
 owner's own credentials, because Subsonic ratings are per user, so **Octo caches a replayable
@@ -392,6 +441,18 @@ counts as a command: `NoticeOnly` only on a track in Review or Duplicates, where
 reason to rate it is to answer, and `Global` on any track. `Auto`, the default, is
 `NoticeOnly` while either playlist is on and `Global` otherwise, which is how ratings behaved
 before they existed.
+
+`LIBRARY_ACTIONS_REVIEW_SWEEP_PER_HOUR` (0, the default, is off) has Review check music that
+was already in the library too, that many songs an hour, and only while nothing is
+downloading. It needs download verification on (`SLSKD_VERIFY_DOWNLOADS`) and an AcoustID key
+(`ACOUSTID_API_KEY`). It asks one person, the library keeper: the Navidrome admin when they are
+on the allowlist, otherwise the first allowed user. Besides the usual questions it asks when AcoustID
+is sure a song is something else, or when a song runs much longer or shorter than the
+recording it matched; those are questions too, never acted on by themselves. It stops while 50
+of its questions wait for an answer, and a Keep on one sends nothing to AcoustID, since its
+tags were never confirmed. Octo's own downloads are skipped, since each was checked when it
+arrived if verification was on at the time; `LIBRARY_ACTIONS_REVIEW_SWEEP_OCTO_DOWNLOADS` checks
+them too.
 
 `LIBRARY_ACTIONS_DUPLICATES` adds a Duplicates playlist per allowed user: recordings the
 library holds more than once, side by side, the copy worth keeping first (lossless before
@@ -447,7 +508,7 @@ track AcoustID named as something else, for a fingerprint other than the standar
 artist and length.
 
 Each kind of dynamic station is configured on its own, so a listener can keep Your Mix
-without collecting an artist radio per favourite band. `LASTFM_ENABLE_YOUR_MIX` and
+without collecting an artist radio per favorite band. `LASTFM_ENABLE_YOUR_MIX` and
 `LASTFM_ENABLE_DISCOVERY_MIX` (both default true) switch those two stations,
 `LASTFM_ARTIST_STATION_COUNT` (default 2) and `LASTFM_GENRE_STATION_COUNT` (default 3)
 say how many of each to build, and 0 builds none. The defaults are what Octo has always
@@ -509,13 +570,19 @@ Set `LIDARR_URL` and `LIDARR_API_KEY`, restart Octo, then open the **Lidarr** ad
 
 The selected Lidarr root and Octo's effective Navidrome library root must expose the same underlying files. Their container paths may differ: Octo translates the imported path relative to the selected Lidarr root. For example, Lidarr `/data/music/Artist/Album/file.flac` can map to Octo `/music/Artist/Album/file.flac` when both mounts point at the same host directory.
 
-`LIDARR_COMPLETION_MODE=Accepted` (default) returns control after Lidarr accepts the album search. `Imported` makes completion/failure notifications reflect the actual import, bounded by `LIDARR_IMPORT_TIMEOUT_SECONDS` (default 1800). Neither mode blocks playback or later hearts; imported files are reconciled into download history and trigger a Navidrome scan in the background.
+A heart through Lidarr keeps the same promises as one through Soulseek. Lidarr brings the whole album, so a song already in your library is deleted from what it brought (an MP3 you own is queued for Better quality instead), a song removed with a library action stays removed, and an album Octo had Lidarr monitor goes back to unmonitored once it lands, so Lidarr does not fetch the songs Octo moved into its own layout again. Every song Lidarr imports then goes through the same pipeline as a Soulseek download: AcoustID (a wrong recording, or a live take you did not ask for, is deleted), the spectrum check, release matching, tags, ReplayGain, lyrics and your folder layout.
+
+A heart waits for Lidarr's import, up to `LIDARR_IMPORT_TIMEOUT_SECONDS` (default 1800), and any song that did not land (Lidarr found nothing in time, or the file failed a check) goes to the next source in **Heart download priority**, which skips the songs that did. The wait never blocks playback or later hearts. `LIDARR_COMPLETION_MODE=Accepted` (default) sends a notice when Lidarr accepts the search and one for the album when an album heart lands; `Imported` also sends one when a track heart's album lands, and one when an import fails or times out.
 
 ### Playback and acquisition
 
-Tracks already in your library play locally through Navidrome. Missing external results stream from YouTube. Playback does not acquire a permanent copy; heart the song or album to run the configured source priority.
+Tracks already in your library play locally through Navidrome. Missing external results stream from YouTube. Playback does not acquire a permanent copy unless one of the two settings below is on; heart the song or album to run the configured source priority.
 
 Set `WAIT_FOR_LOSSLESS_ON_PLAY=true` if you would rather the first play wait for the lossless file. It is off by default because a Soulseek fetch routinely takes minutes and most clients time out long before that, which looks like the play failing. The setting also changes what searches advertise for external tracks, so it needs a restart, and clients that cached earlier results should re-search after you change it.
+
+`WAIT_FOR_SEARCH_DURATIONS` (on by default) has a search wait for the YouTube lengths of the top rows from outside your library before it answers, so the length shown is the length of the video that plays. Turned off, a new search answers a few seconds sooner and those rows show Deezer's length. Octo still finds the YouTube length afterwards, and apps that look the song up again when it starts playing show that one. The change takes effect without a restart.
+
+Set `DOWNLOAD_ON_PLAY=true` to keep a copy of every song played from outside your library, radio included. The copy comes from the first song source in the heart download priority that Octo fetches itself (Soulseek or YouTube, never Lidarr), and playback still starts from YouTube at once. Only the start of a play counts, not a seek. Hearts always go ahead of these downloads, and at most one played song waits its turn: a song played while another is waiting is skipped, and tried again the next time it is played. Each one shows in the app's download list like a heart, and hearting a song that is already downloading this way makes it a heart. `LIDARR_ALBUM_ON_PLAY=true` hands the album of every played song to Lidarr, once per song until Octo restarts; one Lidarr turns down is tried again on the next play. Every hand-off makes Lidarr search all its indexers, so on radio it pulls in an album per song. Both are off by default and have switches under **Streams & hearts, Playing songs you don't own**.
 
 Octo sends plays to Last.fm itself: songs from outside your library, which Navidrome has never heard of, and your library songs too (the dashboard's "Also send library plays", on by default). Octo also sends outside plays to ListenBrainz when a token is set. For Last.fm, paste your API key and its shared secret on the dashboard's Last.fm page (or set `LASTFM_API_KEY` and `LASTFM_API_SECRET`); Save checks both with Last.fm. Then press **Connect** next to a listener and allow access on last.fm while signed in as that person. The dashboard notices by itself when that is done, and for someone else you can copy the link and send it to them. Each listener has their own connection. If Navidrome is also linked to the same Last.fm, or an app scrobbles to Last.fm itself, turn that off (or turn off "Also send library plays") or plays count twice.
 
@@ -529,15 +596,29 @@ A download is filed once it has been tagged, so the album Deezer finds for a tra
 
 ### Tags, covers and lyrics
 
-Every download is tagged from its source, Deezer and, with verification on, MusicBrainz. A fingerprint-confirmed recording's id is written to `MUSICBRAINZ_TRACKID`, so no later pass has to identify the file again; the album id is deliberately not written, because Navidrome groups albums by it before the album name and a track carrying it beside one without it splits an album.
+Every download is matched before it is tagged. The fingerprint service (with verification on), the music database and Deezer each offer the releases the song could be from, and every candidate is scored against what was asked for and what the file is: the title and artist, the length, the album when the request named one, the file's own album and year when a peer tagged it, the ISRC and barcode, the fingerprint, the kind of release (a studio album over a single, a single over a compilation), how long after the recording's first release the pressing came out, and where the candidate came from. The result is a distance from 0 (the same) to 1 (nothing agrees), and three levels of confidence:
 
-Cover art comes from a chain: the Cover Art Archive when a fingerprint named the release (`COVER_ART_ARCHIVE`), then the catalog's own cover, then Deezer, iTunes and Last.fm by name, and last the file's own art. A cover that is not square is a video thumbnail and counts as missing (`REPLACE_VIDEO_COVERS`); when nothing better turns up its centre square is used, which for a YouTube "Topic" upload is the real cover inside the letterbox. `COVER_FILE` also writes `cover.jpg` beside the file, only in the `Organized` layout and only in a folder the download created, because Navidrome ranks `cover.*` above embedded art and a new file in an existing album folder would change that album's cover.
+- **Strong** sets the album-level tags from the release that won, whatever the file or the catalog said.
+- **Medium** does the same only when the fingerprint service or the music database backs the release; a Deezer or file-tag candidate only fills blanks, the way Deezer always did.
+- **Low** fills blanks only and keeps the name that was asked for. Two pressings of different albums too close to call leave the recording certain and the album as it was.
 
-`LYRICS_FETCH` (off by default) writes lyrics beside each download, looked up in the background so a slow service never holds up the next download, and answers `getLyricsBySongId` live for any song as it plays when the library has none, external songs included. Synced lyrics go in a `.lrc` and plain ones in a `.txt` with the audio file's name, both of which Navidrome reads at request time without a rescan; an instrumental gets nothing, and a file that already has lyrics is never touched. `LYRICS_SOURCES` sets the order: `kugou` (timed word by word for most songs, but an unofficial API that can change without notice), `lrclib` (open, timed line by line), `lyricsovh` (plain text), and `netease`, which goes much deeper on non-Western and older music but is also an unofficial API, so it only runs when you list it. Leave a source out and it is never contacted. The order was chosen by measurement: see [docs/lyrics-source-eval.md](docs/lyrics-source-eval.md). Every source is held to the same rule before its lyrics are used: the same title (a remix or a live take never stands in for the original), the same artist, and a length within three seconds. Credits at the top of a lyric are stripped.
+A song whose request named an album (an album fetched whole, a Deezer album listing) keeps that album, its track number and its disc; the release only confirms it and lends its facts. A song that arrived without one goes under the first release of its recording (`PREFER_ORIGINAL_ALBUM`, on by default), even when the file was ripped from a compilation; off keeps the file's own album when it names one. The year is the recording's first release (`YEAR_FROM_ORIGINAL_RELEASE`, on), so a 2011 remaster of a 1991 album reads 1991, and `PREFERRED_COUNTRIES` (empty by default, for example `US, XW, GB`) breaks ties between pressings. `RELEASE_DETAILS_LOOKUP` (on) asks the music database once per download for the release's label, catalogue number, barcode, status and track ids, and searches it by name when the fingerprint named nothing; it needs no key.
+
+The tag set a sure match writes is the one Picard writes and Navidrome reads, named per container: `ALBUM`, `DATE` (the year), `ORIGINALDATE` and `ORIGINALYEAR`, `LABEL`, `CATALOGNUMBER`, `BARCODE`, `ISRC`, `RELEASETYPE`, `RELEASESTATUS`, `RELEASECOUNTRY`, `MUSICBRAINZ_TRACKID` (the recording), `MUSICBRAINZ_RELEASETRACKID`, `MUSICBRAINZ_RELEASEGROUPID`, `MUSICBRAINZ_ARTISTID` for every credited artist, `MUSICBRAINZ_ALBUMARTISTID`, and `ACOUSTID_ID`. The ISRC has its own field now rather than a comment, and a comment the file arrived with is left alone. The album id is deliberately not written, because Navidrome groups albums by it before the album name and a track carrying it beside one without it splits an album; nor is `RELEASEDATE`, which would split an album whose tracks matched different pressings. A new ID3 tag is version 2.4; a tag a file arrived with keeps its version. Every track of an album fetched whole shares the release the first track settled on, so the album shows one label, one catalogue number and one year.
+
+`REPLAYGAIN` (on) measures each download's loudness once, beside the lookups, and writes `REPLAYGAIN_TRACK_GAIN` and `REPLAYGAIN_TRACK_PEAK` by the ReplayGain 2.0 convention (-18 LUFS, true peak), which the Octo apps and most players use to even out volume; an album fetched whole gets `REPLAYGAIN_ALBUM_GAIN` and `REPLAYGAIN_ALBUM_PEAK` once the walk ends. `REPLAYGAIN_TIMEOUT_SECONDS` (45) caps the measurement; past it the download goes on without ReplayGain. Every lookup has its own cap too, and a timeout costs fields, never the download.
+
+Under each row of **Fetched songs**, "How it was tagged" shows the release that won and how sure Octo is, every candidate it weighed with its biggest penalties, what each field was set to and from, the notes (a catalog that did not answer, a release lookup that timed out), the seconds each stage took and the measured loudness. **Try it on a song** (Tags & genres) runs the same identification on a file in the music folder (fingerprint and loudness included) or on an artist and title alone, and shows the same report without writing anything. `TAG_REHEARSAL` (off) runs the matching on every real download and shows the report, but writes only what Octo wrote before, plus ReplayGain, the ISRC and the fingerprint id, which do not depend on the match: a way to watch it on real downloads before trusting it.
+
+Cover art comes from a chain, and the largest cover found wins: Apple's full-size master of the same album (often 3000 px, taken only when the artist and album name match), the Cover Art Archive when a fingerprint named the release (`COVER_ART_ARCHIVE`), then the catalog's own cover, then Deezer, iTunes and Last.fm by name, and last the file's own art. A cover that is not square is a video thumbnail and counts as missing (`REPLACE_VIDEO_COVERS`); when nothing better turns up its centre square is used, which for a YouTube "Topic" upload is the real cover inside the letterbox. Each song carries the cover at 1500 px, or at the full size it was found with `FULL_SIZE_COVERS=true`. `COVER_FILE` also writes a full-size `cover.jpg` beside the file, only in the `Organized` layout and only in a folder the download created, because Navidrome ranks `cover.*` above embedded art and a new file in an existing album folder would change that album's cover. A `cover.jpg` Octo wrote itself gives way to a larger one later; one you put there never changes.
+
+**Soft covers** (dashboard, Cover art) finds soft covers and replaces the ones you pick. A scan reads your songs only (album by album, using Navidrome's own song list), Octo's downloads or the whole library, and shows every album whose cover is smaller than the size you choose (or missing) as a wall of covers. Pick all of them or just some and find better covers: albums are matched at Apple in bulk by barcode (from the song's own tag, or from Deezer), 20 to 40 per request, and each tile then shows the larger cover found, with its true size, without downloading it yet. A cover that does not look like the album's current one (another edition, or another album with the same name) is marked Different art and left unpicked. Replace downloads Apple's master at up to 5000 px and puts it in every song and, if you ask, in a JPEG `cover.jpg` or `folder.jpg` beside it. A cover is replaced only when the new one is clearly larger, and every cover replaced is kept so Undo puts them all back.
+
+`LYRICS_FETCH` (off by default) writes lyrics beside each download, looked up in the background so a slow service never holds up the next download, and answers `getLyricsBySongId` live for any song as it plays, external songs included. Synced lyrics go in a `.lrc` and plain ones in a `.txt` with the audio file's name, both of which Navidrome reads at request time without a rescan; an instrumental gets nothing, and a file that already has lyrics is never touched. `LYRICS_SOURCES` sets the order: `song` (the lyrics a song already has, in its tags or a file beside it, which cannot be switched off and comes first when it is not listed), `kugou` (timed word by word for most songs, but an unofficial API that can change without notice), `lrclib` (open, timed line by line), `lyricsovh` (plain text), and `netease`, which goes much deeper on non-Western and older music but is also an unofficial API, so it only runs when you list it. Leave a source out and it is never contacted. A song's own lyrics rank like any source, so with `kugou` above `song`, a song whose tags hold line-timed lyrics plays KuGou's word-timed ones; with `LYRICS_PREFER_WORD_TIMED` on, word timing wins wherever it ranks. `LYRICS_SAVE_TO` says where found lyrics are saved: `beside` (the default), `inside` the song's tags (which rewrites the audio file, and shows after a Navidrome scan that Octo asks for), or `both`. What Octo writes is marked `[re:Octo]`, and lyrics Octo did not write are never replaced. The order was chosen by measurement: see [docs/lyrics-source-eval.md](docs/lyrics-source-eval.md). Every source is held to the same rule before its lyrics are used: the same title (a remix or a live take never stands in for the original), the same artist, and a length within three seconds. Credits at the top of a lyric are stripped.
 
 Word timing reaches every client that can use it. A `.lrc` with word timing is enhanced LRC: each line keeps its standard `[mm:ss.xx]` tag, so any player shows it line by line, and `<mm:ss.xx>` tags time the words, which Navidrome turns into OpenSubsonic word cues. `getLyricsBySongId` answers with the same cues for the songs Octo answers itself, but only when the client asks for them with `enhanced=true`; a client that does not ask gets exactly the lines it always got. `LYRICS_PREFER_WORD_TIMED` (on by default) lets a later source with word timing win over an earlier one with only line timing. The legacy `getLyrics` call (artist and title) gets the same lookup as plain text.
 
-On the dashboard, **Find lyrics for the library** walks the songs that have no lyrics file and no lyrics in their tags, one at a time with a pause between, and can be stopped and resumed. By default it only writes beside songs Octo downloaded; `LYRICS_WRITE_BESIDE_ALL` lets it write beside every library song, and an existing lyrics file or lyrics inside a song are never replaced either way. Matches it is not sure of (a length it could not check, say) go on a review list. **Fix a song's lyrics** chooses other lyrics for one song, hides them, or goes back to automatic, for every app at once. The Octo app does the same through the `octoLyrics` extension (`getLyricsCandidates`, `setLyricsChoice`).
+The dashboard's **Lyrics** page works like the soft covers wall. **Scan** reads your songs (Octo's downloads or the whole library) and lists the ones with no lyrics, plain lyrics, or lyrics timed only by line; it looks nothing up and changes nothing. **Find better lyrics** looks the picked songs up in the source order, a second and a half apart, and shows what it found with its first lines; a match the sources were not sure of is shown but not picked. **Save** writes them where `LYRICS_SAVE_TO` says. Octo replaces only lyrics it wrote: better lyrics for a song with someone else's go beside it as a `.lrc`, which Navidrome serves ahead of the tags, and the originals stay. Everything Save writes over is kept, so **Undo** puts it back. A lyrics pin follows its song by artist and title, so it survives a file being replaced by a better copy. **Fix a song's lyrics** chooses other lyrics for one song, hides them, or goes back to automatic, for every app at once. The Octo app does the same through the `octoLyrics` extension (`getLyricsCandidates`, `setLyricsChoice`).
 
 ### Subsonic API surface
 
@@ -570,17 +651,28 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 When a song is starred, Octo:
 
 1. Searches Soulseek for `<artist> <title>` (cleaned of `[brackets]` and redundant `Artist - ` prefixes).
-2. Falls back to title-only search if the first query returns nothing usable.
+2. Falls back to title-only search if the first query returns nothing usable, then to `<artist> <album>` for peers who name files by number and title only.
+   When every query finds the song only lossy (an MP3 where FLAC is preferred), Octo asks the best three of those peers for the folder that MP3 sits in, and takes a FLAC of the same song from beside it: albums are often shared in both formats, and only one answered the search. Those files go through every check below, like any search hit.
 3. Ranks candidates by queue depth, upload speed, file size.
-4. Tries the top 5 peers in sequence with a per-peer timeout of 180 seconds by default (`SLSKD_DOWNLOAD_TIMEOUT_SECONDS`).
+4. Tries the top 5 peers in sequence. A peer that keeps sending is waited for however slow it is (up to an hour); one that sends nothing for 180 seconds by default (`SLSKD_DOWNLOAD_TIMEOUT_SECONDS`) is cancelled in slskd, so its file can never land later as a second copy, and the next peer is tried.
 5. Verifies the file landed on disk (slskd's polling endpoint sometimes drops successful transfers between polls).
 6. Renames per `FolderStructure` setting and triggers a Navidrome rescan.
 
 Around 30 to 50% of Soulseek peer requests get rejected ("overwhelmed", queue full, banned). Single-peer-try downloads were too fragile; multi-peer is the difference between "downloads sometimes work" and "downloads reliably work."
 
-Starring an album runs the same process once per track, in sequence.
+Before any of that, Octo checks whether the song is already in your library (Navidrome's own search, the same artist and title in the same version, a length within 8 seconds or the same album). A lossless copy is kept and nothing is downloaded; a lossy one is kept and queued for a higher quality copy when Soulseek or Lidarr can look for one and Better quality is on for you (`SKIP_OWNED_SONGS`, on by default). A heart through Lidarr follows the same rule: Lidarr brings the whole album, and the songs you already have are deleted from what it brought.
 
-> **Hearting is "fetch", not "favorite".** Navidrome has never seen Octo's IDs for music you don't own yet, so there is nothing on its side to mark as starred. Once the files land and Navidrome rescans, they become ordinary library tracks: present, but not favorited. Star them again in your app if you want them flagged.
+Each Soulseek download lands in a hidden folder of its own (`.octo-incoming/slskd/<id>` in slskd's downloads folder), so Octo always finds exactly its own file. Once slskd has shown it honours that folder, up to `SLSKD_PARALLEL_DOWNLOADS` (default 3, at most 6) downloads transfer at once; moving files into your library stays one at a time. An slskd without batch downloads, or one whose download subfolder setting is `{}`, keeps Octo at one at a time.
+
+Starring an album searches the album once and takes one person's folder of it in a single batch, matched to the tracklist by title, length and track number. Songs that folder lacks, or whose file fails a check, are searched one by one, side by side (`SLSKD_ALBUM_FOLDERS`, on by default).
+
+When slskd is up but not logged in to the Soulseek network (Soulseek's server has maintenance now and then), the dashboard shows it as a warning, and hearts wait up to `SLSKD_OUTAGE_HOLD_HOURS` (default 6) for it before using the next source, so a maintenance window does not turn everything you heart into YouTube MP3s. Waiting hearts survive a restart.
+
+The dashboard's **Better quality** page lists every song in your library that is not lossless, including the ones Octo got from YouTube, and finds a higher quality copy of the ones you pick, several at a time. Octo's apps offer the same as **Find higher quality** on a song or an album. Both go through the Better quality library action, so they need library actions on, the Better quality action on, you on the allowed list, and rehearsal mode off.
+
+Copies come from Soulseek, from Lidarr, or from both: **Library actions → Where to look for a higher quality copy** (`LIBRARY_ACTIONS_UPGRADE_SOURCE`). Automatic, the default, asks Soulseek first and Lidarr for what Soulseek cannot find, using whichever is set up, and asks Lidarr alone while Soulseek is offline. Lidarr only fetches whole albums, so Octo borrows the album: it copies out the one song, which then goes through the same checks and the same in-place swap as a Soulseek copy, deletes the other files that search brought in, and puts the album's monitoring back as it was. A song whose file Lidarr itself manages is left to Lidarr, which upgrades it in place when its quality profile asks for lossless.
+
+> **A heart is "fetch" for a song you do not have, and "favorite" for one you do.** Octo checks your library first. A song you already have, even the copy Octo found outside your library, becomes your favorite in Navidrome straight away and downloads nothing (an MP3 is queued for Better quality). A song you do not have is downloaded and nothing more: once it is in your library, heart it there to make it a favorite. `STAR_DOWNLOADS_FOR_REQUESTER` makes Octo favorite downloads when they land instead. Octo's own apps are left out of both, since their heart means Add.
 
 ### Cover art aggregator
 
@@ -595,10 +687,10 @@ Cached cross-source so a queue scroll doesn't trigger N external API calls per v
 ### FAQ
 
 **Do downloaded songs get tagged?**
-Yes. slskd downloads are full FLACs from peer libraries that already have ID3 tags. Octo organizes them per `FolderStructure`, then triggers a Navidrome rescan.
+Yes. Every download is matched against the fingerprint service, the music database and Deezer, tagged with the full release set and ReplayGain, given the largest cover found, and filed per `FolderStructure` before the Navidrome rescan. See [Do downloaded songs get tagged correctly?](#do-downloaded-songs-get-tagged-correctly) above.
 
 **What if all 5 Soulseek peers reject?**
-The next source in your heart order is tried. If every one fails and notifications are set up, you get a **Download failed** message; your music app itself hears nothing, because the heart was answered straight away. The heart may clear on the app's next sync, since Navidrome never stored a favourite for a song it doesn't have. Try again later or grab the file by hand.
+The next source in your heart order is tried. If every one fails and notifications are set up, you get a **Download failed** message; your music app itself hears nothing, because the heart was answered straight away. The heart may clear on the app's next sync, since Navidrome never stored a favorite for a song it doesn't have. Try again later or grab the file by hand.
 
 **Can it run without Soulseek?**
 Yes. Enable YouTube for MP3 downloads, Lidarr for album-level heart acquisition, or disable every song-heart source to keep discovery without automatic acquisition.

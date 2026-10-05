@@ -192,6 +192,7 @@ public class AcquisitionTrackerTests
         var fellBack = Only(tracker, "alice");
         Assert.Equal(AcquisitionState.Searching, fellBack.State);
         Assert.Equal("YouTube", fellBack.Source);
+        Assert.Equal("Soulseek couldn't get it, trying YouTube", fellBack.Note);
         Assert.Null(fellBack.Error);
         Assert.Null(fellBack.Progress);
         Assert.Null(fellBack.BytesDone);
@@ -383,6 +384,7 @@ public class AcquisitionTrackerTests
         var tracker = NewTracker();
         tracker.VisibilityPoll = TimeSpan.FromMilliseconds(5);
         tracker.VisibilityAttempts = 3;
+        tracker.SlowVisibilityAttempts = 0;
         tracker.LibraryLookup = (_, _, _, _) => throw new HttpRequestException("navidrome down");
         tracker.Begin("soulseek", "abc", "abc", "alice");
 
@@ -390,6 +392,105 @@ public class AcquisitionTrackerTests
 
         var row = await WaitForAsync(tracker, "alice", AcquisitionState.Done);
         Assert.Null(row.LibraryId);
+    }
+
+    [Fact]
+    public async Task ASongStillMissingAfterAMinuteAsksNavidromeToScanOnceAndIsFoundAfterIt()
+    {
+        var tracker = NewTracker();
+        var scans = 0;
+        var calls = 0;
+        tracker.VisibilityPoll = TimeSpan.FromMilliseconds(2);
+        tracker.SlowVisibilityPoll = TimeSpan.FromMilliseconds(2);
+        tracker.VisibilityAttempts = 4;
+        tracker.SlowVisibilityAttempts = 10;
+        tracker.RescanAfterAttempts = 6;
+        tracker.Rescan = () => { Interlocked.Increment(ref scans); return Task.CompletedTask; };
+        // Navidrome shows the song only once the forced scan has run.
+        tracker.LibraryLookup = (_, _, _, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(Volatile.Read(ref scans) > 0 ? "nd-song-9" : null);
+        };
+        tracker.Begin("soulseek", "abc", "abc", "alice");
+
+        tracker.Imported("soulseek", "abc", "A", "B", "/music/b.flac");
+
+        var row = await WaitForAsync(tracker, "alice", AcquisitionState.Done);
+        Assert.Equal("nd-song-9", row.LibraryId);
+        Assert.Equal(1, scans);
+        Assert.Equal(7, calls);
+    }
+
+    [Fact]
+    public async Task TheWatchOutlastsTheFastPollsBeforeGivingUp()
+    {
+        var tracker = NewTracker();
+        var calls = 0;
+        tracker.VisibilityPoll = TimeSpan.FromMilliseconds(2);
+        tracker.SlowVisibilityPoll = TimeSpan.FromMilliseconds(2);
+        tracker.VisibilityAttempts = 3;
+        tracker.SlowVisibilityAttempts = 5;
+        tracker.LibraryLookup = (_, _, _, _) => { Interlocked.Increment(ref calls); return Task.FromResult<string?>(null); };
+        tracker.Begin("soulseek", "abc", "abc", "alice");
+
+        tracker.Imported("soulseek", "abc", "A", "B", "/music/b.flac");
+
+        var row = await WaitForAsync(tracker, "alice", AcquisitionState.Done);
+        Assert.Null(row.LibraryId);
+        Assert.Equal(8, calls);
+    }
+
+    // --- Words beside the ring -------------------------------------------------------------
+
+    [Fact]
+    public void ATransferThatHasNotMovedAByteHasNoProgressRatherThanZero()
+    {
+        var tracker = NewTracker();
+        tracker.Begin("soulseek", "abc", "abc", "alice");
+
+        tracker.Transfer("soulseek", "abc", 0, 29_000_000, 0, "Soulseek");
+        var connecting = Only(tracker, "alice");
+        Assert.Equal(AcquisitionState.Downloading, connecting.State);
+        Assert.Null(connecting.Progress);
+        Assert.Equal(29_000_000, connecting.BytesTotal);
+
+        tracker.Transfer("soulseek", "abc", 2_900_000, 29_000_000, 10, "Soulseek");
+        Assert.Equal(0.1, Only(tracker, "alice").Progress);
+    }
+
+    [Fact]
+    public void AQueuedSongCountsTheDownloadsAheadOfItWhoeverAskedForThem()
+    {
+        var tracker = NewTracker();
+        tracker.Begin("soulseek", "first", "first", "bob");
+        tracker.Announce("soulseek", null, "first",
+            [("t1", "A", "One", "Album"), ("t2", "A", "Two", "Album")]);
+        tracker.Begin("soulseek", "mine", "mine", "alice");
+
+        var mine = Only(tracker, "alice");
+        Assert.Equal(3, mine.Ahead);
+
+        // Running and finished rows have no place in the queue, and finished ones free a slot.
+        tracker.Transfer("soulseek", "first", 1, 2);
+        tracker.Fail("soulseek", "t1", "gone");
+        Assert.Null(Assert.Single(tracker.ForUser("bob"), row => row.Id == "first").Ahead);
+        Assert.Equal(2, Only(tracker, "alice").Ahead);
+        Assert.Equal(1, Assert.Single(tracker.ForUser("bob"), row => row.Id == "t2").Ahead);
+    }
+
+    [Fact]
+    public void ANoteStaysUntilAnotherReplacesItAndGoesWhenTheSongArrives()
+    {
+        var tracker = NewTracker();
+        tracker.Begin("soulseek", "abc", "abc", "alice");
+
+        tracker.Stage("soulseek", "abc", AcquisitionState.Searching, "YouTube", "Soulseek couldn't get it, trying YouTube");
+        tracker.Stage("soulseek", "abc", AcquisitionState.Searching);
+        Assert.Equal("Soulseek couldn't get it, trying YouTube", Only(tracker, "alice").Note);
+
+        tracker.Complete("soulseek", "abc", "nd-1");
+        Assert.Null(Only(tracker, "alice").Note);
     }
 
     private static async Task<AcquisitionSnapshot> WaitForAsync(AcquisitionTracker tracker, string user,

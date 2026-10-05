@@ -220,6 +220,19 @@ public class SubsonicSettings
     public bool EnableSearchDiscovery { get; set; } = true;
 
     /// <summary>
+    /// Resolve the YouTube durations of the top discovery rows before search3/search2
+    /// answers (default: true).
+    /// Environment variable: WAIT_FOR_SEARCH_DURATIONS
+    ///
+    /// Off, search answers with Deezer's durations, which saves a few seconds per new query,
+    /// and finds the YouTube ones in the background. Rows already sent keep Deezer's length.
+    /// getSong and the Navidrome API's song lookup report the YouTube length once it is
+    /// known, so apps that look the song up again when it starts show the right length;
+    /// apps that only use the length from the search results show Deezer's.
+    /// </summary>
+    public bool WaitForSearchDurations { get; set; } = true;
+
+    /// <summary>
     /// Give clients that sync the library to the device a discovery catalog (default: true).
     /// Environment variable: ENABLE_SYNC_CATALOG
     ///
@@ -285,6 +298,26 @@ public class SubsonicSettings
     public bool RecordRequestedBy { get; set; } = true;
 
     /// <summary>
+    /// Also favorite a hearted outside song or album in Navidrome once it downloads, for the
+    /// person who hearted it (default: false). Off, a heart on a song you do not have only
+    /// downloads it; heart it again once it is in the library to make it a favorite. A heart on
+    /// a song you already have is always a favorite, whatever this says.
+    /// Environment variable: STAR_DOWNLOADS_FOR_REQUESTER
+    /// Octo's own apps are left out: their star is the Add button. The person's sign-in is held
+    /// in memory until the song arrives, and a restart drops it.
+    /// </summary>
+    public bool StarDownloadsForRequester { get; set; } = false;
+
+    /// <summary>
+    /// Never download a song already in the library (default: true). A heart, an album walk or a
+    /// play of a song you have keeps your copy; a lossy copy is queued for a higher quality one
+    /// when a lossless source is in the chain and Better quality may run. The same song means the
+    /// same artist and title in one version, and a length within 8 seconds or the same album.
+    /// Environment variable: SKIP_OWNED_SONGS
+    /// </summary>
+    public bool SkipOwnedSongs { get; set; } = true;
+
+    /// <summary>
     /// In Permanent mode, block the first play until the lossless copy has been fetched
     /// (default: false).
     /// Environment variable: WAIT_FOR_LOSSLESS_ON_PLAY
@@ -313,6 +346,30 @@ public class SubsonicSettings
     /// the declared contract exact.
     /// </summary>
     public int LosslessWaitTimeoutSeconds { get; set; } = 0;
+
+    /// <summary>
+    /// Keep a copy of every external track that is played, not only of hearted ones
+    /// (default: false).
+    /// Environment variable: DOWNLOAD_ON_PLAY
+    ///
+    /// The copy comes from the first source with song hearts enabled in the heart download
+    /// priority that Octo downloads from itself (Soulseek, YouTube; Lidarr is skipped, see
+    /// LidarrAlbumOnPlay). Playback still starts from the YouTube stream. Only a play from
+    /// the first byte counts, not a seek. Hearts always go first: at most one played track
+    /// waits to download, and one played while another waits is skipped until it is played
+    /// again.
+    /// </summary>
+    public bool DownloadOnPlay { get; set; } = false;
+
+    /// <summary>
+    /// Hand the album of every played external track to Lidarr (default: false).
+    /// Environment variable: LIDARR_ALBUM_ON_PLAY
+    ///
+    /// Works like a Lidarr song heart, once per track and run. Every hand-off makes Lidarr
+    /// search all its indexers, and radio pulls in an album per played track. A hand-off
+    /// Lidarr turns down is tried again on the next play.
+    /// </summary>
+    public bool LidarrAlbumOnPlay { get; set; } = false;
 
     /// <summary>
     /// Folder structure for downloaded tracks (default: Flat)

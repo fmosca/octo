@@ -50,8 +50,6 @@ public sealed class FfmpegLastFmRadioAudioTranscoder : ILastFmRadioAudioTranscod
     /// <summary>-1 dBTP as a linear limit for the true-peak limiter.</summary>
     private const string LimiterCeiling = "0.891251";
 
-    private static readonly Regex LoudnessLine = new(
-        @"^\s*(I|LRA|Peak):\s+(-?[0-9.]+|-inf|inf)\s+(LUFS|LU|dBFS)", RegexOptions.Multiline);
     private static readonly Regex SpectralLine = new(
         @"^lavfi\.aspectralstats\.1\.(centroid|flatness|rolloff)=(-?[0-9.]+(?:e[-+]?\d+)?)\s*$",
         RegexOptions.Multiline | RegexOptions.IgnoreCase);
@@ -136,26 +134,10 @@ public sealed class FfmpegLastFmRadioAudioTranscoder : ILastFmRadioAudioTranscod
             return null;
         }
 
-        double? integrated = null, range = null, peak = null;
-        foreach (Match match in LoudnessLine.Matches(report))
-        {
-            var value = ParseLevel(match.Groups[2].Value);
-            switch (match.Groups[1].Value)
-            {
-                case "I": integrated = value; break;
-                case "LRA": range = value; break;
-                case "Peak": peak = value; break;
-            }
-        }
-        return integrated is null ? null : (integrated.Value, range ?? 0, peak ?? 0);
+        // The same summary the download path reads for ReplayGain, parsed in one place.
+        var measured = Octo.Services.Audio.LoudnessMeter.Parse(report);
+        return measured is null ? null : (measured.IntegratedLufs, measured.LoudnessRangeLu, measured.TruePeakDbfs);
     }
-
-    private static double ParseLevel(string text) => text switch
-    {
-        "-inf" => double.NegativeInfinity,
-        "inf" => double.PositiveInfinity,
-        _ => double.Parse(text, CultureInfo.InvariantCulture),
-    };
 
     private static (double Centroid, double Flatness, double Rolloff) ReadSpectral(string path)
     {

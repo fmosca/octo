@@ -64,10 +64,10 @@ public sealed class LastFmRadioRecommendationService
 
     private static readonly HashSet<string> DeniedTags = new(StringComparer.OrdinalIgnoreCase)
     {
-        "seen live", "favorites", "favourites", "owned", "spotify", "albums i own",
+        "seen live", "favorites", "favorites", "owned", "spotify", "albums i own",
         "under 2000 listeners", "awesome", "love", "best",
         // Sentiment and superlatives say how a listener felt, not what the music is.
-        "favorite song", "favourite song", "favorite songs", "favourite songs", "my love",
+        "favorite song", "favorite song", "favorite songs", "favorite songs", "my love",
         "love at first listen", "beautiful", "epic", "legendary", "classic", "amazing",
         "perfect", "masterpiece", "good", "great", "catchy", "fun", "chill", "cool"
     };

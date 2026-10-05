@@ -48,11 +48,13 @@ function activateTab(name, { focus = false } = {}) {
   if (typeof syncSegments === 'function') syncSegments(false);
   // Panes that show live data reload whenever they are opened, so they are never stale.
   if (name === 'fetched' && typeof loadFetched === 'function') loadFetched();
+  if (name === 'lossy' && typeof loadLossy === 'function') loadLossy();
   if (name === 'raw' && typeof loadRawConfig === 'function') loadRawConfig();
   if (name === 'sources' && typeof loadConfigSources === 'function') loadConfigSources();
   if (name === 'lastfm' && typeof loadRadioStatus === 'function') loadRadioStatus();
   if (name === 'lastfm' && typeof loadLastFmScrobbling === 'function') loadLastFmScrobbling();
   if (name === 'lastfm' && typeof loadLastFmAccount === 'function') loadLastFmAccount();
+  if (name === 'about' && typeof loadUpdate === 'function') loadUpdate();
   if (focus) {
     window.scrollTo({ top: 0 });
     const heading = document.querySelector(`section[data-pane="${name}"] h1`);
@@ -267,9 +269,13 @@ async function loadSettings() {
   // retry: false, so a page load never pops a sign-in prompt. Without a session the section
   // simply stays empty until the user asks for a preview.
   loadGenreBackfill();
+  loadCoverUpgrade();
   loadLyricsLibrary();
   loadLyricsChoices();
   loadRadioStatus();
+  loadQualityUpgrade();
+  // Again here, so saving a songs-an-hour value enables its Pause button straight away.
+  loadReviewSweep();
   loadLastFmScrobbling();
   // Only when it is the tab on screen; opening the tab later checks then.
   if (document.querySelector('[data-pane="lastfm"].active')) loadLastFmAccount();
@@ -574,7 +580,7 @@ document.querySelectorAll('form[data-section]').forEach(form => {
     if (form.id === 'library-actions-form') {
       const dry = form.querySelector('[name="LibraryActions.DryRun"]');
       if (currentSettings?.LibraryActions?.DryRun && dry && !dry.checked
-          && !confirm('Turn off rehearsal mode? From the next check, a track added to an action playlist, or rated if ratings are on, moves a real file into quarantine.')) return;
+          && !(await askConfirm('Turn off rehearsal mode?', 'From the next check, a track added to an action playlist, or rated if ratings are on, moves a real file into quarantine.', 'Turn off rehearsal', true))) return;
     }
 
     if (form.id === 'lastfm-account-form' && !(await lastFmAccountMaySave(form))) return;
@@ -914,7 +920,7 @@ document.getElementById('rejected-peers-clear')?.addEventListener('click', async
   const button = event.currentTarget;
   const count = currentSettings?._meta?.RejectedPeerCount ?? 0;
   if (!count) return;
-  if (!confirm(`Forget ${count} rejected peer${count === 1 ? '' : 's'}? Those files become downloadable again.`)) return;
+  if (!(await askConfirm(`Forget ${count} rejected peer${count === 1 ? '' : 's'}?`, 'Those files become downloadable again.', 'Forget'))) return;
   try {
     const response = await api('/api/admin/soulseek/rejected-peers/clear', { method: 'POST' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1113,7 +1119,7 @@ genreMappingList?.addEventListener('dragend', event => {
 document.getElementById('genre-preset-broad')?.addEventListener('click', async () => {
   readGenreMappingRows();
   const existing = genreRules.filter(rule => rule.Pattern || rule.Genre).length;
-  if (existing > 0 && !confirm(`Replace your ${existing} rule${existing === 1 ? '' : 's'} with the broad preset? Nothing is saved until you press Save.`)) return;
+  if (existing > 0 && !(await askConfirm(`Replace your ${existing} rule${existing === 1 ? '' : 's'}?`, 'They are swapped for the broad preset. Nothing is saved until you press Save.', 'Replace rules'))) return;
   try {
     const response = await api('/api/admin/genre/presets');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1279,9 +1285,12 @@ async function startGenreBackfill(dryRun, scopeOverride = null) {
   if (scope === 'WholeLibrary' && !dryRun) {
     const current = await loadGenreBackfill();
     const expected = current?.musicPath ?? '';
-    confirmPath = prompt(
-      `This rewrites tags on every audio file under:\n\n${expected}\n\n` +
-      'including music Octo never downloaded. Type that path exactly to continue.');
+    confirmPath = await askDialog({
+      title: 'Write genres to your whole library?',
+      message: `This rewrites tags on every audio file under:\n${expected}\nincluding music Octo never downloaded. Type that path exactly to continue.`,
+      confirm: 'Write genres', danger: true,
+      input: { label: 'Music folder', placeholder: expected, mustEqual: expected },
+    });
     if (confirmPath === null) return;
   }
 
@@ -1308,7 +1317,7 @@ document.getElementById('genre-backfill-apply')?.addEventListener('click', async
   const run = await loadGenreBackfill();
   if (!run || run.settingsChanged) return;
   const scopeLabel = backfillScopeLabels[run.scope] ?? run.scope;
-  if (!confirm(`Write new genres to ${run.changed} file(s) in ${scopeLabel}? Only the genre is recorded for undo; anything else the tag library cannot round-trip is lost.`)) return;
+  if (!(await askConfirm(`Write new genres to ${run.changed} file${run.changed === 1 ? '' : 's'}?`, `In ${scopeLabel}. Only the genre is recorded for undo; anything else the tag library cannot round-trip is lost.`, 'Write genres', true))) return;
   // The previewed scope, not whatever the dropdown says by now.
   await startGenreBackfill(false, run.scope);
 });
@@ -1326,19 +1335,318 @@ document.getElementById('genre-backfill-resume')?.addEventListener('click', asyn
   const run = lastBackfillRun;
   // Resuming a preview writes nothing; resuming an apply writes tags, so it asks again.
   if (run && !run.dryRun
-      && !confirm(`Resume writing genres from file ${run.processed + 1} of ${run.total}?`)) return;
+      && !(await askConfirm('Resume writing genres?', `From file ${run.processed + 1} of ${run.total}.`, 'Resume'))) return;
   const response = await genreBackfillFetch('/api/admin/genre/backfill/resume', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { backfillNote(body.error || 'Could not resume.', 'error'); return; }
   await loadGenreBackfill();
 });
 document.getElementById('genre-backfill-undo')?.addEventListener('click', async () => {
-  if (!confirm('Put back the genre on every file changed since the last undo? Only the genre is restored, and files moved since then stay changed.')) return;
+  if (!(await askConfirm('Put back the genres?', 'Every file changed since the last undo gets its genre back. Only the genre is restored, and files moved since then stay changed.', 'Put back genres'))) return;
   const response = await genreBackfillFetch('/api/admin/genre/backfill/undo', { method: 'POST' });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { backfillNote(body.error || 'Could not undo.', 'error'); return; }
   backfillNote('Restoring genres.', 'info');
   await loadGenreBackfill();
+});
+
+// ---- Cover art: the soft covers wall ------------------------------------------
+// Scan (reads the songs only), pick on the wall, find better covers (looks the picked albums
+// up, writes nothing), replace. One button at the bottom always says the next step. Undo puts
+// every replaced cover back.
+
+let coverPoll = null;
+let lastCoverRun = null;
+let coverControlsSet = false;
+let coverPicked = new Set();
+let coverListRunId = null;
+let coverShowAll = false;
+let coverPace = null;
+const COVER_TILE_CAP = 600;
+
+const coverEl = id => document.getElementById(id);
+
+function coverNote(message, kind = 'ok') {
+  note(coverEl('cover-head')?.closest('.cover-summary'), message, kind);
+}
+
+function coverRows(run) { return run?.preview || []; }
+
+// Which rows can be picked right now: every soft album after a scan, only the ones with a
+// larger cover after a preview, none while running or after a replace.
+function coverPickable(run, row) {
+  if (!run || run.status === 'Running' || run.undo) return false;
+  if (run.mode === 'Scan') return true;
+  if (run.mode === 'Preview') return row.result === 'found';
+  return false;
+}
+
+function coverTile(run, row) {
+  const pickable = coverPickable(run, row);
+  const picked = pickable && coverPicked.has(row.id);
+  const now = `/api/admin/covers/upgrade/thumb/${encodeURIComponent(row.id)}`;
+  const found = `${now}?found=true`;
+  // A preview shows the cover it found over the one the album has; once replaced, the album's
+  // own cover is the new one, so it is shown alone.
+  const showFound = row.result === 'found';
+  const px = side => (side > 0 ? `${side} px` : 'No cover');
+  let badge;
+  if (row.result === 'soft') badge = `<span class="cover-badge">${esc(px(row.fromSide))}</span>`;
+  else if (row.result === 'found' && row.looksSame === false) badge = `<span class="cover-badge warn" title="This cover does not look like the one the album has now. It may be another edition, or another album with the same name.">Different art · ${esc(px(row.toSide))}</span>`;
+  else if (row.result === 'found') badge = `<span class="cover-badge">${esc(px(row.fromSide))} → ${esc(px(row.toSide))}</span>`;
+  else if (row.result === 'upgraded') badge = `<span class="cover-badge done">${icon('i-check')} ${esc(px(row.toSide))}</span>`;
+  else badge = '<span class="cover-badge">Nothing larger</span>';
+  const art = showFound
+    ? `<img loading="lazy" alt="" src="${found}" onerror="this.src='${now}';this.onerror=null"><img class="cover-was" loading="lazy" alt="" src="${now}" onerror="this.remove()">`
+    : row.result === 'upgraded'
+      ? `<img loading="lazy" alt="" src="${now}" onerror="this.src='${found}';this.onerror=null">`
+      : `<img loading="lazy" alt="" src="${now}" onerror="this.remove()">`;
+  const name = `${row.album || '(no album)'} by ${row.artist}`;
+  const sub = [row.artist, row.result === 'found' || row.result === 'upgraded' ? row.source : null].filter(Boolean).join(' · ');
+  return `<button type="button" class="cover-tile" role="${pickable ? 'checkbox' : 'listitem'}" data-cover-id="${esc(row.id)}"
+      ${pickable ? `aria-checked="${picked}"` : ''} ${!pickable && (row.result === 'none') ? 'aria-disabled="true"' : ''}
+      aria-label="${esc(name)}" title="${esc(row.folder)}">
+    <span class="cover-art">${art}${pickable ? `<span class="cover-check">${icon('i-check')}</span>` : ''}${badge}</span>
+    <span class="cover-title">${esc(row.album || '(no album)')}</span>
+    <span class="cover-artist">${esc(sub)}</span>
+  </button>`;
+}
+
+function renderCoverBar(run) {
+  const rows = coverRows(run);
+  const running = run.status === 'Running';
+  const pickableRows = rows.filter(row => coverPickable(run, row));
+  const count = pickableRows.filter(row => coverPicked.has(row.id)).length;
+  const go = coverEl('cover-go');
+  const hint = coverEl('cover-hint');
+  const countEl = coverEl('cover-count');
+
+  coverEl('cover-stop').hidden = !running;
+  // A scan is quick to start over, and starting over always uses the newest way of reading;
+  // only lookups and replaces, which take minutes, are worth resuming.
+  coverEl('cover-resume').hidden = running || !run.canResume || run.mode === 'Scan';
+  coverEl('cover-undo').hidden = running || !run.canUndo;
+  coverEl('cover-select').hidden = pickableRows.length === 0;
+  go.hidden = true;
+  countEl.textContent = '';
+  hint.textContent = '';
+
+  if (running) {
+    hint.textContent = run.undo ? 'Putting the old covers back.'
+      : run.mode === 'Scan' ? 'Reading your songs. Nothing is looked up or changed.'
+      : run.mode === 'Preview' ? 'Looking up each picked album, about 3 seconds apiece. Nothing changes yet.'
+      : 'Replacing covers. Every old cover is kept, so you can undo.';
+  } else if (run.undo) {
+    hint.textContent = run.status === 'Completed' ? 'Navidrome is picking the old covers back up.' : (run.reason || '');
+  } else if (run.mode === 'Scan' && pickableRows.length) {
+    countEl.textContent = `${count} selected`;
+    hint.textContent = 'Looks up a larger cover for each. Nothing changes yet.';
+    go.textContent = 'Find better covers';
+    go.hidden = false;
+  } else if (run.mode === 'Preview' && pickableRows.length) {
+    countEl.textContent = `${count.toLocaleString()} selected`;
+    hint.textContent = 'Your old covers are kept, so you can undo.';
+    go.textContent = `Replace ${count} cover${count === 1 ? '' : 's'}`;
+    go.hidden = false;
+  } else if (run.mode === 'Apply' && run.status === 'Completed') {
+    hint.textContent = run.files ? 'Navidrome is picking them up.' : 'Nothing needed replacing.';
+  } else if (run.status === 'Cancelled' || run.status === 'Interrupted') {
+    hint.textContent = run.mode === 'Scan' ? 'Stopped part way. Scan again to see every album.' : (run.reason || 'Stopped.');
+  }
+  coverEl('cover-bar').hidden = run.status === 'Idle'
+    || (go.hidden && coverEl('cover-stop').hidden && coverEl('cover-resume').hidden && coverEl('cover-undo').hidden && !hint.textContent);
+}
+
+function renderCovers(run) {
+  if (!coverEl('cover-wall')) return;
+  const rows = coverRows(run);
+  const running = run.status === 'Running';
+
+  // A fresh list from a finished run: pick everything worth carrying to the next step.
+  if (!running && run.runId && run.runId !== coverListRunId) {
+    coverListRunId = run.runId;
+    coverShowAll = false;
+    // A cover that does not look like the album's own is shown, not pre-picked: it may be
+    // another edition, or another album that shares the name.
+    coverPicked = new Set(rows.filter(row => coverPickable(run, row) && row.looksSame !== false).map(row => row.id));
+  }
+
+  const progress = coverEl('cover-progress');
+  progress.hidden = !running;
+  const byAlbum = run.albumsTotal > 0;
+  const done = byAlbum ? run.albumsDone : run.songsTotal ? run.songsRead : run.processed;
+  const all = byAlbum ? run.albumsTotal : run.songsTotal || run.total;
+  const starting = running && (run.starting || !run.total);
+  progress.classList.toggle('starting', starting);
+  if (running && !starting) coverEl('cover-progress-fill').style.width = `${all ? Math.min(100, Math.round(100 * done / all)) : 0}%`;
+
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  let head = '';
+  let sub = '';
+  if (run.status === 'Idle') head = '';
+  else if (run.undo) {
+    head = running ? 'Putting covers back' : run.status === 'Completed' ? 'Covers put back' : 'Undo stopped';
+    sub = `${plural(run.files, 'song')}`;
+  } else if (running && (run.starting || !run.total)) {
+    head = 'Getting started';
+    sub = 'Listing your songs';
+  } else if (running) {
+    head = { Scan: 'Scanning', Preview: 'Finding better covers', Apply: 'Replacing covers' }[run.mode] ?? 'Working';
+    const of = (n, total, word) => `${n.toLocaleString()} of ${total.toLocaleString()} ${word}${total === 1 ? '' : 's'}`;
+    sub = byAlbum ? of(run.albumsDone, run.albumsTotal, 'album')
+      : run.songsTotal ? of(run.songsRead, run.songsTotal, 'song')
+      : of(run.processed, run.total, 'folder');
+    // Picked albums are matched in bulk alongside (barcodes, then Apple), said in the reason.
+    if (run.reason) sub += ` · ${run.reason}`;
+    // Time left from the pace so far, once there is enough of it to go on.
+    if (byAlbum) {
+      if (coverPace?.runId !== run.runId) coverPace = { runId: run.runId, at: Date.now(), done: run.albumsDone };
+      const moved = run.albumsDone - coverPace.done;
+      if (moved >= 3) {
+        const left = (Date.now() - coverPace.at) / moved * Math.max(0, run.albumsTotal - run.albumsDone) / 1000;
+        if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
+      }
+    }
+  } else if (run.mode === 'Scan') {
+    head = run.soft ? `${plural(run.soft, 'album has a soft cover', 'albums have soft covers')}` : 'Every cover is sharp';
+    sub = `under ${run.smallerThan} px${run.kept ? ` · ${run.kept} already sharp` : ''}`;
+  } else if (run.mode === 'Preview') {
+    head = run.upgraded ? `${plural(run.upgraded, 'larger cover')} found` : 'No larger covers found';
+    const different = rows.filter(row => row.result === 'found' && row.looksSame === false).length;
+    sub = [run.kept ? `${run.kept} with nothing larger` : '',
+      different ? `${different} look different, left unpicked` : ''].filter(Boolean).join(' · ');
+  } else {
+    head = run.upgraded ? `${plural(run.upgraded, 'cover')} replaced` : 'Nothing replaced';
+    sub = run.files ? `in ${plural(run.files, 'song')}` : '';
+  }
+  if (!running && ['Cancelled', 'Interrupted', 'Failed'].includes(run.status)) head = `${head || 'Stopped'} (${run.status.toLowerCase()})`;
+  coverEl('cover-head').textContent = head;
+  coverEl('cover-sub').textContent = sub;
+
+  coverEl('cover-empty').hidden = run.status !== 'Idle';
+  const shown = coverShowAll ? rows : rows.slice(0, COVER_TILE_CAP);
+  coverEl('cover-wall').innerHTML = run.undo ? '' : shown.map(row => coverTile(run, row)).join('');
+  const more = coverEl('cover-more');
+  const lastError = run.errors?.length ? run.errors[run.errors.length - 1] : '';
+  more.hidden = !(rows.length > shown.length || lastError);
+  more.innerHTML = [
+    rows.length > shown.length ? `Showing ${shown.length} of ${rows.length}. <button type="button" class="link-btn" id="cover-show-all">Show all</button> Select all includes the rest.` : '',
+    lastError ? `<span class="field-error">${esc(lastError)}</span>` : '',
+  ].filter(Boolean).join(' ');
+  coverEl('cover-scan').disabled = running;
+  renderCoverBar(run);
+}
+
+async function loadCoverUpgrade(retry = false) {
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade', {}, retry);
+  if (!response.ok) return null;
+  const run = await response.json();
+  // Accepted but not started yet: show it as starting, so the page keeps watching and never
+  // sits on the last run's results while a new one gets going.
+  if (run.busy && run.status !== 'Running') Object.assign(run, { status: 'Running', starting: true, preview: [] });
+  const previous = lastCoverRun;
+  lastCoverRun = run;
+
+  // Open on the settings of the wall on screen, so what is picked is what it describes.
+  if (!coverControlsSet && run.status !== 'Idle' && !run.undo) {
+    if (run.scope) coverEl('cover-scope').value = run.scope;
+    if (run.smallerThan && [...coverEl('cover-threshold').options].some(o => o.value === String(run.smallerThan)))
+      coverEl('cover-threshold').value = String(run.smallerThan);
+    coverEl('cover-folder').checked = run.folderCovers;
+    document.querySelectorAll('.seg[data-seg-for="cover-scope"], .seg[data-seg-for="cover-threshold"]').forEach(seg => syncSegment(seg, false));
+  }
+  coverControlsSet = true;
+  renderCovers(run);
+
+  if (previous?.status === 'Running' && run.status !== 'Running' && run.status === 'Failed')
+    coverNote(run.reason || 'The run stopped.', 'error');
+
+  if (run.status === 'Running') {
+    if (!coverPoll) coverPoll = setInterval(() => loadCoverUpgrade(), 1500);
+  } else if (coverPoll) {
+    clearInterval(coverPoll);
+    coverPoll = null;
+  }
+  return run;
+}
+
+async function startCovers(mode, albums = null) {
+  const run = lastCoverRun;
+  // A pick belongs to the wall it was made on, so it runs with that wall's settings.
+  const scope = albums ? run.scope : coverEl('cover-scope').value;
+  const folderCovers = albums ? run.folderCovers : coverEl('cover-folder').checked;
+  const smallerThan = albums ? run.smallerThan : Number(coverEl('cover-threshold').value || 1000);
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, mode, folderCovers, smallerThan, albums }),
+  }, true);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    coverNote(body.error || `Could not start: HTTP ${response.status}`, 'error');
+    return;
+  }
+  await loadCoverUpgrade();
+}
+
+function coverPickedIds() {
+  return coverRows(lastCoverRun).filter(row => coverPickable(lastCoverRun, row) && coverPicked.has(row.id)).map(row => row.id);
+}
+
+coverEl('cover-scan')?.addEventListener('click', () => startCovers('Scan'));
+coverEl('cover-scan-first')?.addEventListener('click', () => startCovers('Scan'));
+coverEl('cover-folder')?.addEventListener('change', () => {
+  if (lastCoverRun?.mode === 'Scan' && !lastCoverRun.undo) coverNote('Scan again to use this.', 'info');
+});
+coverEl('cover-wall')?.addEventListener('click', event => {
+  const tile = event.target.closest('.cover-tile[role="checkbox"]');
+  if (!tile || !lastCoverRun) return;
+  const id = tile.dataset.coverId;
+  if (coverPicked.has(id)) coverPicked.delete(id); else coverPicked.add(id);
+  tile.setAttribute('aria-checked', String(coverPicked.has(id)));
+  renderCoverBar(lastCoverRun);
+});
+coverEl('cover-more')?.addEventListener('click', event => {
+  if (event.target.id !== 'cover-show-all' || !lastCoverRun) return;
+  coverShowAll = true;
+  renderCovers(lastCoverRun);
+});
+coverEl('cover-all')?.addEventListener('click', () => {
+  coverPicked = new Set(coverRows(lastCoverRun).filter(row => coverPickable(lastCoverRun, row)).map(row => row.id));
+  renderCovers(lastCoverRun);
+});
+coverEl('cover-none')?.addEventListener('click', () => {
+  coverPicked = new Set();
+  renderCovers(lastCoverRun);
+});
+coverEl('cover-go')?.addEventListener('click', async () => {
+  const run = lastCoverRun;
+  const ids = coverPickedIds();
+  if (!run || !ids.length) { coverNote('Pick at least one album first.', 'info'); return; }
+  if (run.mode === 'Scan') { await startCovers('Preview', ids); return; }
+  if (run.mode === 'Preview') {
+    if (!(await askConfirm(`Replace the cover of ${ids.length} album${ids.length === 1 ? '' : 's'}?`, 'Every old cover is kept, so Undo puts them back.', 'Replace covers'))) return;
+    await startCovers('Apply', ids);
+  }
+});
+coverEl('cover-stop')?.addEventListener('click', async () => {
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade/cancel', { method: 'POST' });
+  if (!response.ok) { coverNote('Could not stop.', 'error'); return; }
+  coverNote('Stopping after the current album.', 'info');
+  await loadCoverUpgrade();
+});
+coverEl('cover-resume')?.addEventListener('click', async () => {
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade/resume', { method: 'POST' });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { coverNote(body.error || 'Could not resume.', 'error'); return; }
+  await loadCoverUpgrade();
+});
+coverEl('cover-undo')?.addEventListener('click', async () => {
+  if (!(await askConfirm('Put back the old covers?', 'Every song the upgrades changed gets its old cover back. Songs moved since then stay as they are.', 'Put back covers'))) return;
+  const response = await genreBackfillFetch('/api/admin/covers/upgrade/undo', { method: 'POST' });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { coverNote(body.error || 'Could not undo.', 'error'); return; }
+  await loadCoverUpgrade();
 });
 
 // ---- Library actions -----------------------------------------------------
@@ -1499,7 +1807,7 @@ document.getElementById('notices-refresh')?.addEventListener('click', () =>
   showSessionTable(document.getElementById('notices-list'), '/api/admin/notices',
     ['Track', 'Why', 'Who', 'Answer'], entry => `
             <span class="key">${esc(entry.artist)} - ${esc(entry.title)}</span>
-            <span class="value">${esc(noticeKinds[entry.kind] || entry.kind)}: ${esc(entry.reason)}</span>
+            <span class="value">${esc(noticeKinds[entry.kind] || entry.kind)}: ${esc(entry.reason)}${entry.origin === 'LibrarySweep' ? ' (from the library)' : ''}</span>
             <span class="value">${esc(entry.username)}</span>
             <span class="value">${esc(noticeStates[entry.state] || entry.state)}${entry.submitted ? ', sent to AcoustID' : ''}</span>`,
     body => {
@@ -1524,6 +1832,81 @@ document.getElementById('duplicates-scan')?.addEventListener('click', async (eve
     button.disabled = false;
   }
 });
+
+// ---- Review: the library check (#72) ----
+const reviewSweepStates = { Off: 'Off', Paused: 'Paused', Waiting: 'Waiting', Running: 'Checking', Done: 'Up to date' };
+
+async function loadReviewSweep() {
+  const status = document.getElementById('review-sweep-status');
+  if (!status) return;
+  try {
+    const response = await api('/api/admin/review-sweep');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const s = await response.json();
+    const parts = [`${reviewSweepStates[s.state] || s.state}.`];
+    if (s.total > 0) parts.push(`Checked ${s.position} of ${s.total} songs (pass ${s.pass}).`);
+    parts.push(`Found ${s.found}, ${s.open} waiting for an answer.`);
+    if (s.undecodable > 0) parts.push(`${s.undecodable} could not be decoded.`);
+    if (s.keeper) parts.push(`Asking ${s.keeper}.`);
+    if (s.reason) parts.push(s.reason);
+    status.textContent = parts.join(' ');
+    const toggle = document.getElementById('review-sweep-toggle');
+    toggle.dataset.paused = s.paused ? 'true' : 'false';
+    toggle.querySelector('span').textContent = s.paused ? 'Start' : 'Pause';
+    toggle.disabled = s.perHour === 0;
+  } catch (error) {
+    status.textContent = `Could not read the library check: ${error.message}`;
+  }
+}
+
+async function reviewSweepPost(button, path, message) {
+  button.disabled = true;
+  try {
+    const response = await api(path, { method: 'POST' });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    note(button, message);
+  } catch (error) {
+    note(button, error.message, 'error');
+  } finally {
+    button.disabled = false;
+    await loadReviewSweep();
+  }
+}
+
+document.getElementById('review-sweep-toggle')?.addEventListener('click', (event) => {
+  const button = event.currentTarget;
+  const start = button.dataset.paused === 'true';
+  reviewSweepPost(button, `/api/admin/review-sweep/${start ? 'start' : 'pause'}`, start ? 'Carrying on.' : 'Paused.');
+});
+document.getElementById('review-sweep-reset')?.addEventListener('click', async (event) => {
+  // Taken before the question: once it is awaited the event no longer says which button it was.
+  const button = event.currentTarget;
+  if (!(await askConfirm('Check every song again?', 'From the start. Questions you answered recently are not asked again.', 'Start over'))) return;
+  reviewSweepPost(button, '/api/admin/review-sweep/reset', 'Starting over.');
+});
+loadReviewSweep();
+setInterval(() => { if (document.visibilityState === 'visible') loadReviewSweep(); }, 30000);
+
+const upgradeOutcomes = { Applied: 'upgraded', Failed: 'no better copy found', Rehearsed: 'dry run',
+  Skipped: 'skipped', Unresolved: 'file not found', Nothing: 'nothing left to try' };
+
+async function loadQualityUpgrade() {
+  const output = document.getElementById('quality-upgrade-status');
+  if (!output) return;
+  try {
+    const response = await api('/api/admin/quality-upgrade');
+    if (!response.ok) { output.textContent = ''; return; }
+    const data = await response.json();
+    const when = value => new Date(value).toLocaleString();
+    const parts = [];
+    if (data.perWeek > 0 && data.off) parts.push(`Not running: ${data.off}`);
+    if (data.lastRunUtc) parts.push(`Last ran ${when(data.lastRunUtc)}`
+      + (data.lastOutcome ? ` (${upgradeOutcomes[data.lastOutcome] || data.lastOutcome}).` : '.'));
+    if (data.nextDueUtc) parts.push(`Next one due ${when(data.nextDueUtc)}.`);
+    output.textContent = parts.join(' ');
+  } catch { output.textContent = ''; }
+}
 
 document.getElementById('lidarr-test-connection')?.addEventListener('click', async (event) => {
   const button = event.currentTarget;
@@ -1675,7 +2058,7 @@ if (rawForm) {
       rawEditor.focus();
       return;
     }
-    if (!confirm('Replace settings.json with exactly this text? Every value shown here, including ones that came from environment variables, is written into the file and overrides .env from now on. Every settings card reloads afterwards.')) return;
+    if (!(await askConfirm('Replace settings.json?', 'With exactly this text. Every value shown here, including ones that came from environment variables, is written into the file and overrides .env from now on. Every settings card reloads afterwards.', 'Replace settings.json', true))) return;
 
     const submit = rawForm.querySelector('button[type="submit"]');
     submit.disabled = true;
@@ -1703,7 +2086,7 @@ if (rawForm) {
   });
 
   document.getElementById('raw-reload')?.addEventListener('click', async () => {
-    if (rawDirty && !confirm('Discard your edits and reload settings.json from disk?')) return;
+    if (rawDirty && !(await askConfirm('Discard your edits?', 'settings.json is read again from disk.', 'Discard edits', true))) return;
     await loadRawConfig(true);
     if (rawSavedStatus) rawSavedStatus.innerHTML = `${icon('i-check-circle-fill')}<span>Reloaded from disk</span>`;
   });
@@ -1750,7 +2133,7 @@ document.getElementById('restart-btn').addEventListener('click', async () => {
   const unsavedNote = unsavedCards
     ? `\n\nYou have unsaved changes on ${unsavedCards} card${unsavedCards === 1 ? '' : 's'}; restarting discards them.`
     : '';
-  if (!confirm(`Restart the Octo container? In-flight requests drop. Service comes back in 5-10s.${unsavedNote}`)) return;
+  if (!(await askConfirm('Restart Octo?', `Requests in flight are dropped, and Octo is back in 5 to 10 seconds.${unsavedNote}`, 'Restart', true))) return;
   const btn = document.getElementById('restart-btn');
   const label = btn.querySelector('span');
   btn.disabled = true;
@@ -1874,10 +2257,10 @@ document.getElementById('radio-discovery-list')?.addEventListener('change', even
   if (!event.target.matches('[data-radio-field="Enabled"]')) return;
   event.target.closest('.radio-discovery-row')?.classList.toggle('is-disabled', !event.target.checked);
 });
-document.getElementById('radio-discovery-list')?.addEventListener('click', event => {
+document.getElementById('radio-discovery-list')?.addEventListener('click', async event => {
   const button = event.target.closest('[data-radio-action]'); const row = button?.closest('.radio-discovery-row');
   if (!button || !row) return; readRadioDiscoveryRows(); const index = Number(row.dataset.index);
-  if (button.dataset.radioAction === 'remove') { if (!confirm(`Remove “${radioDiscoveryStations[index].Name}”? Listening history and downloaded music are untouched.`)) return; radioDiscoveryStations.splice(index, 1); }
+  if (button.dataset.radioAction === 'remove') { if (!(await askConfirm(`Remove “${radioDiscoveryStations[index].Name}”?`, 'Listening history and downloaded music are untouched.', 'Remove', true))) return; radioDiscoveryStations.splice(index, 1); }
   renderRadioDiscovery();
 });
 
@@ -1917,7 +2300,7 @@ async function loadRadioStatus() {
 }
 document.getElementById('radio-user')?.addEventListener('change', loadRadioStatus);
 document.getElementById('radio-reset')?.addEventListener('click', async event => {
-  const user = document.getElementById('radio-user')?.value; if (!user || !confirm(`Reset Radio history for “${user}”? Downloaded music will not be removed.`)) return;
+  const user = document.getElementById('radio-user')?.value; if (!user || !(await askConfirm(`Reset Radio history for “${user}”?`, 'Downloaded music is not removed.', 'Reset history', true))) return;
   const button = event.currentTarget;
   button.disabled = true;
   try { const response = await api(`/api/admin/lastfm/radio/history?user=${encodeURIComponent(user)}`, { method: 'DELETE' }); const data = await response.json();
@@ -2110,11 +2493,11 @@ async function lastFmScrobbleAction(action, user, button) {
     const url = lfmLastUsers.find(u => u.user.toLowerCase() === key)?.approvalUrl;
     if (!url) return;
     try { await navigator.clipboard.writeText(url); toast('Link copied. It works for an hour.', 'ok'); }
-    catch { prompt('Copy this link:', url); }
+    catch { await askDialog({ title: 'Copy this link', message: 'It works for an hour.', confirm: 'Done', cancel: null, input: { value: url, readOnly: true } }); }
     return;
   }
   if (action === 'disconnect'
-      && !confirm(`Stop scrobbling outside plays for “${user}”? Their Last.fm history is untouched.`)) return;
+      && !(await askConfirm(`Stop scrobbling outside plays for “${user}”?`, 'Their Last.fm history is untouched.', 'Stop scrobbling', true))) return;
   // The tab has to open inside the click or the browser blocks it; Last.fm's page goes into it
   // once Octo has the link.
   let tab = null;
@@ -2383,6 +2766,81 @@ function askCredentials() {
   });
 }
 
+// The browser's own confirm(), alert() and prompt() boxes ignore the dashboard's look, so every
+// question goes through this one dialog: a title, the words, and buttons named for what they do.
+// A destructive question opens on Cancel and colours its button red. Resolves true or false, or,
+// with a typed answer, the text entered or null. `mustEqual` keeps the button off until it matches.
+function askDialog({ title, message = '', confirm = 'OK', cancel = 'Cancel', danger = false, input = null }) {
+  const modal = document.getElementById('ask-modal');
+  if (!modal) return Promise.resolve(input && !input.readOnly ? null : false);
+  const byId = id => document.getElementById(id);
+  const ok = byId('ask-ok');
+  const no = byId('ask-cancel');
+  const field = byId('ask-input');
+  const typed = !!input && !input.readOnly;
+  byId('ask-title').textContent = title;
+  byId('ask-desc').textContent = message;
+  ok.textContent = confirm;
+  ok.classList.toggle('btn-destructive', danger);
+  no.textContent = cancel ?? '';
+  no.hidden = cancel === null;
+  byId('ask-fields').hidden = !input;
+  if (input) {
+    byId('ask-label').textContent = input.label ?? '';
+    byId('ask-label').hidden = !input.label;
+    field.value = input.value ?? '';
+    field.placeholder = input.placeholder ?? '';
+    field.readOnly = !!input.readOnly;
+  }
+  const sync = () => { ok.disabled = input?.mustEqual != null && field.value.trim() !== input.mustEqual; };
+  sync();
+
+  const opener = document.activeElement;
+  const app = document.querySelector('.app');
+  if (app) app.inert = true;
+  modal.hidden = false;
+  const first = input ? field : (danger && cancel !== null ? no : ok);
+  first.focus();
+  if (document.activeElement !== first) setTimeout(() => first.focus(), 0);
+  if (input?.readOnly) field.select();
+
+  return new Promise(resolve => {
+    const close = value => {
+      modal.hidden = true;
+      if (app) app.inert = false;
+      if (opener && typeof opener.focus === 'function') opener.focus();
+      ok.removeEventListener('click', onOk);
+      no.removeEventListener('click', onNo);
+      modal.removeEventListener('keydown', onKey);
+      modal.removeEventListener('mousedown', onBackdrop);
+      field.removeEventListener('input', sync);
+      resolve(value);
+    };
+    const onOk = () => { if (!ok.disabled) close(typed ? field.value.trim() : true); };
+    const onNo = () => close(typed ? null : false);
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); onNo(); return; }
+      if (e.key === 'Enter' && (e.target === field || e.target === ok)) { e.preventDefault(); onOk(); return; }
+      if (e.key === 'Tab') {
+        const stops = Array.from(modal.querySelectorAll('input, button')).filter(el => !el.disabled && !el.hidden && el.offsetParent !== null);
+        const head = stops[0];
+        const tail = stops[stops.length - 1];
+        if (e.shiftKey && document.activeElement === head) { e.preventDefault(); tail.focus(); }
+        else if (!e.shiftKey && document.activeElement === tail) { e.preventDefault(); head.focus(); }
+      }
+    };
+    // Only the backdrop itself: a drag that starts inside the card is not an outside click.
+    const onBackdrop = e => { if (e.target === modal) onNo(); };
+    ok.addEventListener('click', onOk);
+    no.addEventListener('click', onNo);
+    modal.addEventListener('keydown', onKey);
+    modal.addEventListener('mousedown', onBackdrop);
+    field.addEventListener('input', sync);
+  });
+}
+
+const askConfirm = (title, message, confirm, danger = false) => askDialog({ title, message, confirm, danger });
+
 async function browseAuthenticate(result) {
   const creds = await askCredentials();
   if (!creds) {
@@ -2401,8 +2859,32 @@ async function browseAuthenticate(result) {
     result.innerHTML = esc(data.error || 'Sign-in failed.');
     return false;
   }
-  return true;   // the session is now in the cookie the response set
+  showSignedIn(data.user);
+  return true;   // the session is now in the cookie the response set, kept for this browser
 }
+
+// The footer says who this browser is signed in as. The sign-in is remembered across restarts
+// and lapses only after 90 days without a visit; Sign out forgets it now.
+function showSignedIn(user) {
+  const line = document.getElementById('signed-in');
+  if (!line) return;
+  line.hidden = !user;
+  document.getElementById('signed-in-user').textContent = user ? `Signed in as ${user}` : '';
+}
+
+async function loadSignedIn() {
+  try {
+    const r = await api('/api/admin/browse/session', { credentials: 'same-origin' });
+    const body = await r.json();
+    showSignedIn(body.signedIn ? body.user : null);
+  } catch { showSignedIn(null); }
+}
+
+document.getElementById('sign-out')?.addEventListener('click', async () => {
+  await api('/api/admin/browse/signout', { method: 'POST', credentials: 'same-origin' });
+  showSignedIn(null);
+  toast('Signed out of this browser.');
+});
 
 function renderBrowse(data, result, input) {
   const rows = [];
@@ -2564,7 +3046,10 @@ async function loadAcquisitions() {
     const pct = typeof a.progress === 'number' ? Math.round(a.progress * 100) : null;
     const failed = a.state === 'failed';
     const label = a.state === 'downloading' && pct !== null
-      ? `Downloading ${pct}%` : (ACQ_LABELS[a.state] || a.state);
+      ? `Downloading ${pct}%`
+      : a.state === 'queued' && a.ahead > 0
+        ? `Queued, ${a.ahead} ahead`
+        : (ACQ_LABELS[a.state] || a.state);
     const askers = Array.isArray(a.requestedBy) ? a.requestedBy.filter(Boolean) : [];
     const size = fmtSize(a.bytesTotal);
     const sub = [
@@ -2576,7 +3061,9 @@ async function loadAcquisitions() {
       ? `<div class="acq-error">${escapeHtml(a.error)}</div>`
       : pct !== null && a.state === 'downloading'
         ? `<div class="acq-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>`
-        : '';
+        : a.note
+          ? `<div class="dl-sub">${escapeHtml(a.note)}</div>`
+          : '';
     return `<div class="dl-item">
       <div class="dl-art dl-art-ph"></div>
       <div class="dl-main">
@@ -2631,13 +3118,90 @@ async function loadFetched({ withAcquisitions = true } = {}) {
           <div class="dl-tags"><span class="dl-badge ${badgeClass}">${escapeHtml(fmt)}</span><span class="dl-source">${escapeHtml(d.source)}</span></div>
           <div class="dl-sub">${escapeHtml(relTime(d.downloadedAt))}${size ? ' · ' + size : ''}${who ? ' · ' + who : ''}</div>
         </div>
-      </div>`;
+      </div>${d.tagging ? `<details class="dl-tagging"><summary>How it was tagged</summary>${renderTagReport(d.tagging)}</details>` : ''}`;
     }).join('');
   } catch (e) {
     list.innerHTML = stateBlock('error', `Couldn't load the log: ${e.message || 'error'}`);
   }
 }
 document.getElementById('fetched-refresh')?.addEventListener('click', loadFetched);
+
+// ── How a download was tagged ───────────────────────────────────────────────
+// The same block under a Fetched songs row and under "Try it on a song": the release that won
+// and how sure Octo is, every candidate it weighed with its biggest penalties, what each field
+// was set to and from, the notes, the stage timings and the loudness.
+function renderTagReport(report) {
+  if (!report) return '';
+  const confidence = String(report.confidence || 'None');
+  const badge = { Strong: 'good', Medium: 'state', Ambiguous: 'warn', Low: 'warn', None: 'mp3' }[confidence] || 'mp3';
+  const distance = typeof report.distance === 'number' ? ` · distance ${report.distance.toFixed(3)}` : '';
+  const chosen = report.releaseTitle
+    ? `<strong>${escapeHtml(report.releaseTitle)}</strong>${report.releaseDate ? ' (' + escapeHtml(report.releaseDate) + ')' : ''} from ${escapeHtml(report.source || '?')}`
+    : 'No release was chosen; the tags came from the catalog and the file as before.';
+  const rehearsed = report.rehearsed ? '<span class="dl-badge warn">rehearsal</span>' : '';
+
+  const candidates = (report.candidates || []).map(c => `<div class="config-row tag-candidate">
+      <div><span class="key">${escapeHtml(c.source)}</span> ${escapeHtml(c.title)}<div class="tag-sub">${escapeHtml(c.album || '')}${c.type ? ' · ' + escapeHtml(c.type) : ''}${c.date ? ' · ' + escapeHtml(c.date) : ''}</div></div>
+      <div class="value">${Number(c.distance).toFixed(3)}<div class="tag-sub">${escapeHtml((c.biggestPenalties || []).join(', ') || 'nothing against it')}</div></div>
+    </div>`).join('');
+
+  const fields = Object.entries(report.fields || {}).map(([name, f]) => `<div class="config-row">
+      <div class="key">${escapeHtml(name)}</div>
+      <div class="value">${escapeHtml(f?.value ?? '')}<span class="tag-sub"> from ${escapeHtml(f?.source || '?')}</span></div>
+    </div>`).join('');
+
+  const notes = (report.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
+  const stages = Object.entries(report.stageSeconds || {}).map(([k, v]) => `${escapeHtml(k)} ${Number(v).toFixed(1)}s`).join(' · ');
+  const loudness = typeof report.integratedLufs === 'number'
+    ? `${report.integratedLufs.toFixed(1)} LUFS, peak ${Number(report.truePeakDbfs ?? 0).toFixed(1)} dBTP`
+    : 'not measured';
+
+  return `<div class="tag-report">
+    <div class="tag-report-head"><span class="dl-badge ${badge}">${escapeHtml(confidence)}</span>${rehearsed}<span>${chosen}${distance}</span></div>
+    ${candidates ? `<div class="tag-report-title">Candidates</div><div class="config-table">${candidates}</div>` : ''}
+    ${fields ? `<div class="tag-report-title">Fields</div><div class="config-table">${fields}</div>` : ''}
+    ${notes ? `<ul class="tag-report-notes">${notes}</ul>` : ''}
+    <div class="tag-sub">${stages ? stages + ' · ' : ''}loudness ${escapeHtml(loudness)}${report.detailsPrefetchHit ? ' · release details prefetched' : ''}</div>
+  </div>`;
+}
+
+// "Try it on a song": the whole identification on a library file or on a name, never written.
+document.getElementById('tags-preview-run')?.addEventListener('click', async () => {
+  const button = document.getElementById('tags-preview-run');
+  const status = document.getElementById('tags-preview-status');
+  const out = document.getElementById('tags-preview-out');
+  const body = {
+    path: document.getElementById('tags-preview-path')?.value.trim() || null,
+    artist: document.getElementById('tags-preview-artist')?.value.trim() || null,
+    title: document.getElementById('tags-preview-title')?.value.trim() || null,
+    album: document.getElementById('tags-preview-album')?.value.trim() || null,
+  };
+  if (!body.path && !(body.artist && body.title)) {
+    status.textContent = 'Give a path inside the music folder, or an artist and a title.';
+    status.hidden = false;
+    return;
+  }
+  button.disabled = true;
+  status.textContent = 'Asking the fingerprint service, the catalog and the music database…';
+  status.hidden = false;
+  out.hidden = true;
+  try {
+    const r = await genreBackfillFetch('/api/admin/tags/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
+    out.innerHTML = renderTagReport(result);
+    out.hidden = false;
+    status.hidden = true;
+  } catch (e) {
+    status.textContent = `Could not try it: ${e.message || 'error'}`;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 // ────────────────────────────────────────────────────────────────
 // Segmented controls: buttons built from a hidden <select> they proxy to,
@@ -2867,7 +3431,7 @@ function heartSourceReachable() {
   const enabled = steps.filter(step => step.SongEnabled || step.AlbumEnabled).map(step => step.Source);
   if (!enabled.length) return { ok: false, detail: 'No heart source is switched on, so a heart downloads nothing.' };
   const reachable = enabled.filter(source => {
-    if (source === 'Soulseek') return services.slskd?.ok;
+    if (source === 'Soulseek') return services.slskd?.ok && !services.slskd?.warning;
     if (source === 'YouTube') return services.ytDlpShim?.ok;
     if (source === 'Lidarr') return services.lidarr?.ok && services.lidarr?.configured !== false && !services.lidarr?.warning;
     return false;
@@ -2975,6 +3539,7 @@ document.getElementById('setup-summary')?.addEventListener('click', () => {
 // The order is the saved LYRICS_SOURCES string: the sources that are on, top first. A source
 // that is off keeps its place on the page until the next load, where it goes to the bottom.
 const lyricsSourceMeta = {
+  song: { title: "The song’s own lyrics", detail: 'Already in its tags or a file beside it. Always on; rank it to decide when they win.', fixed: true },
   kugou: { title: 'KuGou', detail: 'Word-timed lyrics for most songs. An unofficial API that can change without notice.' },
   lrclib: { title: 'LRCLIB', detail: 'Open and keyless. Timed line by line, now and then word by word.' },
   netease: { title: 'NetEase', detail: 'Deep on non-Western and older music. An unofficial API.' },
@@ -2987,7 +3552,8 @@ function renderLyricsSources(saved) {
   if (!list) return;
   if (saved !== undefined) {
     const on = String(saved ?? '').split(',').map(name => name.trim().toLowerCase()).filter(name => lyricsSourceMeta[name]);
-    const unique = [...new Set(on)];
+    // The song's own lyrics are always in the order: first when an older saved order leaves them out.
+    const unique = [...new Set(on.includes('song') ? on : ['song', ...on])];
     lyricsSources = [
       ...unique.map(name => ({ name, on: true })),
       ...Object.keys(lyricsSourceMeta).filter(name => !unique.includes(name)).map(name => ({ name, on: false })),
@@ -3007,10 +3573,10 @@ function renderLyricsSources(saved) {
           <span class="source-title">${esc(meta.title)}</span>
           <span class="source-detail">${esc(meta.detail)}</span>
         </span>
-        <label class="switch source-kind-switch">
+        ${meta.fixed ? '' : `<label class="switch source-kind-switch">
           <input type="checkbox" data-lyrics-source-on aria-label="Use ${esc(meta.title)}" ${source.on ? 'checked' : ''} />
           <span class="sw-track"></span><span class="sw-thumb"></span>
-        </label>
+        </label>`}
       </div>`;
   }).join('');
   syncLyricsSourcesInput();
@@ -3024,9 +3590,10 @@ function syncLyricsSourcesInput() {
     input.value = value;
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
+  const looksUp = lyricsSources.some(source => source.on && !lyricsSourceMeta[source.name].fixed);
   if (help) {
-    help.hidden = value.length > 0;
-    help.textContent = value.length ? '' : 'Every source is off, so no lyrics will be found.';
+    help.hidden = looksUp;
+    help.textContent = looksUp ? '' : 'Every source is off, so only the lyrics songs already have will show.';
   }
 }
 
@@ -3110,7 +3677,7 @@ function finishLyricsDrag() {
 
 let lyricsLibraryPoll = null;
 
-async function lyricsFetch(url, options = {}, retry = true, holderId = 'lyrics-library-status') {
+async function lyricsFetch(url, options = {}, retry = true, holderId = 'lyrics-bar') {
   const response = await api(url, options);
   if (response.status === 401 && retry) {
     const holder = document.getElementById(holderId);
@@ -3123,94 +3690,347 @@ async function lyricsError(response) {
   try { return (await response.json()).error || `HTTP ${response.status}`; } catch { return `HTTP ${response.status}`; }
 }
 
-function renderLyricsLibrary(run) {
-  const status = document.getElementById('lyrics-library-status');
-  if (!status) return;
+// ---- Better lyrics ------------------------------------------------------
+//
+// The soft covers wall's steps, for lyrics: Scan lists the songs with no lyrics or weaker ones and
+// changes nothing, Find better lyrics looks the picked ones up and changes nothing, Save writes
+// what was found, and Undo puts back everything Save wrote over.
+
+let lyricsRun = null;
+let lyricsPickedRows = new Set();
+let lyricsListRunId = null;
+let lyricsShowAll = false;
+let lyricsControlsSet = false;
+let lyricsPace = null;
+const LYRICS_ROW_CAP = 400;
+const lyricsEl = id => document.getElementById(id);
+const lyricsHasLabel = { none: 'No lyrics', plain: 'Not timed', line: 'Timed by line', word: 'Word by word' };
+const lyricsKindLabel = { word: 'Word by word', line: 'Timed by line', plain: 'Not timed', instrumental: 'Instrumental' };
+const lyricsSaveLabel = { beside: 'beside each song', inside: 'inside each song', both: 'beside and inside each song' };
+
+function lyricsNote(message, kind = 'ok') {
+  note(lyricsEl('lyrics-head')?.closest('.cover-summary'), message, kind);
+}
+
+// Set when a step was started from this page, so the page keeps watching (and says so) even
+// while a status request fails, instead of going quiet.
+let lyricsExpectRunning = false;
+let lyricsLoadError = '';
+
+// A scan lists every song it found wanting (the Show chip can narrow it to songs with none);
+// later steps list the songs they worked on.
+function lyricsRows(run) {
+  let rows = run?.rows || [];
+  if (run?.mode && run.mode !== 'Scan') rows = rows.filter(row => row.result !== 'weak');
+  if (lyricsEl('lyrics-show')?.value === 'none') rows = rows.filter(row => row.has === 'none');
+  return rows;
+}
+
+function lyricsPickable(run, row) {
+  if (!run || run.status === 'Running' || run.mode === 'Undo') return false;
+  if (run.mode === 'Scan') return true;
+  if (run.mode === 'Preview') return row.result === 'found';
+  return false;
+}
+
+function lyricsItem(run, row) {
+  const pickable = lyricsPickable(run, row);
+  const picked = pickable && lyricsPickedRows.has(row.id);
+  const badges = [`<span class="lyrics-badge">${esc(lyricsHasLabel[row.has] || row.has)}</span>`];
+  const kind = lyricsKindLabel[row.kind] || row.kind || '';
+  if (row.result === 'found') {
+    badges.push(row.doubt
+      ? `<span class="lyrics-badge warn" title="${esc(row.doubt)}">${esc(kind)} · ${esc(row.source)} · not certain</span>`
+      : `<span class="lyrics-badge good">${esc(kind)} · ${esc(row.source)}</span>`);
+  } else if (row.result === 'saved') badges.push(`<span class="lyrics-badge done">${icon('i-check')} ${esc(kind)} · saved</span>`);
+  else if (row.result === 'none') badges.push(`<span class="lyrics-badge">${row.kind === 'instrumental' ? 'Instrumental' : 'Nothing better'}</span>`);
+  else if (row.result === 'busy') badges.push('<span class="lyrics-badge warn">No answer, try again</span>');
+  else if (row.result === 'kept') badges.push('<span class="lyrics-badge">Already as good</span>');
+  else if (row.result === 'blocked') badges.push('<span class="lyrics-badge warn" title="Its lyrics file is one Octo did not write, so Octo leaves it alone.">Has lyrics Octo will not replace</span>');
+  else if (row.result === 'failed') badges.push('<span class="lyrics-badge warn">Could not read the file</span>');
+  const preview = row.preview?.length && ['found', 'saved'].includes(row.result)
+    ? `<span class="lyrics-preview">${row.preview.map(esc).join(' / ')}</span>` : '';
+  return `<div class="lyrics-item" role="listitem">
+    <button type="button" class="lyrics-pick" data-lyrics-row="${esc(row.id)}" title="${esc(row.path)}"
+        ${pickable ? `role="checkbox" aria-checked="${picked}"` : 'aria-disabled="true"'}
+        aria-label="${esc(`${row.title} by ${row.artist}`)}">
+      <span class="lyrics-check">${icon('i-check')}</span>
+      <span class="lyrics-song">
+        <span class="lyrics-title">${esc(row.title)}</span>
+        <span class="set-info-d">${esc([row.artist, row.album].filter(Boolean).join(' · '))}</span>
+        ${preview}
+      </span>
+      <span class="lyrics-badges">${badges.join('')}</span>
+    </button>
+    <button type="button" class="link-btn" data-lyrics-choose="${esc(row.path)}">Choose</button>
+  </div>`;
+}
+
+function renderLyricsBar(run) {
+  const rows = lyricsRows(run);
   const running = run.status === 'Running';
-  document.getElementById('lyrics-library-cancel').hidden = !running;
-  document.getElementById('lyrics-library-resume').hidden = running || !run.canResume;
-  document.getElementById('lyrics-library-start').disabled = running;
+  const pickableRows = rows.filter(row => lyricsPickable(run, row));
+  const count = pickableRows.filter(row => lyricsPickedRows.has(row.id)).length;
+  const go = lyricsEl('lyrics-go');
+  const hint = lyricsEl('lyrics-hint');
+  const countEl = lyricsEl('lyrics-count');
 
-  const scope = document.getElementById('lyrics-library-scope');
-  const scopeHint = document.getElementById('lyrics-library-scope-d');
-  if (scope) scope.textContent = run.writesBesideAll ? 'Every song in the library' : 'Songs Octo downloaded';
-  if (scopeHint) scopeHint.textContent = run.writesBesideAll
-    ? 'Lyrics files are written beside every song that has none, your own rips and purchases included.'
-    : 'Turn on "Write lyrics files beside all library songs" above to include the rest.';
+  lyricsEl('lyrics-stop').hidden = !running || run.mode === 'Undo';
+  // A scan is quick to start over; lookups and saves are worth resuming.
+  lyricsEl('lyrics-resume').hidden = running || !run.canResume || run.mode === 'Scan';
+  lyricsEl('lyrics-undo').hidden = running || !run.canUndo;
+  lyricsEl('lyrics-select').hidden = pickableRows.length === 0;
+  go.hidden = true;
+  countEl.textContent = '';
+  hint.textContent = '';
 
-  if (run.status === 'Idle') {
-    status.innerHTML = '';
-  } else {
-    const label = { Running: 'Finding lyrics', Completed: 'Finished', Cancelled: 'Stopped', Interrupted: 'Paused', Failed: 'Stopped' }[run.status] ?? run.status;
-    const counts = [
-      `${run.processed} of ${run.total} songs`,
-      `${run.written} written${run.wordTimed ? ` (${run.wordTimed} word-timed)` : ''}`,
-      run.upgraded ? `${run.upgraded} upgraded` : null,
-      run.alreadyHad ? `${run.alreadyHad} already had lyrics` : null,
-      run.notFound ? `${run.notFound} not found` : null,
-      run.instrumental ? `${run.instrumental} instrumental` : null,
-      run.busy ? `${run.busy} not answered` : null,
-      run.failed ? `${run.failed} failed` : null,
-    ].filter(Boolean).join(' · ');
-    status.innerHTML = `
-      <div class="set-info">
-        <div class="set-info-t">${esc(label)}</div>
-        <div class="set-info-d">${esc(counts)}${run.reason ? `. ${esc(run.reason)}` : ''}</div>
-      </div>
-      ${run.total ? `<progress class="lyrics-progress" max="${run.total}" value="${run.processed}"></progress>` : ''}`;
+  if (running) {
+    hint.textContent = {
+      Scan: 'Reading your songs. Nothing is looked up or changed.',
+      Preview: 'Looking up each picked song, a couple of seconds apiece. Nothing changes yet.',
+      Save: 'Saving lyrics. Whatever they replace is kept, so you can undo.',
+      Undo: 'Putting the old lyrics back.',
+    }[run.mode] || 'Working.';
+  } else if (run.mode === 'Scan' && pickableRows.length) {
+    countEl.textContent = `${count.toLocaleString()} selected`;
+    // A lookup and the pause after it come to about 2.5 seconds a song.
+    const minutes = Math.round(count * 2.5 / 60);
+    const takes = minutes >= 90 ? `about ${Math.round(minutes / 60)} hours` : minutes >= 2 ? `about ${minutes} minutes` : 'a minute or two';
+    hint.textContent = `Looks up better lyrics for each, ${takes}. Nothing changes yet, and you can stop and resume.`;
+    go.textContent = 'Find better lyrics';
+    go.hidden = false;
+  } else if (run.mode === 'Preview' && pickableRows.length) {
+    countEl.textContent = `${count.toLocaleString()} selected`;
+    hint.textContent = `Saved ${lyricsSaveLabel[run.saveTo] || 'beside each song'}. Whatever they replace is kept, so you can undo.`;
+    go.textContent = `Save ${count} lyric${count === 1 ? '' : 's'}`;
+    go.hidden = false;
+  } else if (run.mode === 'Save' && run.status === 'Completed') {
+    hint.textContent = !run.written ? 'Nothing needed saving.'
+      : run.saveTo === 'beside' ? 'Every app shows them now.' : 'Navidrome picks up lyrics inside songs at its next scan, which Octo asked for.';
+  } else if (run.mode === 'Undo' && run.status === 'Completed') {
+    hint.textContent = run.reason || 'The old lyrics are back.';
+  } else if (run.status === 'Cancelled' || run.status === 'Interrupted') {
+    hint.textContent = run.mode === 'Scan' ? 'Stopped part way. Scan again to see every song.' : (run.reason || 'Stopped.');
+  }
+  lyricsEl('lyrics-bar').hidden = run.status === 'Idle'
+    || (go.hidden && lyricsEl('lyrics-stop').hidden && lyricsEl('lyrics-resume').hidden && lyricsEl('lyrics-undo').hidden && !hint.textContent);
+}
+
+function renderLyricsLibrary(run) {
+  if (!lyricsEl('lyrics-list')) return;
+  const rows = lyricsRows(run);
+  const running = run.status === 'Running';
+
+  // A fresh list from a finished step: pick everything worth carrying on. Lyrics the sources
+  // were not sure of are shown, not pre-picked.
+  if (!running && run.runId && run.runId !== lyricsListRunId) {
+    lyricsListRunId = run.runId;
+    lyricsShowAll = false;
+    lyricsPickedRows = new Set(rows.filter(row => lyricsPickable(run, row) && !row.doubt).map(row => row.id));
   }
 
-  const review = document.getElementById('lyrics-review');
-  const list = document.getElementById('lyrics-review-list');
-  if (review && list) {
-    review.hidden = !run.review?.length;
-    list.innerHTML = (run.review ?? []).slice(0, 100).map(entry => `
-      <div class="config-row lyrics-row">
-        <span class="lyrics-song">
-          <strong>${esc(entry.title)}</strong> <span class="set-opt">${esc(entry.artist)}</span>
-          <span class="set-info-d">${esc(entry.source)}, ${esc(entry.kind)}: ${esc(entry.reason)}</span>
-        </span>
-        <span class="genre-preset-actions">
-          <button class="btn btn-ghost" type="button" data-review-choose="${esc(entry.path)}">Choose other lyrics</button>
-          <button class="btn btn-ghost" type="button" data-review-dismiss="${esc(entry.path)}">They're right</button>
-        </span>
-      </div>`).join('');
+  const progress = lyricsEl('lyrics-progress');
+  progress.hidden = !running;
+  const starting = running && (run.starting || !run.total);
+  progress.classList.toggle('starting', starting);
+  if (running && !starting) lyricsEl('lyrics-progress-fill').style.width = `${run.total ? Math.min(100, Math.round(100 * run.processed / run.total)) : 0}%`;
+
+  const plural = (n, one, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+  const all = run.rows || [];
+  const countHas = has => all.filter(row => row.has === has).length;
+  let head = '';
+  let sub = '';
+  if (run.status === 'Idle') head = '';
+  else if (starting) {
+    head = 'Getting started';
+    sub = 'Listing your songs';
+  } else if (running) {
+    head = { Scan: 'Scanning', Preview: 'Finding better lyrics', Save: 'Saving lyrics', Undo: 'Putting lyrics back', Walk: 'Finding lyrics' }[run.mode] || 'Working';
+    sub = `${run.processed.toLocaleString()} of ${plural(run.total, 'song')}`;
+    if (run.mode === 'Scan' && all.length) sub += ` · ${all.length.toLocaleString()} could have better lyrics so far`;
+    if (run.mode === 'Preview' && run.upgraded) sub += ` · ${run.upgraded.toLocaleString()} found so far`;
+    if (lyricsPace?.runId !== run.runId) lyricsPace = { runId: run.runId, at: Date.now(), done: run.processed };
+    const moved = run.processed - lyricsPace.done;
+    if (moved >= 3) {
+      const left = (Date.now() - lyricsPace.at) / moved * Math.max(0, run.total - run.processed) / 1000;
+      if (left >= 5) sub += left < 90 ? ` · about ${Math.round(left / 5) * 5} s left` : ` · about ${Math.round(left / 60)} min left`;
+    }
+  } else if (run.mode === 'Scan') {
+    head = all.length ? plural(all.length, 'song could have better lyrics', 'songs could have better lyrics') : 'Every song has word-by-word lyrics';
+    const n = value => value.toLocaleString();
+    sub = [countHas('none') ? `${n(countHas('none'))} with none` : '', countHas('plain') ? `${n(countHas('plain'))} not timed` : '',
+      countHas('line') ? `${n(countHas('line'))} timed by line` : '', run.wordAlready ? `${n(run.wordAlready)} already word by word` : '']
+      .filter(Boolean).join(' · ');
+  } else if (run.mode === 'Preview') {
+    const found = all.filter(row => row.result === 'found');
+    head = found.length ? `Better lyrics found for ${plural(found.length, 'song')}` : 'No better lyrics found';
+    const unsure = found.filter(row => row.doubt).length;
+    sub = [run.notFound ? `${run.notFound} with nothing better` : '', unsure ? `${unsure} not certain, left unpicked` : '',
+      run.busy ? `${run.busy} not answered` : ''].filter(Boolean).join(' · ');
+  } else if (run.mode === 'Save') {
+    head = run.written ? `Lyrics saved for ${plural(run.written, 'song')}` : 'Nothing saved';
+    sub = [run.alreadyHad ? `${run.alreadyHad} already as good` : '', run.skipped ? `${run.skipped} with lyrics Octo will not replace` : '',
+      run.failed ? `${run.failed} failed` : ''].filter(Boolean).join(' · ');
+  } else if (run.mode === 'Undo') {
+    head = run.written ? `Old lyrics put back for ${plural(run.written, 'file')}` : 'Nothing put back';
+  } else {
+    head = 'Library walk';
+    sub = `${run.written} written · ${run.notFound} not found`;
+  }
+  if (!running && ['Cancelled', 'Interrupted', 'Failed'].includes(run.status)) head = `${head || 'Stopped'} (${run.status.toLowerCase()})`;
+  lyricsEl('lyrics-head').textContent = head;
+  lyricsEl('lyrics-sub').textContent = sub;
+
+  lyricsEl('lyrics-empty').hidden = run.status !== 'Idle';
+  const shown = lyricsShowAll ? rows : rows.slice(0, LYRICS_ROW_CAP);
+  lyricsEl('lyrics-list').innerHTML = shown.map(row => lyricsItem(run, row)).join('');
+  const more = lyricsEl('lyrics-more');
+  const lastError = run.errors?.length ? run.errors[run.errors.length - 1] : '';
+  more.hidden = !(rows.length > shown.length || lastError);
+  more.innerHTML = [
+    rows.length > shown.length ? `Showing ${shown.length} of ${rows.length}. <button type="button" class="link-btn" id="lyrics-show-all">Show all</button> Select all includes the rest.` : '',
+    lastError ? `<span class="field-error">${esc(lastError)}</span>` : '',
+  ].filter(Boolean).join(' ');
+  lyricsEl('lyrics-scan').disabled = running;
+  renderLyricsBar(run);
+}
+
+function lyricsWatch(on) {
+  if (on && !lyricsLibraryPoll) lyricsLibraryPoll = setInterval(() => loadLyricsLibrary(), 1500);
+  if (!on && lyricsLibraryPoll) {
+    clearInterval(lyricsLibraryPoll);
+    lyricsLibraryPoll = null;
+  }
+}
+
+// What the page shows when Octo could not say how the lyrics run stands.
+function renderLyricsTrouble(message, signIn) {
+  if (!lyricsEl('lyrics-list')) return;
+  lyricsEl('lyrics-head').textContent = signIn ? '' : lyricsExpectRunning ? 'Still working' : 'Could not load the lyrics scan';
+  lyricsEl('lyrics-sub').textContent = signIn ? '' : message;
+  if (signIn && !lyricsRun) {
+    lyricsEl('lyrics-empty').hidden = false;
+    lyricsEl('lyrics-empty').querySelector('.set-info-d').textContent =
+      'Sign in with your Navidrome admin account to scan. A scan only reads your songs: it looks nothing up and changes nothing.';
   }
 }
 
 async function loadLyricsLibrary(retry = false) {
-  const response = await lyricsFetch('/api/admin/lyrics/library', {}, retry);
-  if (!response.ok) return null;
-  const run = await response.json();
-  renderLyricsLibrary(run);
-  if (run.status === 'Running') {
-    if (!lyricsLibraryPoll) lyricsLibraryPoll = setInterval(() => loadLyricsLibrary(), 2000);
-  } else if (lyricsLibraryPoll) {
-    clearInterval(lyricsLibraryPoll);
-    lyricsLibraryPoll = null;
+  let response;
+  try {
+    response = await lyricsFetch('/api/admin/lyrics/library', {}, retry);
+  } catch (error) {
+    response = null;
   }
+  if (!response?.ok) {
+    const signIn = response?.status === 401;
+    lyricsLoadError = signIn ? '' : response ? await lyricsError(response) : 'Octo did not answer.';
+    renderLyricsTrouble(lyricsExpectRunning
+      ? `Octo did not say how far it got (${lyricsLoadError}). Checking again.`
+      : lyricsLoadError, signIn);
+    // A step started from here goes on on the server; keep asking until it can be shown.
+    lyricsWatch(lyricsExpectRunning && !signIn);
+    return null;
+  }
+  lyricsLoadError = '';
+  const run = await response.json();
+  // Accepted but not started yet: shown as starting, so the page keeps watching.
+  if (run.running && run.status !== 'Running') Object.assign(run, { status: 'Running', starting: true });
+  if (run.status !== 'Running') lyricsExpectRunning = false;
+  const previous = lyricsRun;
+  lyricsRun = run;
+  if (!lyricsControlsSet && run.status !== 'Idle' && run.scope) {
+    lyricsEl('lyrics-scope').value = run.scope;
+    document.querySelectorAll('.seg[data-seg-for="lyrics-scope"]').forEach(seg => syncSegment(seg, false));
+  }
+  lyricsControlsSet = true;
+  renderLyricsLibrary(run);
+  if (previous?.status === 'Running' && run.status === 'Failed') lyricsNote(run.reason || 'The run stopped.', 'error');
+
+  lyricsWatch(run.status === 'Running');
   return run;
 }
 
-async function lyricsLibraryAction(url, body) {
-  const response = await lyricsFetch(url, {
+async function startLyrics(mode, picked = null) {
+  const scope = picked ? lyricsRun?.scope : lyricsEl('lyrics-scope').value;
+  const response = await lyricsFetch('/api/admin/lyrics/library', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+    body: JSON.stringify({ mode, scope, picked }),
   });
-  if (!response.ok) note(document.getElementById('lyrics-library-cancel'), await lyricsError(response), 'error');
+  if (!response.ok) {
+    lyricsNote(await lyricsError(response), 'error');
+    return;
+  }
+  // Said at once, before Octo's first answer: the step has been handed over.
+  lyricsNote('');
+  lyricsExpectRunning = true;
+  const base = lyricsRun || { rows: [], errors: [] };
+  renderLyricsLibrary({ ...base, runId: base.runId, mode, status: 'Running', starting: true, total: 0, processed: 0,
+    rows: mode === 'Scan' ? [] : base.rows });
+  lyricsWatch(true);
   await loadLyricsLibrary();
 }
 
-document.getElementById('lyrics-library-start')?.addEventListener('click', () =>
-  lyricsLibraryAction('/api/admin/lyrics/library', { upgrade: !!document.getElementById('lyrics-library-upgrade')?.checked }));
-document.getElementById('lyrics-library-resume')?.addEventListener('click', () => lyricsLibraryAction('/api/admin/lyrics/library/resume'));
-document.getElementById('lyrics-library-cancel')?.addEventListener('click', () => lyricsLibraryAction('/api/admin/lyrics/library/cancel'));
-document.getElementById('lyrics-review-list')?.addEventListener('click', event => {
-  const choose = event.target.closest('[data-review-choose]');
-  if (choose) openLyricsPicker({ path: choose.dataset.reviewChoose });
-  const dismiss = event.target.closest('[data-review-dismiss]');
-  if (dismiss) lyricsLibraryAction('/api/admin/lyrics/review/dismiss', { path: dismiss.dataset.reviewDismiss });
+function lyricsPickedIds() {
+  return lyricsRows(lyricsRun).filter(row => lyricsPickable(lyricsRun, row) && lyricsPickedRows.has(row.id)).map(row => row.id);
+}
+
+lyricsEl('lyrics-scan')?.addEventListener('click', () => startLyrics('Scan'));
+lyricsEl('lyrics-scan-first')?.addEventListener('click', () => startLyrics('Scan'));
+lyricsEl('lyrics-show')?.addEventListener('change', () => { if (lyricsRun) renderLyricsLibrary(lyricsRun); });
+lyricsEl('lyrics-list')?.addEventListener('click', event => {
+  const choose = event.target.closest('[data-lyrics-choose]');
+  if (choose) {
+    openLyricsPicker({ path: choose.dataset.lyricsChoose });
+    document.getElementById('lyrics-picker')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  const item = event.target.closest('.lyrics-pick[role="checkbox"]');
+  if (!item || !lyricsRun) return;
+  const id = item.dataset.lyricsRow;
+  if (lyricsPickedRows.has(id)) lyricsPickedRows.delete(id); else lyricsPickedRows.add(id);
+  item.setAttribute('aria-checked', String(lyricsPickedRows.has(id)));
+  renderLyricsBar(lyricsRun);
+});
+lyricsEl('lyrics-more')?.addEventListener('click', event => {
+  if (event.target.id !== 'lyrics-show-all' || !lyricsRun) return;
+  lyricsShowAll = true;
+  renderLyricsLibrary(lyricsRun);
+});
+lyricsEl('lyrics-all')?.addEventListener('click', () => {
+  lyricsPickedRows = new Set(lyricsRows(lyricsRun).filter(row => lyricsPickable(lyricsRun, row)).map(row => row.id));
+  renderLyricsLibrary(lyricsRun);
+});
+lyricsEl('lyrics-none')?.addEventListener('click', () => {
+  lyricsPickedRows = new Set();
+  renderLyricsLibrary(lyricsRun);
+});
+lyricsEl('lyrics-go')?.addEventListener('click', async () => {
+  const run = lyricsRun;
+  const ids = lyricsPickedIds();
+  if (!run || !ids.length) { lyricsNote('Pick at least one song first.', 'info'); return; }
+  if (run.mode === 'Scan') { await startLyrics('Preview', ids); return; }
+  if (run.mode === 'Preview') {
+    if (!(await askConfirm(`Save lyrics for ${ids.length} song${ids.length === 1 ? '' : 's'}?`,
+      'Octo replaces only lyrics it wrote, and keeps what it replaces, so Undo puts it back.', 'Save lyrics'))) return;
+    await startLyrics('Save', ids);
+  }
+});
+lyricsEl('lyrics-stop')?.addEventListener('click', async () => {
+  const response = await lyricsFetch('/api/admin/lyrics/library/cancel', { method: 'POST' });
+  if (!response.ok) { lyricsNote('Could not stop.', 'error'); return; }
+  lyricsNote('Stopping after the current song.', 'info');
+  await loadLyricsLibrary();
+});
+lyricsEl('lyrics-resume')?.addEventListener('click', async () => {
+  const response = await lyricsFetch('/api/admin/lyrics/library/resume', { method: 'POST' });
+  if (!response.ok) { lyricsNote(await lyricsError(response), 'error'); return; }
+  await loadLyricsLibrary();
+});
+lyricsEl('lyrics-undo')?.addEventListener('click', async () => {
+  if (!(await askConfirm('Put back the old lyrics?', 'Every lyrics file and tag Save wrote goes back to what it was. Anything changed since is left alone.', 'Put back lyrics'))) return;
+  await startLyrics('Undo');
 });
 
 // ---- Fix a song's lyrics -------------------------------------------------
@@ -3344,7 +4164,612 @@ document.getElementById('lyrics-choices-list')?.addEventListener('click', async 
 });
 
 // ────────────────────────────────────────────────────────────────
+// Better quality: the library's lossy songs, found again in higher quality
+// ────────────────────────────────────────────────────────────────
+const lossy = { rows: [], picked: new Set(), shown: 200, timer: null, view: null, open: 0 };
+const LOSSY_PAGE = 200;
+const LOSSY_RECENT_MS = 28 * 24 * 3600 * 1000;
+const upgradeWords = {
+  queued: 'Queued', waiting: 'Waiting for Soulseek', working: 'Looking', upgraded: 'Upgraded',
+  notFound: 'No higher quality found', rehearsed: 'Rehearsed', skipped: 'Skipped', failed: 'Failed',
+};
+const upgradeTone = { upgraded: 'good', waiting: 'warn', notFound: 'warn', skipped: 'warn', failed: 'failed' };
+const isOpenJob = job => ['queued', 'waiting', 'working'].includes(job?.state);
+
+// The page's reads and writes need the Navidrome admin sign-in, like the library actions history.
+async function lossyFetch(path, options = {}) {
+  let response = await api(path, { credentials: 'same-origin', ...options });
+  if (response.status === 401 && await browseAuthenticate(document.getElementById('lossy-list'))) {
+    response = await api(path, { credentials: 'same-origin', ...options });
+  }
+  return response;
+}
+
+async function loadLossy(refresh = false) {
+  const list = document.getElementById('lossy-list');
+  if (!list) return;
+  list.innerHTML = stateBlock('loading', 'Reading your library…');
+  try {
+    const response = await lossyFetch(`/api/admin/lossy${refresh ? '?refresh=true' : ''}`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || body.title || `HTTP ${response.status}`);
+    lossy.rows = body.songs || [];
+    lossy.shown = LOSSY_PAGE;
+    const formats = [...new Set(lossy.rows.map(row => (row.suffix || '').toLowerCase()).filter(Boolean))].sort();
+    const select = document.getElementById('lossy-format');
+    const current = select.value;
+    select.innerHTML = '<option value="">Every format</option>'
+      + formats.map(f => `<option value="${esc(f)}">${esc(f.toUpperCase())}</option>`).join('');
+    select.value = formats.includes(current) ? current : '';
+    await loadUpgrades();
+  } catch (error) {
+    list.innerHTML = stateBlock('error', error.message);
+  }
+}
+
+async function loadUpgrades() {
+  clearTimeout(lossy.timer);
+  const response = await lossyFetch('/api/admin/upgrades');
+  if (!response.ok) { renderLossy(); return; }
+  lossy.view = await response.json();
+  const jobs = new Map((lossy.view.jobs || []).map(job => [job.id, job]));
+  for (const row of lossy.rows) {
+    const job = jobs.get(row.id);
+    if (job) row.job = job;
+  }
+  const open = (lossy.view.jobs || []).filter(isOpenJob).length;
+  const finishedSome = lossy.open > 0 && open < lossy.open;
+  lossy.open = open;
+  renderLossy();
+  // A song that became lossless leaves the list, so the list is read again once work ends.
+  if (finishedSome && open === 0) { loadLossy(true); return; }
+  if (open > 0 && document.querySelector('section[data-pane="lossy"].active')) {
+    lossy.timer = setTimeout(loadUpgrades, 2000);
+  }
+}
+
+function lossyVisible() {
+  const q = document.getElementById('lossy-q').value.trim().toLowerCase();
+  const format = document.getElementById('lossy-format').value;
+  const youTubeOnly = document.getElementById('lossy-youtube').checked;
+  const hideTried = document.getElementById('lossy-hide-tried').checked;
+  const now = Date.now();
+  return lossy.rows.filter(row =>
+    (!q || `${row.title} ${row.artist} ${row.album ?? ''}`.toLowerCase().includes(q))
+    && (!format || (row.suffix || '').toLowerCase() === format)
+    && (!youTubeOnly || row.fromYouTube)
+    && (!hideTried || !row.lastTried || now - Date.parse(row.lastTried.atUtc) > LOSSY_RECENT_MS));
+}
+
+function lossyGateClosed() {
+  const gate = lossy.view?.gate;
+  if (!gate) return 'Sign in with your Navidrome admin account to use this page.';
+  if (lossy.view.sourceReady === false) {
+    return `Better quality looks for copies on ${lossy.view.source}, which is not set up on this server.`;
+  }
+  if (!gate.enabled || !gate.betterQuality || gate.dryRun || !gate.allowed) {
+    return `Better quality needs library actions on, the Better quality action on, you (${gate.user}) on the allowed list, and rehearsal mode off.`;
+  }
+  return null;
+}
+
+// What a running upgrade is doing, from its download's own row.
+const stageWords = {
+  Queued: 'Waiting for a download slot', Searching: 'Searching', Downloading: 'Downloading',
+  Verifying: 'Checking it is the same song and really lossless', Importing: 'Swapping it in',
+};
+const mb = bytes => typeof bytes === 'number' && bytes > 0 ? `${(bytes / 1048576).toFixed(1)} MB` : '';
+
+function lossyStage(job) {
+  const pct = typeof job.progress === 'number' ? Math.round(job.progress * 100) : null;
+  let words = stageWords[job.stage] ?? 'Starting';
+  // The download's own source, never a name the page assumes.
+  const source = job.source ?? lossy.view?.source;
+  if (source && job.stage === 'Searching') words += ` ${source}`;
+  if (source && job.stage === 'Downloading') words += ` from ${source}`;
+  if (job.stage === 'Downloading' && pct !== null) {
+    words += ` ${pct}%`;
+    if (job.bytesTotal) words += `, ${mb(job.bytesDone)} of ${mb(job.bytesTotal)}`;
+  }
+  const meter = pct !== null ? `<span class="lossy-meter"><span style="width:${pct}%"></span></span>` : '';
+  return `<span class="dl-badge state">Working</span><span class="lossy-detail">${esc(words)}${job.note ? ` · ${esc(job.note)}` : ''}</span>${meter}`;
+}
+
+function lossyStatus(row) {
+  if (row.job) {
+    if (row.job.state === 'working') return lossyStage(row.job);
+    const word = upgradeWords[row.job.state] ?? row.job.state;
+    const tone = upgradeTone[row.job.state] ?? 'state';
+    const line = row.job.state === 'queued' ? '' : (row.job.detail ?? '');
+    return `<span class="dl-badge ${tone}">${esc(word)}</span>${line ? `<span class="lossy-detail">${esc(line)}</span>` : ''}`;
+  }
+  if (row.lastTried) {
+    return `<span class="lossy-sub">Tried ${esc(new Date(row.lastTried.atUtc).toLocaleDateString())}: ${esc(row.lastTried.outcome)}</span>`;
+  }
+  return '';
+}
+
+function renderLossy() {
+  const list = document.getElementById('lossy-list');
+  const visible = lossyVisible();
+  const view = lossy.view;
+  const youTube = lossy.rows.filter(row => row.fromYouTube).length;
+  const parts = [`${lossy.rows.length} songs are not lossless${youTube ? `, ${youTube} of them from YouTube` : ''}.`];
+  const jobs = view?.jobs || [];
+  const count = state => jobs.filter(job => job.state === state).length;
+  const tally = [
+    [count('working'), 'running'], [count('queued'), 'waiting'], [count('waiting'), 'waiting for Soulseek'],
+    [count('upgraded'), 'upgraded'], [count('notFound'), 'with no copy found'], [count('failed'), 'failed'],
+  ].filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`);
+  if (tally.length) parts.push(`Queue: ${tally.join(', ')}.`);
+  if (view?.source) parts.push(`Copies come from ${view.source}.`);
+  if (view) parts.push(`${view.why}`);
+  // Soulseek's state matters only while Soulseek is one of the sources, and with Lidarr beside
+  // it an outage just means Lidarr is asked alone.
+  const plan = view?.plan || ['Soulseek'];
+  if (view?.soulseek?.warning && plan.includes('Soulseek'))
+    parts.push(plan.includes('Lidarr') ? `${view.soulseek.detail} Lidarr is asked alone until it is back.` : view.soulseek.detail);
+  document.getElementById('lossy-status').textContent = parts.join(' ');
+
+  const closed = lossyGateClosed();
+  const gate = document.getElementById('lossy-gate');
+  gate.hidden = !closed;
+  if (closed) {
+    gate.innerHTML = `${esc(closed)} <button type="button" class="link-btn" id="lossy-open-actions">Open Library actions</button>`;
+    document.getElementById('lossy-open-actions')?.addEventListener('click', () => openTab('libraryactions'));
+  }
+
+  if (!lossy.rows.length) {
+    list.innerHTML = stateBlock('empty', 'Every song in your library is lossless.');
+  } else if (!visible.length) {
+    list.innerHTML = stateBlock('empty', 'No song matches these filters.');
+  } else {
+    const shown = visible.slice(0, lossy.shown);
+    list.innerHTML = `
+      <div class="config-table">
+        <div class="config-row config-row-head lossy-row">
+          <span><input type="checkbox" class="pick" id="lossy-pick-all" aria-label="Select every song shown" /></span>
+          <span>Song</span><span>Album</span><span>Format</span><span>Status</span>
+        </div>
+        ${shown.map(row => `
+          <label class="config-row lossy-row${lossy.picked.has(row.id) ? ' picked' : ''}">
+            <span><input type="checkbox" class="pick" data-lossy-id="${esc(row.id)}" ${lossy.picked.has(row.id) ? 'checked' : ''}
+              ${isOpenJob(row.job) ? 'disabled' : ''} aria-label="Pick ${esc(row.title)}" /></span>
+            <span class="key">${esc(row.title)}<span class="lossy-sub">${esc(row.artist)}${row.fromYouTube ? ' · from YouTube' : ''}</span></span>
+            <span class="value">${esc(row.album ?? '')}</span>
+            <span><span class="dl-badge mp3">${esc((row.suffix || '?').toUpperCase())}</span></span>
+            <span>${lossyStatus(row)}</span>
+          </label>`).join('')}
+      </div>
+      ${visible.length > shown.length
+        ? `<button type="button" class="btn btn-ghost" id="lossy-more">Show ${Math.min(LOSSY_PAGE, visible.length - shown.length)} more of ${visible.length - shown.length}</button>`
+        : ''}`;
+    document.getElementById('lossy-more')?.addEventListener('click', () => { lossy.shown += LOSSY_PAGE; renderLossy(); });
+  }
+
+  // A song that started meanwhile is no longer something to pick.
+  for (const row of lossy.rows) if (isOpenJob(row.job)) lossy.picked.delete(row.id);
+  const n = lossy.picked.size;
+
+  // Select all means every song the filters show, drawn or not, that is not already running.
+  const pickable = visible.filter(row => !isOpenJob(row.job));
+  const pickedShown = pickable.filter(row => lossy.picked.has(row.id)).length;
+  const all = document.getElementById('lossy-pick-all');
+  if (all) {
+    all.checked = pickable.length > 0 && pickedShown === pickable.length;
+    all.indeterminate = pickedShown > 0 && pickedShown < pickable.length;
+    all.disabled = pickable.length === 0;
+  }
+  const selectAll = document.getElementById('lossy-all');
+  selectAll.textContent = pickable.length ? `Select all ${pickable.length}` : 'Select all';
+  selectAll.hidden = pickable.length === 0 || pickedShown === pickable.length;
+  document.getElementById('lossy-none').hidden = n === 0;
+  document.getElementById('lossy-count').textContent = n ? `${n} ${n === 1 ? 'song' : 'songs'} picked` : 'Nothing picked';
+  const go = document.getElementById('lossy-go');
+  go.textContent = n ? `Find higher quality for ${n} ${n === 1 ? 'song' : 'songs'}` : 'Find higher quality';
+  go.disabled = !n || !!closed;
+  document.getElementById('lossy-cancel').hidden = !(view?.jobs || []).some(job => ['queued', 'waiting'].includes(job.state));
+  renderLossyResults();
+  document.getElementById('lossy-clear').hidden = !(view?.jobs || []).some(job => job && !isOpenJob(job));
+}
+
+// Every finished job, newest first, with its proof. A song that became lossless leaves the list
+// above, so this is where its upgrade can still be read.
+function renderLossyResults() {
+  const holder = document.getElementById('lossy-results');
+  if (!holder) return;
+  const done = (lossy.view?.jobs || []).filter(job => !isOpenJob(job))
+    .sort((a, b) => Date.parse(b.updatedUtc) - Date.parse(a.updatedUtc));
+  if (!done.length) { holder.innerHTML = ''; return; }
+  const took = s => typeof s === 'number' ? (s >= 90 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`) : '';
+  holder.className = 'lossy-results';
+  holder.innerHTML = `<h4>Results</h4>${done.slice(0, 50).map(job => {
+    const r = job.result;
+    const facts = [];
+    if (r?.before || r?.after) facts.push(['Changed', `${esc(r.before ?? '?')}${r.beforeBytes ? `, ${mb(r.beforeBytes)}` : ''} → ${esc(r.after ?? '?')}${r.afterBytes ? `, ${mb(r.afterBytes)}` : ''}`]);
+    if (r?.newFile) facts.push(['New file', esc(r.newFile)]);
+    if (r?.checks?.length) facts.push(['Passed', esc(r.checks.join(', '))]);
+    if (r?.keptAt) facts.push(['Original kept in', esc(r.keptAt)]);
+    if (r?.seconds != null) facts.push(['Took', took(r.seconds)]);
+    if (!r && job.detail) facts.push(['Why', esc(job.detail)]);
+    return `<div class="lossy-result">
+      <div class="lossy-result-head"><strong>${esc(job.title ?? job.id)} <span class="lossy-sub" style="display:inline">${esc(job.artist ?? '')}</span></strong>
+        <span class="dl-badge ${upgradeTone[job.state] ?? 'state'}">${esc(upgradeWords[job.state] ?? job.state)}</span></div>
+      ${facts.length ? `<dl>${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>` : ''}
+    </div>`;
+  }).join('')}`;
+}
+
+document.getElementById('lossy-list')?.addEventListener('change', event => {
+  if (event.target.id === 'lossy-pick-all') {
+    const pickable = lossyVisible().filter(row => !isOpenJob(row.job));
+    for (const row of pickable) {
+      if (event.target.checked) lossy.picked.add(row.id); else lossy.picked.delete(row.id);
+    }
+    renderLossy();
+    return;
+  }
+  const box = event.target.closest('[data-lossy-id]');
+  if (!box) return;
+  if (box.checked) lossy.picked.add(box.dataset.lossyId); else lossy.picked.delete(box.dataset.lossyId);
+  renderLossy();
+});
+for (const id of ['lossy-q', 'lossy-format', 'lossy-youtube', 'lossy-hide-tried']) {
+  document.getElementById(id)?.addEventListener(id === 'lossy-q' ? 'input' : 'change', () => { lossy.shown = LOSSY_PAGE; renderLossy(); });
+}
+document.getElementById('lossy-refresh')?.addEventListener('click', () => loadLossy(true));
+// Every song the filters show, drawn or not.
+document.getElementById('lossy-all')?.addEventListener('click', () => {
+  for (const row of lossyVisible()) if (!isOpenJob(row.job)) lossy.picked.add(row.id);
+  renderLossy();
+});
+document.getElementById('lossy-none')?.addEventListener('click', () => { lossy.picked.clear(); renderLossy(); });
+
+document.getElementById('lossy-go')?.addEventListener('click', async () => {
+  const songs = lossy.rows.filter(row => lossy.picked.has(row.id));
+  if (!songs.length) return;
+  const n = songs.length;
+  if (!(await askConfirm(`Find higher quality for ${n} ${n === 1 ? 'song' : 'songs'}?`, `Octo looks for a lossless copy of each on ${lossy.view?.source ?? 'the upgrade source'}. Each original is kept in quarantine until its replacement passes the checks.`, 'Find higher quality'))) return;
+  const response = await lossyFetch('/api/admin/upgrades', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      songs: songs.map(row => ({
+        navidromeId: row.id, title: row.title, artist: row.artist, album: row.album, suffix: row.suffix, attemptKey: row.attemptKey,
+      })),
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { toast(body.error || `HTTP ${response.status}`, 'error'); return; }
+  toast(`Looking for higher quality for ${body.queued} ${body.queued === 1 ? 'song' : 'songs'}.${body.refused ? ` ${body.refused}` : ''}`);
+  lossy.picked.clear();
+  await loadUpgrades();
+});
+
+document.getElementById('lossy-cancel')?.addEventListener('click', async () => {
+  const ids = (lossy.view?.jobs || []).filter(job => ['queued', 'waiting'].includes(job.state)).map(job => job.id);
+  if (!ids.length) return;
+  const response = await lossyFetch('/api/admin/upgrades/cancel', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { toast(body.error || `HTTP ${response.status}`, 'error'); return; }
+  toast(`Took back ${body.cancelled} ${body.cancelled === 1 ? 'song' : 'songs'}.`);
+  for (const row of lossy.rows) if (ids.includes(row.id)) row.job = null;
+  await loadUpgrades();
+});
+
+document.getElementById('lossy-clear')?.addEventListener('click', async () => {
+  const response = await lossyFetch('/api/admin/upgrades/clear', { method: 'POST' });
+  if (!response.ok) { toast(`HTTP ${response.status}`, 'error'); return; }
+  for (const row of lossy.rows) if (row.job && !isOpenJob(row.job)) row.job = null;
+  await loadUpgrades();
+});
+
+// ────────────────────────────────────────────────────────────────
+// Updates: whether a newer release is out, and Update now through the host helper
+// ────────────────────────────────────────────────────────────────
+// Octo asks GitHub for its releases; the host helper (scripts/updater) does the update when
+// asked through a file in the config folder. Without the helper this card shows the command.
+let updateInfo = null;
+let updateRequestId = null;
+let updatePollTimer = null;
+let updateOutageSince = null;
+const UPDATE_RUNNING = ['accepted', 'fetching', 'building', 'restarting'];
+const UPDATE_STEPS = [
+  ['accepted', 'Handed to the update helper'],
+  ['fetching', 'Fetching the release'],
+  ['building', 'Building the new Octo'],
+  ['restarting', 'Restarting Octo'],
+];
+const UPDATE_LATER_KEY = 'octo.update.later';
+
+function updateLater() {
+  try { return localStorage.getItem(UPDATE_LATER_KEY); } catch { return null; }
+}
+
+// Release notes are Markdown from GitHub. Everything is escaped first; then only headings,
+// lists, bold, inline code, rules and links to github.com come back as markup.
+function renderNotes(markdown) {
+  const text = String(markdown ?? '').replace(/<!--[\s\S]*?-->/g, '').replace(/\r/g, '');
+  const inline = s => escapeHtml(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\((https:\/\/github\.com\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    // A link anywhere else keeps its words and loses the address.
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+  const out = [];
+  let para = [];
+  let list = null;
+  const flushPara = () => { if (para.length) out.push(`<p>${inline(para.join(' '))}</p>`); para = []; };
+  const flushList = () => {
+    if (list) out.push(`<${list.tag}>${list.items.map(item => `<li>${inline(item)}</li>`).join('')}</${list.tag}>`);
+    list = null;
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+    if ((m = line.match(/^#{1,6}\s+(.*)$/))) { flushPara(); flushList(); out.push(`<h4>${inline(m[1])}</h4>`); continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushPara(); flushList(); out.push('<hr>'); continue; }
+    const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (bullet || numbered) {
+      flushPara();
+      const tag = bullet ? 'ul' : 'ol';
+      if (list && list.tag !== tag && !/^\s/.test(line)) flushList();
+      if (!list) list = { tag, items: [] };
+      list.items.push((bullet || numbered)[1]);
+      continue;
+    }
+    // An indented line under a list item continues it.
+    if (list && /^\s/.test(line)) { list.items[list.items.length - 1] += ` ${line.trim()}`; continue; }
+    flushList();
+    para.push(line.trim());
+  }
+  flushPara();
+  flushList();
+  return out.join('');
+}
+
+function showReleaseNotes() {
+  const info = updateInfo;
+  const releases = info?.newer?.length ? info.newer : (info?.latest ? [info.latest] : []);
+  if (!releases.length) return;
+  const modal = document.getElementById('notes-modal');
+  document.getElementById('notes-title').textContent = releases.length > 1
+    ? `What's new in the last ${releases.length} releases` : `What's new in ${releases[0].tag}`;
+  document.getElementById('notes-body').innerHTML = releases.map(release => {
+    const when = release.publishedUtc ? new Date(release.publishedUtc).toLocaleDateString() : '';
+    const notes = renderNotes(release.notes) || '<p>This release has no notes.</p>';
+    return `<section class="notes-release"><h3>${escapeHtml(release.name || release.tag)}${when ? ` <span class="notes-date">${escapeHtml(when)}</span>` : ''}</h3>${notes}</section>`;
+  }).join('');
+  const link = document.getElementById('notes-link');
+  const url = releases[0].url || '';
+  link.hidden = !url.startsWith('https://github.com/');
+  if (!link.hidden) link.href = url;
+  const opener = document.activeElement;
+  const app = document.querySelector('.app');
+  if (app) app.inert = true;
+  modal.hidden = false;
+  const closeBtn = document.getElementById('notes-close');
+  closeBtn.focus();
+  const close = () => {
+    modal.hidden = true;
+    if (app) app.inert = false;
+    closeBtn.removeEventListener('click', close);
+    modal.removeEventListener('keydown', onKey);
+    modal.removeEventListener('mousedown', onBackdrop);
+    if (opener && typeof opener.focus === 'function') opener.focus();
+  };
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'Tab') {
+      const stops = Array.from(modal.querySelectorAll('a[href], button')).filter(el => !el.hidden && el.offsetParent !== null);
+      const head = stops[0];
+      const tail = stops[stops.length - 1];
+      if (e.shiftKey && document.activeElement === head) { e.preventDefault(); tail.focus(); }
+      else if (!e.shiftKey && document.activeElement === tail) { e.preventDefault(); head.focus(); }
+    }
+  };
+  const onBackdrop = e => { if (e.target === modal) close(); };
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('keydown', onKey);
+  modal.addEventListener('mousedown', onBackdrop);
+}
+
+function updateRunActive(info = updateInfo) {
+  return !!info && (info.pending || (!!info.run && UPDATE_RUNNING.includes(info.run.state)));
+}
+
+function renderUpdate() {
+  const info = updateInfo;
+  if (!info) return;
+  const byId = id => document.getElementById(id);
+  const latest = info.latest;
+  const helper = info.helper?.installed;
+  const active = updateRunActive();
+  const run = info.run;
+  const ours = !!run && !!updateRequestId && run.id === updateRequestId;
+
+  let line;
+  if (!info.enabled) line = 'Looking for new releases is off.';
+  else if (active) line = `Updating to ${run?.tag || latest?.tag || 'the newest release'}…`;
+  else if (info.updateAvailable) {
+    const behind = info.newer.length > 1 ? ` That is ${info.newer.length} releases ahead.` : '';
+    line = `Octo ${latest.tag} is out. You run ${info.running}.${behind}`;
+  } else if (latest) {
+    const checked = info.checkedUtc ? `, checked ${relTime(info.checkedUtc)}` : '';
+    line = info.standing === 'ahead'
+      ? `Up to date: this build is newer than the newest release, ${latest.tag}${checked}.`
+      : info.standing === 'current' ? `Up to date${checked}.`
+        : `The newest release is ${latest.tag}${checked}. This build names no release, so Octo cannot compare.`;
+  } else line = info.error ? '' : 'Not checked yet.';
+  if (info.enabled && info.error) line = `${line} ${info.error}`.trim();
+  byId('update-line').textContent = line;
+
+  byId('update-now').hidden = !(info.updateAvailable && helper && !active);
+  byId('update-notes').hidden = !latest;
+  byId('update-check').hidden = !info.enabled;
+  byId('update-check').disabled = active;
+
+  // The steps, while a run is under way or just after one this page started.
+  const steps = byId('update-steps');
+  const log = byId('update-log');
+  const showSteps = active || ours;
+  steps.hidden = !showSteps;
+  log.hidden = true;
+  if (showSteps) {
+    const state = updateOutageSince ? 'restarting' : (info.pending ? 'accepted' : run?.state);
+    const at = UPDATE_STEPS.findIndex(([key]) => key === state);
+    if (state === 'failed') {
+      steps.innerHTML = `<li class="is-failed">${escapeHtml(run.error || 'The update failed.')}</li>`;
+      if (run.log?.length) { log.textContent = run.log.join('\n'); log.hidden = false; }
+    } else if (state === 'done') {
+      steps.innerHTML = `<li class="is-done">${escapeHtml(run.step || `Octo now runs ${run.tag}`)}</li>`;
+    } else {
+      steps.innerHTML = UPDATE_STEPS.map(([key, label], i) => {
+        const cls = at < 0 ? '' : i < at ? 'is-done' : i === at ? 'is-current' : '';
+        const words = i === at && run?.step && !info.pending && !updateOutageSince ? run.step : label;
+        return `<li class="${cls}">${escapeHtml(words)}</li>`;
+      }).join('');
+    }
+  } else if (run && run.state === 'failed') {
+    // A failed run is worth seeing, even on a page that did not start it.
+    steps.hidden = false;
+    steps.innerHTML = `<li class="is-failed">The last update, to ${escapeHtml(run.tag || 'a release')}, failed: ${escapeHtml(run.error || 'no reason given')}</li>`;
+    if (run.log?.length) { log.textContent = run.log.join('\n'); log.hidden = false; }
+  }
+
+  // The command, when there is no helper or it did not answer.
+  const manual = byId('update-manual');
+  const unanswered = !!info.unanswered && info.unanswered === updateRequestId;
+  manual.hidden = !(info.updateAvailable && !active && (!helper || unanswered));
+  if (!manual.hidden) {
+    const where = info.helper?.dir ? `in ${info.helper.dir}` : 'in your Octo folder';
+    byId('update-manual-where').textContent = unanswered
+      ? `The update helper on this server's host did not answer, so nothing changed. To update by hand, run this ${where}:`
+      : `To update, run this ${where}:`;
+    const image = info.helper?.mode === 'image';
+    byId('update-command').textContent = image ? info.imageCommand : info.command;
+    byId('update-image-line').hidden = image;
+    byId('update-image-command').textContent = info.imageCommand;
+    byId('update-helper-hint').hidden = !!helper;
+  }
+
+  // The banner on every page, and the dot on About.
+  const banner = byId('update-banner');
+  banner.hidden = !(info.updateAvailable && !active && updateLater() !== latest?.tag);
+  if (!banner.hidden) byId('update-banner-text').textContent = `Octo ${latest.tag} is out. You run ${info.running}.`;
+  const about = document.querySelector('.sidebar-nav-item[data-tab="about"]');
+  let flag = about?.querySelector('.nav-flag');
+  if (about && info.updateAvailable && !flag) {
+    flag = document.createElement('span');
+    flag.className = 'nav-flag nav-flag-update';
+    flag.innerHTML = '<span class="visually-hidden"> (update available)</span>';
+    about.appendChild(flag);
+  } else if (flag && !info.updateAvailable) flag.remove();
+
+  if (active && !updatePollTimer) pollUpdate();
+}
+
+async function loadUpdate({ check = false } = {}) {
+  try {
+    const response = check
+      ? await api('/api/admin/update/check', { method: 'POST' })
+      : await api('/api/admin/update', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    updateInfo = await response.json();
+  } catch {
+    if (!updateInfo) document.getElementById('update-line').textContent = "Couldn't ask Octo about new releases.";
+    return;
+  }
+  renderUpdate();
+}
+
+// Every 2 seconds while a run is under way. Octo is down while it restarts, so failed polls
+// read as "Restarting" for up to 15 minutes before the page gives up.
+function pollUpdate() {
+  clearTimeout(updatePollTimer);
+  updatePollTimer = setTimeout(async () => {
+    const before = updateInfo?.running;
+    try {
+      const response = await api('/api/admin/update', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      updateInfo = await response.json();
+      updateOutageSince = null;
+    } catch {
+      updateOutageSince ??= Date.now();
+      if (Date.now() - updateOutageSince > 15 * 60_000) {
+        updatePollTimer = null;
+        updateOutageSince = null;
+        document.getElementById('update-line').textContent = 'Octo has not come back after the update. "docker compose logs octo" on the host says why.';
+        return;
+      }
+      renderUpdate();
+      pollUpdate();
+      return;
+    }
+    updatePollTimer = null;
+    renderUpdate();
+    if (updateRunActive()) { pollUpdate(); return; }
+    const run = updateInfo.run;
+    if (run?.state === 'done' && before && updateInfo.running !== before) {
+      toast(`Octo now runs ${updateInfo.running}.`, 'ok');
+      await loadSettings();
+    } else if (run?.state === 'failed' && run.id === updateRequestId) {
+      toast('The update failed. Octo still runs the old version.', 'error');
+    } else if (updateRequestId && updateInfo.unanswered === updateRequestId) {
+      toast('The update helper did not answer. The command to run is on the About page.', 'error');
+    }
+  }, 2000);
+}
+
+document.getElementById('update-check')?.addEventListener('click', async event => {
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  await loadUpdate({ check: true });
+  btn.disabled = updateRunActive();
+});
+
+document.getElementById('update-now')?.addEventListener('click', async () => {
+  const tag = updateInfo?.latest?.tag;
+  if (!tag) return;
+  const unsavedCards = document.querySelectorAll('form.unsaved').length;
+  const unsavedNote = unsavedCards
+    ? `\n\nYou have unsaved changes on ${unsavedCards} card${unsavedCards === 1 ? '' : 's'}; the restart discards them.`
+    : '';
+  if (!(await askConfirm(`Update to ${tag}?`,
+    `Octo fetches ${tag}, builds it, and restarts. Playback through Octo stops for a minute or two. If the build fails, nothing changes.${unsavedNote}`,
+    'Update now'))) return;
+  const response = await api('/api/admin/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { toast(body.error || `HTTP ${response.status}`, 'error'); await loadUpdate(); return; }
+  updateRequestId = body.id;
+  updateInfo = { ...updateInfo, pending: true, pendingId: body.id };
+  renderUpdate();
+});
+
+document.getElementById('update-notes')?.addEventListener('click', showReleaseNotes);
+document.getElementById('update-banner-notes')?.addEventListener('click', showReleaseNotes);
+document.getElementById('update-banner-later')?.addEventListener('click', () => {
+  try { localStorage.setItem(UPDATE_LATER_KEY, updateInfo?.latest?.tag ?? ''); } catch { /* the banner comes back next visit */ }
+  document.getElementById('update-banner').hidden = true;
+});
+document.getElementById('update-copy')?.addEventListener('click', async () => {
+  const text = document.getElementById('update-command').textContent;
+  try { await navigator.clipboard.writeText(text); toast('Command copied.', 'ok'); }
+  catch { await askDialog({ title: 'Copy the command', confirm: 'Done', cancel: null, input: { value: text, readOnly: true } }); }
+});
+
+// ────────────────────────────────────────────────────────────────
 // Boot
 // ────────────────────────────────────────────────────────────────
 if (location.hash) followHash();
 loadSettings();
+loadSignedIn();
+loadUpdate();

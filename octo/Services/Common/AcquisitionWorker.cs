@@ -6,11 +6,11 @@ namespace Octo.Services.Common;
 /// <summary>
 /// Drains <see cref="TrackAcquisitionQueue"/>.
 ///
-/// Exactly ONE worker, deliberately, and this is not a knob. Two would reinstate the race
-/// between the existence check and the in-progress marker in DownloadSongInternalAsync, and
-/// ResolveLocalPath matches on leaf filename with a 64KB size tolerance across the whole
-/// music directory, so two concurrent transfers can claim and move each other's files.
-/// Concurrency here is unsafe until that resolution is made deterministic.
+/// One dispatcher. Up to DownloadConcurrency.Current requests run at once, and that is 1 until
+/// slskd has proven it puts each download in its own folder: before job folders, ResolveLocalPath
+/// matched a finished file by leaf name with a 64KB size tolerance across the whole music
+/// directory, so two transfers could claim and move each other's files. The existence check and
+/// the in-progress marker stay together under DownloadLock, and so does placing the file.
 /// </summary>
 public sealed class AcquisitionWorker : BackgroundService
 {
@@ -20,10 +20,14 @@ public sealed class AcquisitionWorker : BackgroundService
     private readonly NotificationService _notifications;
     private readonly ILogger<AcquisitionWorker> _logger;
 
+    /// <summary>Optional: without it the worker runs one request at a time, as it always did.</summary>
+    private readonly DownloadConcurrency? _concurrency;
+
     public AcquisitionWorker(TrackAcquisitionQueue queue, IDownloadService downloads,
         ExternalIdRegistry idRegistry, NotificationService notifications,
-        ILogger<AcquisitionWorker> logger)
+        ILogger<AcquisitionWorker> logger, DownloadConcurrency? concurrency = null)
     {
+        _concurrency = concurrency;
         _queue = queue;
         _downloads = downloads;
         _idRegistry = idRegistry;
@@ -35,8 +39,17 @@ public sealed class AcquisitionWorker : BackgroundService
     {
         _logger.LogInformation("Acquisition worker started");
 
+        var running = new List<Task>();
         while (!stoppingToken.IsCancellationRequested)
         {
+            running.RemoveAll(task => task.IsCompleted);
+            // Read every time: the setting is live, and the width stays 1 until job folders are proven.
+            while (running.Count >= Math.Max(1, _concurrency?.Current ?? 1))
+            {
+                await Task.WhenAny(running);
+                running.RemoveAll(task => task.IsCompleted);
+            }
+
             AcquisitionRequest? request;
             try
             {
@@ -48,51 +61,65 @@ public sealed class AcquisitionWorker : BackgroundService
             }
             if (request is null) break;
 
-            // Per-item catch is mandatory: BackgroundServiceExceptionBehavior defaults to
-            // StopHost, so a single unhandled exception here would take Octo down.
-            try
-            {
-                // CancellationToken.None, not stoppingToken. The transfer must not be
-                // cancellable by anything other than the process ending: that is the
-                // difference between "the client left" and "the download is lost".
-                var path = await _downloads.ExecuteAcquisitionAsync(
-                    request.Provider, request.ExternalId,
-                    request.TriggerAlbumDownload, request.ForcePermanent,
-                    request.SourceOverride,
-                    CancellationToken.None,
-                    // Read here rather than at enqueue time: a second user can join this
-                    // request right up until it is dequeued, and they asked for the file
-                    // just as much as whoever queued it.
-                    request.RequestedBy);
-
-                request.Completion.TrySetResult(path);
-                _logger.LogInformation("Acquisition finished for {Provider}:{Id} -> {Path}",
-                    request.Provider, request.ExternalId, path);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Acquisition failed for {Provider}:{Id}",
-                    request.Provider, request.ExternalId);
-                // Stars only: a shed play-triggered acquisition is a hint, a failed
-                // star is the user's explicit ask going unmet. This is the one place
-                // a terminal failure surfaces exactly once per gesture (album-walk
-                // per-track failures are caught inside the walk and aggregate into
-                // its summary instead).
-                if (request.IsStar && request.NotifyOnFailure) NotifyFailed(request, ex);
-                // Release before completing the task: an ordered heart fallback may
-                // immediately enqueue the same track for its next source.
-                _queue.Release(request);
-                request.Completion.TrySetException(ex);
-            }
-            finally
-            {
-                // Every terminal outcome, or the next request for this track joins a job
-                // that has already finished and will never complete again.
-                _queue.Release(request);
-            }
+            // Off the loop, so the next request can start while this one transfers.
+            running.Add(Task.Run(() => RunOneAsync(request), CancellationToken.None));
         }
+        await Task.WhenAll(running);
 
         _logger.LogInformation("Acquisition worker stopped");
+    }
+
+    private async Task RunOneAsync(AcquisitionRequest request)
+    {
+        // Per-item catch is mandatory: BackgroundServiceExceptionBehavior defaults to
+        // StopHost, so a single unhandled exception here would take Octo down.
+        try
+        {
+            // CancellationToken.None, not stoppingToken. The transfer must not be
+            // cancellable by anything other than the process ending: that is the
+            // difference between "the client left" and "the download is lost".
+            var path = await _downloads.ExecuteAcquisitionAsync(
+                request.Provider, request.ExternalId,
+                request.TriggerAlbumDownload, request.ForcePermanent,
+                request.SourceOverride,
+                CancellationToken.None,
+                // Read here rather than at enqueue time: a second user can join this
+                // request right up until it is dequeued, and they asked for the file
+                // just as much as whoever queued it.
+                request.RequestedBy, upgradeSearch: request.UpgradeSearch, replacement: request.Replacement);
+
+            request.Completion.TrySetResult(path);
+            _logger.LogInformation("Acquisition finished for {Provider}:{Id} -> {Path}",
+                request.Provider, request.ExternalId, path);
+        }
+        catch (Exception ex)
+        {
+            // Radio asks for every track it plays, so a play's copy failing is routine. A star, or a
+            // play a heart joined, is someone's explicit ask.
+            if (ex is Octo.Services.Library.ReplacementRejectedException)
+                _logger.LogInformation("Replacement for {Provider}:{Id} refused: {Problem}", request.Provider, request.ExternalId, ex.Message);
+            else if (request.IsStar || request.HeartJoined)
+                _logger.LogError(ex, "Acquisition failed for {Provider}:{Id}", request.Provider, request.ExternalId);
+            else
+                _logger.LogWarning("Play acquisition failed for {Provider}:{Id}: {Message}",
+                    request.Provider, request.ExternalId, ex.Message);
+            // Stars only: a shed play-triggered acquisition is a hint, a failed
+            // star is the user's explicit ask going unmet. This is the one place
+            // a terminal failure surfaces exactly once per gesture (album-walk
+            // per-track failures are caught inside the walk and aggregate into
+            // its summary instead).
+            if (request.NotifiesOnFailure) NotifyFailed(request, ex);
+            // Release before completing the task: an ordered heart fallback may
+            // immediately enqueue the same track for its next source.
+            _queue.Release(request);
+            request.Completion.TrySetException(ex);
+        }
+        finally
+        {
+            // Every terminal outcome, or the next request for this track joins a job
+            // that has already finished and will never complete again.
+            _queue.Release(request);
+        }
     }
 
     /// <summary>

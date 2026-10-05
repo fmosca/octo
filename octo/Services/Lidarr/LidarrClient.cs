@@ -19,7 +19,13 @@ public sealed record LidarrAlbumCandidate(
 
 public sealed record LidarrImportedTrack(
     int Id, string Title, int? TrackNumber, int? DurationSeconds, bool HasFile,
-    string? Path, long SizeBytes, string? Artist);
+    string? Path, long SizeBytes, string? Artist, int TrackFileId = 0, string? Quality = null);
+
+/// <summary>An album Lidarr already has, as it stood before Octo touched it.</summary>
+public sealed record LidarrAlbumState(int Id, bool Monitored);
+
+/// <summary>A search Lidarr accepted, and whether Octo added or monitored the album to get it.</summary>
+public sealed record LidarrSearchStarted(int AlbumId, bool Existed, bool WasMonitored);
 
 public sealed record LidarrAlbumImportState(
     IReadOnlyList<LidarrImportedTrack> Tracks, int TrackCount, int TrackFileCount)
@@ -126,18 +132,55 @@ public sealed class LidarrClient
         return null;
     }
 
-    public async Task<int> EnsureAlbumAndSearchAsync(LidarrAlbumCandidate candidate, CancellationToken ct = default)
+    public async Task<int> EnsureAlbumAndSearchAsync(LidarrAlbumCandidate candidate, CancellationToken ct = default) =>
+        (await StartAlbumSearchAsync(candidate, ct)).AlbumId;
+
+    /// <summary>The album as Lidarr has it now, or null when Lidarr does not have it yet.</summary>
+    public async Task<LidarrAlbumState?> FindAlbumAsync(string foreignAlbumId, CancellationToken ct = default)
+    {
+        var existing = await GetArrayAsync($"/api/v1/album?foreignAlbumId={Uri.EscapeDataString(foreignAlbumId)}", ct);
+        return existing.Count == 0 ? null
+            : new LidarrAlbumState(Int(existing[0], "id"), existing[0]["monitored"]?.GetValue<bool>() ?? false);
+    }
+
+    /// <summary>Monitor or unmonitor albums, leaving everything else about them alone.</summary>
+    public async Task SetAlbumsMonitoredAsync(IReadOnlyCollection<int> albumIds, bool monitored, CancellationToken ct = default)
+    {
+        if (albumIds.Count == 0) return;
+        using var request = CreateRequest(HttpMethod.Put, "/api/v1/album/monitor");
+        request.Content = JsonContent.Create(new JsonObject
+        {
+            ["albumIds"] = new JsonArray(albumIds.Select(id => (JsonNode)id).ToArray()),
+            ["monitored"] = monitored,
+        });
+        using var _ = await SendAsync(request, ct);
+    }
+
+    /// <summary>Delete one track file, from Lidarr and from disk (into Lidarr's recycle bin when it has one).</summary>
+    public async Task DeleteTrackFileAsync(int trackFileId, CancellationToken ct = default)
+    {
+        using var request = CreateRequest(HttpMethod.Delete, $"/api/v1/trackfile/{trackFileId}");
+        using var _ = await SendAsync(request, ct);
+    }
+
+    /// <summary>
+    /// Adds the album when Lidarr lacks it, monitors it, and starts an AlbumSearch. Says whether the
+    /// album was there before and monitored, so a caller that only borrowed it can put it back.
+    /// </summary>
+    public async Task<LidarrSearchStarted> StartAlbumSearchAsync(LidarrAlbumCandidate candidate, CancellationToken ct = default)
     {
         var settings = RequireSettings(requireProfiles: true);
         var existing = await GetArrayAsync(
             $"/api/v1/album?foreignAlbumId={Uri.EscapeDataString(candidate.ForeignAlbumId)}", ct);
 
         int albumId;
+        var wasMonitored = false;
         if (existing.Count > 0)
         {
             var resource = existing[0];
             albumId = Int(resource, "id");
-            if (!(resource["monitored"]?.GetValue<bool>() ?? false))
+            wasMonitored = resource["monitored"]?.GetValue<bool>() ?? false;
+            if (!wasMonitored)
             {
                 resource["monitored"] = true;
                 await SendJsonAsync(HttpMethod.Put, $"/api/v1/album/{albumId}", resource, ct);
@@ -192,7 +235,7 @@ public sealed class LidarrClient
             ["name"] = "AlbumSearch",
             ["albumIds"] = new JsonArray(albumId),
         }, ct);
-        return albumId;
+        return new LidarrSearchStarted(albumId, existing.Count > 0, wasMonitored);
     }
 
     /// <summary>Lidarr neither upgrades nor re-searches albums of an unmonitored artist.</summary>
@@ -225,7 +268,9 @@ public sealed class LidarrClient
                 row["hasFile"]?.GetValue<bool>() ?? false,
                 file is null ? null : NullableStr(file, "path"),
                 file is null ? 0 : NullableLong(file, "size") ?? 0,
-                artist is null ? null : NullableStr(artist, "artistName"));
+                artist is null ? null : NullableStr(artist, "artistName"),
+                file is null ? 0 : trackFileId,
+                file?["quality"]?["quality"]?["name"]?.GetValue<string>());
         }).ToList();
     }
 

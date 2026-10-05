@@ -815,4 +815,85 @@ public class DeezerMetadataServiceTests
         logger.Verify(l => l.Log(LogLevel.Warning, It.IsAny<EventId>(), It.IsAny<It.IsAnyType>(),
             It.IsAny<Exception?>(), It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Never);
     }
+
+    // ---- Ranked candidates for the release chooser ----------------------------------------
+
+    private const string TwoHitSearch = @"{""data"":[
+        {""id"":11,""title"":""Teardrop"",""duration"":330,""isrc"":""GBAAA9800001"",""explicit_lyrics"":false,
+         ""album"":{""id"":1,""title"":""Mezzanine"",""cover_xl"":""https://cdn/mezz.jpg""},""artist"":{""name"":""Massive Attack""}},
+        {""id"":22,""title"":""Teardrop"",""duration"":330,""isrc"":""GBAAA9800001"",
+         ""album"":{""id"":2,""title"":""Collected"",""cover_xl"":""https://cdn/col.jpg""},""artist"":{""name"":""Massive Attack""}},
+        {""id"":33,""title"":""Teardrop (Live)"",""duration"":340,
+         ""album"":{""id"":3,""title"":""Live at Wembley""},""artist"":{""name"":""Massive Attack""}}
+    ]}";
+
+    [Fact]
+    public async Task EnrichTrackCandidatesAsync_DetailFetchesTheBestTwo_AndReadsTheNewFields()
+    {
+        var sent = new List<HttpRequestMessage>();
+        var svc = BuildService(new()
+        {
+            ["/album/1"] = @"{""id"":1,""record_type"":""album"",""upc"":""724384559922"",""label"":""Virgin"",""release_date"":""1998-04-20"",""nb_tracks"":11,""artist"":{""name"":""Massive Attack""}}",
+            ["/album/2"] = @"{""id"":2,""record_type"":""compile"",""upc"":""094636482323"",""release_date"":""2006-03-27"",""artist"":{""name"":""Massive Attack""}}",
+            ["/album/3"] = @"{""id"":3,""record_type"":""album""}",
+            ["/track/11"] = @"{""id"":11,""track_position"":3,""disk_number"":1,""gain"":-9.8,""explicit_lyrics"":false,""contributors"":[{""name"":""Massive Attack"",""role"":""Main""},{""name"":""Elizabeth Fraser"",""role"":""Featured""}]}",
+            ["/track/22"] = @"{""id"":22,""track_position"":7,""disk_number"":1}",
+            ["/search"] = TwoHitSearch,
+        }, capture: sent);
+
+        var answer = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop", max: 2);
+
+        Assert.False(answer.DidNotAnswer);
+        Assert.Equal(2, answer.Hits.Count);
+        var mezzanine = answer.Hits[0];
+        Assert.Equal("Teardrop", mezzanine.Title);
+        Assert.Equal("11", mezzanine.TrackId);
+        Assert.Equal("1", mezzanine.AlbumId);
+        Assert.Equal("724384559922", mezzanine.Barcode);
+        Assert.Equal(false, mezzanine.ExplicitLyrics);
+        Assert.Equal(-9.8, mezzanine.CatalogGain);
+        Assert.Equal("album", mezzanine.RecordType);
+        Assert.Equal(["Massive Attack", "Elizabeth Fraser"], mezzanine.Contributors);
+        Assert.Equal("compile", answer.Hits[1].RecordType);
+        // The live take contradicts the title, so it is never a hit, and the best two cost two album details.
+        Assert.Equal(2, sent.Count(r => r.RequestUri!.AbsolutePath.StartsWith("/album/")));
+        Assert.DoesNotContain(sent, r => r.RequestUri!.AbsolutePath == "/album/3");
+    }
+
+    [Fact]
+    public async Task EnrichTrackCandidatesAsync_OneHit_CostsOneAlbumDetail_AndIsRemembered()
+    {
+        var sent = new List<HttpRequestMessage>();
+        var one = @"{""data"":[{""id"":11,""title"":""Teardrop"",""duration"":330,""album"":{""id"":1,""title"":""Mezzanine""},""artist"":{""name"":""Massive Attack""}}]}";
+        var svc = BuildService(new() { ["/album/1"] = @"{""id"":1,""record_type"":""album""}", ["/track/11"] = @"{""id"":11}", ["/search"] = one }, capture: sent);
+
+        var first = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop", max: 2);
+        var second = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop", max: 2);
+
+        Assert.Single(first.Hits);
+        Assert.Same(first, second);
+        Assert.Equal(1, sent.Count(r => r.RequestUri!.AbsolutePath.StartsWith("/album/")));
+    }
+
+    /// <summary>A throttled catalog gives no candidate, says so, and leaves nothing in the cache
+    /// to repeat the throttle for the next twelve hours.</summary>
+    [Fact]
+    public async Task EnrichTrackCandidatesAsync_Throttled_AnswersNothingAndRemembersNothing()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/1", [@"{""id"":1,""record_type"":""album""}"]),
+            ("/track/11", [@"{""id"":11}"]),
+            ("/search", [QuotaEnvelope, @"{""data"":[{""id"":11,""title"":""Teardrop"",""duration"":330,""album"":{""id"":1,""title"":""Mezzanine""},""artist"":{""name"":""Massive Attack""}}]}"]),
+        }, out var calls);
+
+        var throttled = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop");
+        var later = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop");
+
+        Assert.True(throttled.DidNotAnswer);
+        Assert.Empty(throttled.Hits);
+        Assert.False(later.DidNotAnswer);
+        Assert.Single(later.Hits);
+        Assert.Equal(2, calls("/search"));
+    }
 }

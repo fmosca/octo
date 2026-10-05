@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -224,6 +226,8 @@ public class GenreBackfillEndpointTests
         // path, so both are gated the same way.
         { "GET", "/api/admin/library-actions" },
         { "GET", "/api/admin/library/resolve?id=abc" },
+        // The tag preview reads a file the caller names, so it is gated the same way.
+        { "POST", "/api/admin/tags/preview" },
     };
 
     [Theory]
@@ -300,6 +304,12 @@ internal sealed class AdminWebFactory : WebApplicationFactory<Program>
             // Synthetic, and only here to prove the admin API never hands it back.
             ["Subsonic:AdminPassword"] = "synthetic-admin-password",
         }));
+        // In memory, so a test that signs in never writes beside the real settings file.
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<Octo.Services.Admin.BrowseSessionStore>();
+            services.AddSingleton(new Octo.Services.Admin.BrowseSessionStore());
+        });
         return base.CreateHost(builder);
     }
 

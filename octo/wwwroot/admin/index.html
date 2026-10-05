@@ -94,9 +94,21 @@
             <svg class="icon" aria-hidden="true"><use href="#i-tag"/></svg>
             <span>Tags &amp; genres</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="covers">
+            <svg class="icon" aria-hidden="true"><use href="#i-image-square"/></svg>
+            <span>Cover art</span>
+          </button>
+          <button class="sidebar-nav-item" data-tab="lyrics">
+            <svg class="icon" aria-hidden="true"><use href="#i-microphone-stage"/></svg>
+            <span>Lyrics</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="libraryactions">
             <svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg>
             <span>Library actions</span>
+          </button>
+          <button class="sidebar-nav-item" data-tab="lossy">
+            <svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg>
+            <span>Better quality</span>
           </button>
         </div>
 
@@ -118,6 +130,10 @@
       </nav>
 
       <div class="sidebar-footer">
+        <p class="sidebar-signed-in" id="signed-in" hidden>
+          <span id="signed-in-user"></span>
+          <button type="button" class="link-btn" id="sign-out">Sign out</button>
+        </p>
         <button id="restart-btn" class="btn btn-ghost btn-block" title="Restart container so settings flagged 'restart required' take effect">
           <svg class="icon" aria-hidden="true"><use href="#i-arrow-clockwise"/></svg>
           <span>Restart</span>
@@ -137,6 +153,14 @@
         <span><strong>settings.json can't be read,</strong> so Octo won't save over it, and changes stored there may not be in effect. Fix it under <button type="button" class="link-button" data-open-tab="raw">Raw config</button>.</span>
       </div>
       <div class="notice notice-warn app-banner" id="restart-pending" role="status" hidden></div>
+      <div class="notice notice-update app-banner" id="update-banner" role="status" hidden>
+        <span id="update-banner-text"></span>
+        <span class="update-banner-actions">
+          <button type="button" class="btn btn-ghost" id="update-banner-notes">What's new</button>
+          <button type="button" class="btn btn-primary" data-open-tab="about">Update</button>
+          <button type="button" class="btn btn-ghost" id="update-banner-later">Later</button>
+        </span>
+      </div>
 
       <!-- ─── STATUS ──────────────────────────────────────────── -->
       <section data-pane="status" class="active">
@@ -410,6 +434,22 @@
               </div>
               <input class="set-input" id="f-lossless-wait-timeout" name="Subsonic.LosslessWaitTimeoutSeconds" type="number" min="0" />
             </div>
+            <div class="set-row" data-stream-source="YouTube">
+              <div class="set-info">
+                <div class="set-info-t">Keep what is played</div>
+                <div class="set-info-d">Downloads each song played from outside your library, radio included, from the first source in Heart download priority that Octo fetches itself.</div>
+                <div class="set-info-more">Hearts always go first. One played song waits its turn at most; a song played while another waits is skipped and tried again the next time it plays.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-download-on-play" name="Subsonic.DownloadOnPlay" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t"><svg class="icon brand" aria-hidden="true"><use href="#b-lidarr"/></svg>Send played albums to Lidarr</div>
+                <div class="set-info-d">Hands the album of each song played from outside your library to Lidarr, once per song.</div>
+                <div class="set-info-more">Every hand-off makes Lidarr search all its indexers, so radio pulls in an album per song.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-lidarr-album-on-play" name="Subsonic.LidarrAlbumOnPlay" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
             <div class="set-row">
               <div class="set-info">
                 <div class="set-info-t">Record who asked</div>
@@ -417,6 +457,22 @@
                 <div class="set-info-more">Useful on a shared library. Turned off, names stay out of both, and entries already written keep theirs. A download in progress still remembers who asked, in memory only, so the app can show that person its progress.</div>
               </div>
               <label class="switch"><input type="checkbox" id="f-record-requested-by" name="Subsonic.RecordRequestedBy" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Favorite downloads when they land</div>
+                <div class="set-info-d">Off by default: a heart on a song you do not have only downloads it, and you heart it again once it is in your library. On, Octo also favorites it in Navidrome when it lands, for the person who hearted it.</div>
+                <div class="set-info-more">A heart on a song you already have is always a favorite, whatever this says, and downloads nothing. Octo's own apps are left out, because their heart means Add. The person's sign-in is held in memory until the song arrives, and a restart drops it.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-star-downloads-for-requester" name="Subsonic.StarDownloadsForRequester" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Skip songs you already have</div>
+                <div class="set-info-d">A heart, an album or a play never downloads a second copy of a song in your library. On by default.</div>
+                <div class="set-info-more">An MP3 or other lossy copy is kept and queued for a higher quality one, when Soulseek or Lidarr can look for it and Better quality is on for you. This holds for hearts through Lidarr too: the album's songs you already have are taken back out of what Lidarr brought. The same song means the same artist and title in the same version, and a length within 8 seconds or the same album.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-skip-owned-songs" name="Subsonic.SkipOwnedSongs" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
           </form>
         </div>
@@ -511,6 +567,14 @@
                 <div class="set-info-d">Find playlists on streaming services in search, and download them.</div>
               </div>
               <label class="switch"><input type="checkbox" id="f-playlists" name="Subsonic.EnableExternalPlaylists" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Wait for exact song lengths</div>
+                <div class="set-info-d">Search waits a few seconds to show the YouTube length of its top songs.</div>
+                <div class="set-info-more">Turned off, results come back sooner with Deezer's length. Apps that look a song up again when it plays still get the exact one.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-wait-search-durations" name="Subsonic.WaitForSearchDurations" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
             <div class="set-row">
               <div class="set-info">
@@ -913,144 +977,88 @@
               </div>
               <label class="switch"><input type="checkbox" name="Metadata.AlbumFromTitle" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Cover Art Archive first</div>
-                <div class="set-info-d">When a fingerprint named the release, take its cover from the Cover Art Archive first.</div>
-                <div class="set-info-more">Before Deezer, iTunes and Last.fm: the right pressing, with no guessing by name.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.UseCoverArtArchive" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Replace video covers</div>
-                <div class="set-info-d">A cover that is not square is a video still, so Octo looks for a real one.</div>
-                <div class="set-info-more">When nothing better turns up, its centre square is used, which for a YouTube &ldquo;Topic&rdquo; upload is the real cover inside the letterbox.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.ReplaceVideoCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Write cover.jpg</div>
-                <div class="set-info-d">Also save the cover beside the file, where Navidrome looks first.</div>
-                <div class="set-info-more">Only in the Organized layout, and only in a folder the download created, so an album already there never changes cover.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.WriteCoverFile" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
           </form>
         </div>
 
         <div class="set-section">
           <div class="set-head">
-            <h3 class="set-title">Lyrics</h3>
-            <p class="set-desc">A lyrics file beside each download, and lyrics for any song as it plays, in every app.</p>
+            <h3 class="set-title">Release matching</h3>
+            <p class="set-desc">How Octo decides which release a download is, before it writes a tag.</p>
           </div>
-          <form data-section="lyrics" class="set-card">
+          <form data-section="matching" class="set-card">
             <div class="set-row">
               <div class="set-info">
-                <div class="set-info-t">Fetch lyrics</div>
-                <div class="set-info-d">Looked up in the background after each download, so a slow lyrics service never holds up the next one.</div>
-                <div class="set-info-more">Synced lyrics go in a <code>.lrc</code>, plain ones in a <code>.txt</code>; lyrics timed word by word are still a normal <code>.lrc</code> that any player shows line by line. Navidrome serves the file without a rescan. A song that already has lyrics is never touched, and a song with none still gets lyrics as it plays.</div>
+                <div class="set-info-t">File a song under its original album</div>
+                <div class="set-info-d">A song that arrived without an album goes under the first release of its recording, even when the file was ripped from a compilation or a later pressing.</div>
+                <div class="set-info-more">Off keeps the album the file&rsquo;s own tags name when it has one. Either way, a song whose request named an album keeps that album.</div>
               </div>
-              <label class="switch"><input type="checkbox" name="Metadata.FetchLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row stack source-priority-setting">
-              <div class="set-info">
-                <div class="set-info-t" id="lyrics-source-order-label">Sources <span class="set-opt">in order</span></div>
-                <div class="set-info-d">Asked from the top down. A source that is off is never contacted.</div>
-                <div class="set-info-more">Drag a source to reorder, or use the arrow keys on its handle.</div>
-              </div>
-              <div class="source-priority-list" id="lyrics-source-order" aria-labelledby="lyrics-source-order-label"></div>
-              <input type="hidden" id="f-lyrics-sources" name="Metadata.LyricsSources" />
-              <div class="set-info-d" id="lyrics-source-order-help" role="status" aria-live="polite" hidden></div>
+              <label class="switch"><input type="checkbox" name="Metadata.PreferOriginalAlbum" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
             <div class="set-row">
               <div class="set-info">
-                <div class="set-info-t">Prefer word-timed lyrics</div>
-                <div class="set-info-d">Lyrics timed word by word win over line-timed ones from a source higher up.</div>
-                <div class="set-info-more">Off, the first timed lyrics win, which asks fewer services per song.</div>
+                <div class="set-info-t">Show the original release year</div>
+                <div class="set-info-d">The year is the recording&rsquo;s first release, so a 2011 remaster of a 1991 album reads 1991.</div>
+                <div class="set-info-more">The pressing&rsquo;s own date stays in the download&rsquo;s tag report. Off writes the pressing&rsquo;s date, and M4A tracks of one album matched to different pressings can then show as two albums.</div>
               </div>
-              <label class="switch"><input type="checkbox" name="Metadata.PreferWordTimedLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+              <label class="switch"><input type="checkbox" name="Metadata.YearFromOriginalRelease" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Write lyrics files beside all library songs</div>
-                <div class="set-info-d">Lets &ldquo;Find lyrics for the library&rdquo; write beside your own rips and purchases too.</div>
-                <div class="set-info-more">Off, it only writes beside songs Octo downloaded. Existing lyrics files, and lyrics inside a song, are never replaced either way.</div>
-              </div>
-              <label class="switch"><input type="checkbox" name="Metadata.WriteLyricsBesideAllSongs" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-          </form>
-        </div>
-
-        <div class="set-section">
-          <div class="set-head">
-            <h3 class="set-title">Find lyrics for the library</h3>
-            <p class="set-desc">Looks up lyrics for songs that have none, one song at a time. Stop whenever you like and carry on later.</p>
-          </div>
-          <div class="set-card">
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Also look for word timing</div>
-                <div class="set-info-d">Octo's own line-timed files are looked up again, and replaced when word-timed lyrics turn up.</div>
-              </div>
-              <label class="switch"><input type="checkbox" id="lyrics-library-upgrade" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info"><div class="set-info-t" id="lyrics-library-scope">Songs Octo downloaded</div><div class="set-info-d" id="lyrics-library-scope-d">Turn on &ldquo;Write lyrics files beside all library songs&rdquo; above to include the rest.</div></div>
-              <div class="genre-preset-actions">
-                <button class="btn" type="button" id="lyrics-library-start">Find lyrics</button>
-                <button class="btn btn-ghost" type="button" id="lyrics-library-resume" hidden>Resume</button>
-                <button class="btn btn-ghost" type="button" id="lyrics-library-cancel" hidden>Stop</button>
-              </div>
-            </div>
-            <div id="lyrics-library-status" class="set-row stack"></div>
-            <div id="lyrics-review" class="set-row stack" hidden>
-              <div class="set-info">
-                <div class="set-info-t">Review</div>
-                <div class="set-info-d">Lyrics written where the match was not certain, most often because the length could not be checked.</div>
-                <div class="set-info-more">Choose other lyrics, or confirm the ones that are right.</div>
-              </div>
-              <div id="lyrics-review-list" class="config-table"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="set-section">
-          <div class="set-head">
-            <h3 class="set-title">Fix a song's lyrics</h3>
-            <p class="set-desc">Wrong lyrics, or none? Choose others, hide them, or go back to automatic. It applies in every app.</p>
-          </div>
-          <div class="set-card">
             <div class="set-row stack">
-              <div class="set-info"><div class="set-info-t">Song</div><div class="set-info-d">Search your library by title or artist.</div></div>
-              <div class="lyrics-search">
-                <input class="set-input" id="lyrics-song-search" type="search" placeholder="Title or artist" maxlength="120" />
-                <button class="btn btn-ghost" type="button" id="lyrics-song-search-go"><svg class="icon" aria-hidden="true"><use href="#i-magnifying-glass"/></svg><span>Search</span></button>
-              </div>
-              <div id="lyrics-song-results" class="config-table"></div>
-            </div>
-            <div id="lyrics-picker" class="set-row stack" hidden>
               <div class="set-info">
-                <div class="set-info-t" id="lyrics-picker-title"></div>
-                <div class="set-info-d" id="lyrics-picker-state"></div>
+                <div class="set-info-t">Preferred countries <span class="set-opt">optional</span></div>
+                <div class="set-info-d">Two-letter codes, in order, whose pressings win a tie, for example <code>US, XW, GB</code>. Empty means no preference.</div>
               </div>
-              <div class="lyrics-search">
-                <input class="set-input" id="lyrics-picker-artist" placeholder="Artist" maxlength="120" />
-                <input class="set-input" id="lyrics-picker-song" placeholder="Title" maxlength="120" />
-                <button class="btn btn-ghost" type="button" id="lyrics-picker-search">Search again</button>
-              </div>
-              <div id="lyrics-candidates" class="config-table"></div>
-              <div class="genre-preset-actions">
-                <button class="btn btn-ghost" type="button" id="lyrics-picker-hide">Show no lyrics</button>
-                <button class="btn btn-ghost" type="button" id="lyrics-picker-auto">Back to automatic</button>
-              </div>
+              <input class="set-input" id="f-preferred-countries" name="Metadata.PreferredCountries" placeholder="US, XW, GB" maxlength="64" />
             </div>
-            <div id="lyrics-choices" class="set-row stack" hidden>
-              <div class="set-info"><div class="set-info-t">Chosen lyrics</div><div class="set-info-d">Songs whose lyrics someone chose or hid, here or in the Octo app.</div></div>
-              <div id="lyrics-choices-list" class="config-table"></div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Ask MusicBrainz for release details</div>
+                <div class="set-info-d">One request per download, about a second, for the label, catalogue number, barcode, status and track ids of the release that won, and a search by name when the fingerprint named nothing.</div>
+                <div class="set-info-more">Needs no key. Off tags from the fingerprint and Deezer alone.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.ReleaseDetailsLookup" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
-          </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Measure loudness (ReplayGain)</div>
+                <div class="set-info-d">Each download is measured once and gets ReplayGain track tags, which the Octo apps and most players use to even out volume.</div>
+                <div class="set-info-more">Decodes the whole file beside the lookups, so it rarely adds time. An album fetched whole gets album gain too.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.ReplayGain" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Loudness time limit</div>
+                <div class="set-info-d">Seconds the measurement may take before the download goes on without it. A FLAC on local disk takes a few; a slow mount can take far longer.</div>
+              </div>
+              <input class="set-input" id="f-replaygain-timeout" name="Metadata.ReplayGainTimeoutSeconds" type="number" min="10" max="300" />
+            </div>
+            <details class="set-more">
+              <summary>Trying it out</summary>
+              <div class="set-row">
+                <div class="set-info">
+                  <div class="set-info-t">Rehearse the matching</div>
+                  <div class="set-info-d">Work out what every download would be tagged as and show it under Fetched songs, but write only what Octo wrote before.</div>
+                  <div class="set-info-more">ReplayGain, the ISRC and the fingerprint id are still written: none of them depends on the match.</div>
+                </div>
+                <label class="switch"><input type="checkbox" name="Metadata.TagRehearsal" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+              </div>
+              <div class="set-row stack">
+                <div class="set-info">
+                  <div class="set-info-t">Try it on a song</div>
+                  <div class="set-info-d">See how a song would be matched and tagged, without touching anything. A path inside the music folder is fingerprinted and measured; an artist and title alone are matched by name.</div>
+                </div>
+                <div class="tags-preview-fields">
+                  <input class="set-input" id="tags-preview-path" placeholder="/music/Artist/Album/01 - Song.flac" />
+                  <input class="set-input" id="tags-preview-artist" placeholder="Artist" />
+                  <input class="set-input" id="tags-preview-title" placeholder="Title" />
+                  <input class="set-input" id="tags-preview-album" placeholder="Album, if the request would name one" />
+                </div>
+                <div><button type="button" class="btn btn-ghost" id="tags-preview-run">Try it</button></div>
+                <div id="tags-preview-status" class="set-info-d" role="status" aria-live="polite" hidden></div>
+                <div id="tags-preview-out" hidden></div>
+              </div>
+            </details>
+          </form>
         </div>
 
         <div class="set-section">
@@ -1339,12 +1347,36 @@
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Search wait / per-peer timeout <span class="set-opt">seconds</span></div>
-                <div class="set-info-d">How long to wait for peers to answer, and how long each of up to 5 downloads may take.</div>
+                <div class="set-info-d">How long to wait for peers to answer, and how long a download may send nothing before the next of up to 5 peers is tried. A slow download that keeps going is waited for.</div>
               </div>
               <div class="set-grid2">
                 <input class="set-input" id="f-slskd-wait" name="Soulseek.SearchWaitSeconds" type="number" min="2" max="30" data-restart="true" data-restart-label="Soulseek search wait" aria-label="Search wait in seconds" />
-                <input class="set-input" id="f-slskd-timeout" name="Soulseek.DownloadTimeoutSeconds" type="number" min="30" data-restart="true" data-restart-label="Soulseek per-peer timeout" aria-label="Per-peer download timeout in seconds" />
+                <input class="set-input" id="f-slskd-timeout" name="Soulseek.DownloadTimeoutSeconds" type="number" min="30" data-restart="true" data-restart-label="Soulseek per-peer timeout" aria-label="Seconds a download may send nothing before the next peer" />
               </div>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Wait for Soulseek <span class="set-opt">hours</span></div>
+                <div class="set-info-d">When slskd is up but not logged in to Soulseek, hearts wait this long for it before using the next source. 0 means don't wait.</div>
+                <div class="set-info-more">Soulseek's own server goes down for maintenance now and then, for two to four hours. Without a wait, everything hearted in that time lands as a YouTube MP3. Waiting hearts are kept across a restart.</div>
+              </div>
+              <input class="set-input" id="f-slskd-outage-hold" name="Soulseek.OutageHoldHours" type="number" min="0" max="48" aria-label="Hours to wait for Soulseek" />
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Downloads at once</div>
+                <div class="set-info-d">How many songs may download side by side, 1 to 6. Each lands in its own folder, so they never mix up.</div>
+                <div class="set-info-more">Octo keeps to one at a time until slskd has put a download in its own folder, and goes back to one if slskd ever does not. Moving files into your library stays one at a time either way. 1 is how Octo always worked.</div>
+              </div>
+              <input class="set-input" id="f-slskd-parallel" name="Soulseek.ParallelDownloads" type="number" min="1" max="6" aria-label="Downloads at once" />
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Albums from one folder</div>
+                <div class="set-info-d">A hearted album is searched once, and one person's folder of it is taken in one go. On by default.</div>
+                <div class="set-info-more">Songs that folder lacks, or whose file fails a check, are searched one by one as before. Off searches every song on its own.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Soulseek.AlbumFolders" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
             <div class="set-row stack">
               <div class="set-info">
@@ -1368,7 +1400,7 @@
             <div class="set-row">
               <div class="set-info">
                 <div class="set-info-t"><svg class="icon brand" aria-hidden="true"><use href="#b-acoustid"/></svg>Verify downloads</div>
-                <div class="set-info-d">Fingerprints each download and asks AcoustID what it really is. Off by default.</div>
+                <div class="set-info-d">Fingerprints each Soulseek and YouTube download and asks AcoustID what it really is. Off by default.</div>
                 <div class="set-info-more"><p>Catches covers, karaoke versions, live takes and mislabelled compilation tracks, which all pass the length check. A peer that sends a different recording has that file remembered and never tried again.</p><p>A song AcoustID has never heard of is always kept. YouTube downloads are identified too but never rejected, since there is no second copy to try.</p></div>
               </div>
               <label class="switch"><input type="checkbox" name="Soulseek.VerifyDownloads" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
@@ -1443,6 +1475,334 @@
       </section>
 
       <!-- ─── LIBRARY ACTIONS ────────────────────────────────── -->
+      <section data-pane="covers">
+        <header class="page-header">
+          <div>
+            <h1>Cover art</h1>
+            <p>Where covers come from, how large they are, and a wall of the soft ones to replace.</p>
+          </div>
+        </header>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Soft covers</h3>
+            <p class="set-desc">Find albums with small or missing covers, and give them the largest cover out there.</p>
+          </div>
+          <div class="set-card cover-tool">
+            <div class="cover-toolbar">
+              <div class="cover-chips">
+                <select class="seg-src" id="cover-scope" aria-label="Which songs" hidden>
+                  <option value="OctoDownloads">Octo's downloads</option>
+                  <option value="WholeLibrary">Whole library</option>
+                </select>
+                <div class="seg" data-seg-for="cover-scope"><span class="seg-thumb"></span></div>
+                <span class="cover-chip-group">
+                  <span class="cover-chip-label" id="cover-threshold-label">Soft under</span>
+                  <select class="seg-src" id="cover-threshold" aria-label="Soft means smaller than" hidden>
+                    <option value="600">600 px</option>
+                    <option value="1000" selected>1000 px</option>
+                    <option value="1500">1500 px</option>
+                  </select>
+                  <div class="seg" data-seg-for="cover-threshold"><span class="seg-thumb"></span></div>
+                </span>
+              </div>
+              <div class="cover-toolbar-end">
+                <details class="cover-options">
+                  <summary class="btn btn-ghost btn-icon" aria-label="Options" title="Options"><svg class="icon" aria-hidden="true"><use href="#i-sliders-horizontal"/></svg></summary>
+                  <div class="cover-options-panel">
+                    <label class="cover-option">
+                      <span>
+                        <span class="set-info-t">Also cover.jpg and folder.jpg</span>
+                        <span class="set-info-d">Navidrome shows the picture beside an album before the one inside its songs. JPEG only, and only where the folder holds just that album.</span>
+                      </span>
+                      <span class="switch"><input type="checkbox" id="cover-folder" checked /><span class="sw-track"></span><span class="sw-thumb"></span></span>
+                    </label>
+                  </div>
+                </details>
+                <button class="btn btn-ghost" type="button" id="cover-scan"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Scan</span></button>
+              </div>
+            </div>
+
+            <div class="cover-summary">
+              <div class="cover-summary-text"><span class="cover-head" id="cover-head"></span><span class="cover-sub" id="cover-sub"></span></div>
+              <div class="cover-select" id="cover-select" hidden>
+                <button type="button" class="link-btn" id="cover-all">Select all</button>
+                <span aria-hidden="true">·</span>
+                <button type="button" class="link-btn" id="cover-none">Clear</button>
+              </div>
+            </div>
+            <div class="cover-progress" id="cover-progress" hidden><span id="cover-progress-fill"></span></div>
+
+            <div class="cover-empty" id="cover-empty">
+              <svg class="icon" aria-hidden="true"><use href="#i-image-square"/></svg>
+              <div class="set-info-t">Find your soft covers</div>
+              <div class="set-info-d">A scan only reads your songs: it looks nothing up and changes nothing, so it is quick.</div>
+              <button class="btn btn-primary" type="button" id="cover-scan-first">Scan</button>
+            </div>
+            <div class="cover-wall" id="cover-wall" role="list"></div>
+            <p class="cover-more" id="cover-more" hidden></p>
+
+            <div class="cover-bar" id="cover-bar" hidden>
+              <span class="cover-count" id="cover-count"></span>
+              <span class="cover-hint" id="cover-hint"></span>
+              <button class="btn btn-ghost" type="button" id="cover-undo" hidden>Undo</button>
+              <button class="btn btn-ghost" type="button" id="cover-stop" hidden>Stop</button>
+              <button class="btn btn-ghost" type="button" id="cover-resume" hidden>Resume</button>
+              <button class="btn btn-primary" type="button" id="cover-go" hidden></button>
+            </div>
+
+            <details class="cover-how">
+              <summary>How it works</summary>
+              <p>A cover is taken only from a release with the same artist and album name: Apple's full-size master, the Cover Art Archive for the release your files name, or Deezer. The largest wins, and an album changes only when it is clearly larger than what it has. Only the front cover is replaced; other pictures stay. Every cover replaced is kept, so Undo puts them all back. Saving a song rewrites its whole tag block, so your own backup of the music folder is the full safety net. Lookups pause about 3 seconds per album to stay inside Apple's limit.</p>
+            </details>
+          </div>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Covers on new downloads</h3>
+            <p class="set-desc">Where Octo looks for a cover when it saves a song, and how large it keeps it.</p>
+          </div>
+          <form data-section="covers" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Cover Art Archive</div>
+                <div class="set-info-d">When a fingerprint named the release, also ask the Cover Art Archive for that release's cover.</div>
+                <div class="set-info-more">The right pressing, with no guessing by name. Apple's master of the same album, the catalog, Deezer, iTunes and Last.fm are asked too, and the largest cover wins.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.UseCoverArtArchive" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Replace video covers</div>
+                <div class="set-info-d">A cover that is not square is a video still, so Octo looks for a real one.</div>
+                <div class="set-info-more">When nothing better turns up, its centre square is used, which for a YouTube &ldquo;Topic&rdquo; upload is the real cover inside the letterbox.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.ReplaceVideoCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Write cover.jpg</div>
+                <div class="set-info-d">Also save the cover beside the file, full size, where Navidrome looks first.</div>
+                <div class="set-info-more">Only in the Organized layout, and only in a folder the download created. A cover.jpg Octo wrote gives way to a larger one later; one you put there never changes.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.WriteCoverFile" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Embed full-size covers</div>
+                <div class="set-info-d">Put the cover in each song at the full size it was found, often 3000 px, instead of 1500 px.</div>
+                <div class="set-info-more">Every song carries its own copy, so this adds a few MB to each. cover.jpg is always full size. Soft covers above embeds the same way.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.EmbedFullSizeCovers" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section data-pane="lyrics">
+        <header class="page-header">
+          <div>
+            <h1>Lyrics</h1>
+            <p>Where lyrics come from, where they are saved, and a list of the songs that could have better ones.</p>
+          </div>
+        </header>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Better lyrics</h3>
+            <p class="set-desc">Find songs with no lyrics, or lyrics that are not timed word by word, and give them better ones.</p>
+          </div>
+          <div class="set-card cover-tool lyrics-tool">
+            <div class="cover-toolbar">
+              <div class="cover-chips">
+                <select class="seg-src" id="lyrics-scope" aria-label="Which songs" hidden>
+                  <option value="OctoDownloads">Octo's downloads</option>
+                  <option value="WholeLibrary">Whole library</option>
+                </select>
+                <div class="seg" data-seg-for="lyrics-scope"><span class="seg-thumb"></span></div>
+                <span class="cover-chip-group">
+                  <span class="cover-chip-label" id="lyrics-show-label">Show</span>
+                  <select class="seg-src" id="lyrics-show" aria-label="Which songs to list" hidden>
+                    <option value="weaker">No lyrics or weaker</option>
+                    <option value="none">No lyrics</option>
+                  </select>
+                  <div class="seg" data-seg-for="lyrics-show"><span class="seg-thumb"></span></div>
+                </span>
+              </div>
+              <div class="cover-toolbar-end">
+                <button class="btn btn-ghost" type="button" id="lyrics-scan"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Scan</span></button>
+              </div>
+            </div>
+
+            <div class="cover-summary">
+              <div class="cover-summary-text"><span class="cover-head" id="lyrics-head"></span><span class="cover-sub" id="lyrics-sub"></span></div>
+              <div class="cover-select" id="lyrics-select" hidden>
+                <button type="button" class="link-btn" id="lyrics-all">Select all</button>
+                <span aria-hidden="true">&middot;</span>
+                <button type="button" class="link-btn" id="lyrics-none">Clear</button>
+              </div>
+            </div>
+            <div class="cover-progress" id="lyrics-progress" hidden><span id="lyrics-progress-fill"></span></div>
+
+            <div class="cover-empty" id="lyrics-empty">
+              <svg class="icon" aria-hidden="true"><use href="#i-microphone-stage"/></svg>
+              <div class="set-info-t">Find songs that need better lyrics</div>
+              <div class="set-info-d">A scan only reads your songs: it looks nothing up and changes nothing.</div>
+              <button class="btn btn-primary" type="button" id="lyrics-scan-first">Scan</button>
+            </div>
+            <div class="lyrics-list config-table" id="lyrics-list" role="list"></div>
+            <p class="cover-more" id="lyrics-more" hidden></p>
+
+            <div class="cover-bar" id="lyrics-bar" hidden>
+              <span class="cover-count" id="lyrics-count"></span>
+              <span class="cover-hint" id="lyrics-hint"></span>
+              <button class="btn btn-ghost" type="button" id="lyrics-undo" hidden>Undo</button>
+              <button class="btn btn-ghost" type="button" id="lyrics-stop" hidden>Stop</button>
+              <button class="btn btn-ghost" type="button" id="lyrics-resume" hidden>Resume</button>
+              <button class="btn btn-primary" type="button" id="lyrics-go" hidden></button>
+            </div>
+
+            <details class="cover-how">
+              <summary>How it works</summary>
+              <p>A scan reads each song's tags and the files beside it, and lists the ones with no lyrics, plain lyrics, or lyrics timed only by line. Find better lyrics asks the sources above, in their order, about a second and a half apart, and shows what it found; nothing is written yet. Save writes them where &ldquo;Save found lyrics&rdquo; says. Octo replaces only lyrics it wrote: a song whose tags or files hold someone else&rsquo;s gets the better lyrics beside it as a <code>.lrc</code>, which Navidrome serves first, and its own stay as they are. Everything Save writes over is kept, so Undo puts it back. A song you pick is saved whatever &ldquo;Write lyrics files beside all library songs&rdquo; says.</p>
+            </details>
+          </div>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Lyrics</h3>
+            <p class="set-desc">A lyrics file beside each download, and lyrics for any song as it plays, in every app.</p>
+          </div>
+          <form data-section="lyrics" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Fetch lyrics</div>
+                <div class="set-info-d">Looked up in the background after each download, so a slow lyrics service never holds up the next one.</div>
+                <div class="set-info-more">Synced lyrics go in a <code>.lrc</code>, plain ones in a <code>.txt</code>; lyrics timed word by word are still a normal <code>.lrc</code> that any player shows line by line. Navidrome serves the file without a rescan. A song that already has lyrics is never touched, and a song with none still gets lyrics as it plays.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.FetchLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack source-priority-setting">
+              <div class="set-info">
+                <div class="set-info-t" id="lyrics-source-order-label">Sources <span class="set-opt">in order</span></div>
+                <div class="set-info-d">Asked from the top down. A source that is off is never contacted.</div>
+                <div class="set-info-more">Drag a source to reorder, or use the arrow keys on its handle. &ldquo;The song&rsquo;s own lyrics&rdquo; are the ones already in its tags or in a file beside it; they cannot be switched off, only ranked.</div>
+              </div>
+              <div class="source-priority-list" id="lyrics-source-order" aria-labelledby="lyrics-source-order-label"></div>
+              <input type="hidden" id="f-lyrics-sources" name="Metadata.LyricsSources" />
+              <div class="set-info-d" id="lyrics-source-order-help" role="status" aria-live="polite" hidden></div>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Prefer word-timed lyrics</div>
+                <div class="set-info-d">Lyrics timed word by word win over line-timed ones from a source higher up.</div>
+                <div class="set-info-more">Off, the first timed lyrics win, which asks fewer services per song.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.PreferWordTimedLyrics" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Save found lyrics</div>
+                <div class="set-info-d"><strong>Beside the song</strong> writes a <code>.lrc</code> or <code>.txt</code> next to it, which Navidrome serves at once.</div>
+                <div class="set-info-more"><strong>Inside the song</strong> writes them into the song&rsquo;s own tags, which rewrites the audio file (on a cloud mount it uploads again) and shows after a Navidrome scan, which Octo asks for. Some other players show word timing as <code>&lt;00:12.34&gt;</code> in the text. Lyrics Octo did not write are never replaced: when a song&rsquo;s tags already hold someone else&rsquo;s, better ones go beside it instead.</div>
+              </div>
+              <select class="set-input" name="Metadata.SaveLyricsTo" aria-label="Save found lyrics">
+                <option value="beside">Beside the song</option>
+                <option value="inside">Inside the song</option>
+                <option value="both">Both</option>
+              </select>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Write lyrics files beside all library songs</div>
+                <div class="set-info-d">Lets a library walk started through the API save lyrics for your own rips and purchases too.</div>
+                <div class="set-info-more">Songs you pick under Better lyrics are saved either way. Lyrics Octo did not write are never replaced.</div>
+              </div>
+              <label class="switch"><input type="checkbox" name="Metadata.WriteLyricsBesideAllSongs" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Fix a song's lyrics</h3>
+            <p class="set-desc">Wrong lyrics, or none? Choose others, hide them, or go back to automatic. It applies in every app.</p>
+          </div>
+          <div class="set-card">
+            <div class="set-row stack">
+              <div class="set-info"><div class="set-info-t">Song</div><div class="set-info-d">Search your library by title or artist.</div></div>
+              <div class="lyrics-search">
+                <input class="set-input" id="lyrics-song-search" type="search" placeholder="Title or artist" maxlength="120" />
+                <button class="btn btn-ghost" type="button" id="lyrics-song-search-go"><svg class="icon" aria-hidden="true"><use href="#i-magnifying-glass"/></svg><span>Search</span></button>
+              </div>
+              <div id="lyrics-song-results" class="config-table"></div>
+            </div>
+            <div id="lyrics-picker" class="set-row stack" hidden>
+              <div class="set-info">
+                <div class="set-info-t" id="lyrics-picker-title"></div>
+                <div class="set-info-d" id="lyrics-picker-state"></div>
+              </div>
+              <div class="lyrics-search">
+                <input class="set-input" id="lyrics-picker-artist" placeholder="Artist" maxlength="120" />
+                <input class="set-input" id="lyrics-picker-song" placeholder="Title" maxlength="120" />
+                <button class="btn btn-ghost" type="button" id="lyrics-picker-search">Search again</button>
+              </div>
+              <div id="lyrics-candidates" class="config-table"></div>
+              <div class="genre-preset-actions">
+                <button class="btn btn-ghost" type="button" id="lyrics-picker-hide">Show no lyrics</button>
+                <button class="btn btn-ghost" type="button" id="lyrics-picker-auto">Back to automatic</button>
+              </div>
+            </div>
+            <div id="lyrics-choices" class="set-row stack" hidden>
+              <div class="set-info"><div class="set-info-t">Chosen lyrics</div><div class="set-info-d">Songs whose lyrics someone chose or hid, here or in the Octo app.</div></div>
+              <div id="lyrics-choices-list" class="config-table"></div>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+      <section data-pane="lossy">
+        <header class="page-header">
+          <div>
+            <h1>Better quality</h1>
+            <p>Songs in your library that are not lossless. Pick some, and Octo looks for a higher quality copy of each, several at a time.</p>
+          </div>
+        </header>
+
+        <div class="notice notice-warn" id="lossy-gate" hidden></div>
+
+        <div class="set-section">
+          <div class="set-card lossy-tool">
+            <p class="set-info-d" id="lossy-status">Reading your library.</p>
+            <div class="lossy-filters">
+              <input class="set-input" id="lossy-q" type="search" placeholder="Title, artist or album" aria-label="Filter songs" />
+              <select class="set-input" id="lossy-format" aria-label="Format"><option value="">Every format</option></select>
+              <label class="lossy-check"><input type="checkbox" class="pick" id="lossy-youtube" /><span>Only songs Octo got from YouTube</span></label>
+              <label class="lossy-check"><input type="checkbox" class="pick" id="lossy-hide-tried" /><span>Hide songs tried in the last 4 weeks</span></label>
+              <button class="btn btn-ghost" type="button" id="lossy-refresh"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Refresh</span></button>
+            </div>
+            <div id="lossy-list"></div>
+            <div id="lossy-results"></div>
+            <div class="cover-bar" id="lossy-bar">
+              <span class="cover-count" id="lossy-count">Nothing picked</span>
+              <span class="cover-hint"></span>
+              <button class="btn btn-ghost" type="button" id="lossy-all">Select all</button>
+              <button class="btn btn-ghost" type="button" id="lossy-none" hidden>Clear</button>
+              <button class="btn btn-ghost" type="button" id="lossy-cancel">Cancel queued</button>
+              <button class="btn btn-ghost" type="button" id="lossy-clear">Clear finished</button>
+              <button class="btn btn-primary" type="button" id="lossy-go" disabled>Find higher quality</button>
+            </div>
+            <details class="cover-how">
+              <summary>How it works</summary>
+              <p>Each song goes through Better quality, exactly as the action playlist does it: a lossless copy is looked for, checked to be the same recording and really lossless, and put in the original's place, so the song keeps its plays, favorites and playlist places. The original waits in quarantine until its replacement passes. A song with no lossless copy on any of them stays as it is and is not looked for again by the weekly upgrade for 4 weeks. Copies come from the sources named above, Soulseek first and then Lidarr; while every one of them is out, songs wait.</p>
+            </details>
+          </div>
+        </div>
+      </section>
+
       <section data-pane="libraryactions">
         <header class="page-header">
           <div>
@@ -1517,6 +1877,19 @@
             <div class="set-row">
               <div class="set-info"><div class="set-info-t">Review playlist</div><div class="set-info-d">Answer by adding the song to an action playlist, by Keep, or by taking it out of Review.</div><div class="set-info-more"><p>Octo asks when AcoustID had never heard the recording, was not sure of it, or heard a different one in a YouTube download. Each allowed user gets a playlist of their own.</p><p>Keep is its playlist, or five stars. Taking a song out of Review means &ldquo;fine, stop asking&rdquo;. Nothing in Review is ever acted on by itself. Takes effect at the next check, with no restart.</p></div></div>
               <label class="switch"><input type="checkbox" name="LibraryActions.ReviewEnabled" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Check the library <span class="set-opt">songs an hour</span></div><div class="set-info-d">Also asks about songs that were already there. 0 is off.</div><div class="set-info-more"><p>Only while nothing is downloading, and only the library keeper is asked: the Navidrome admin if they are on the allowlist, otherwise its first name. It stops while 50 of these questions wait for an answer.</p><p>Besides what Review already asks, it asks when AcoustID is sure a song is something else, or when a song runs much longer or shorter than the recording. Nothing is ever acted on by itself.</p></div></div>
+              <input class="set-input" name="LibraryActions.ReviewSweepPerHour" type="number" min="0" max="360" data-number="true" />
+            </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Include Octo's own downloads</div><div class="set-info-d">They were checked when they arrived, if verification was on then.</div></div>
+              <label class="switch"><input type="checkbox" name="LibraryActions.ReviewSweepOctoDownloads" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Library check</div><div class="set-info-d" id="review-sweep-status">Not loaded yet.</div></div>
+              <button class="btn btn-ghost" type="button" id="review-sweep-toggle"><span>Pause</span></button>
+              <button class="btn btn-ghost" type="button" id="review-sweep-reset"><svg class="icon" aria-hidden="true"><use href="#i-arrow-counter-clockwise"/></svg><span>Start over</span></button>
             </div>
             <details class="set-more">
               <summary>Playlist name and size</summary>
@@ -1600,6 +1973,18 @@
                 <input class="set-input" name="LibraryActions.PollIntervalSeconds" type="number" min="15" max="3600" data-number="true" data-restart="true" data-restart-label="Library actions check interval" aria-label="Check every this many seconds" />
                 <input class="set-input" name="LibraryActions.MaxActionsPerCycle" type="number" min="1" max="200" data-number="true" aria-label="At most this many actions per check" />
               </div>
+            </div>
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Upgrade <span class="set-opt">songs a week</span></div><div class="set-info-d">Octo looks for a lossless copy of this many MP3 and other lossy songs a week, one at a time, spread across the week, and only while nothing else is downloading. It uses Better quality, so that action must be on, and a song is only replaced when the new file really is better. <strong>0 is off.</strong></div><div class="set-info-d" id="quality-upgrade-status"></div></div>
+              <input class="set-input" name="LibraryActions.UpgradePerWeek" type="number" min="0" max="500" data-number="true" aria-label="Songs to upgrade a week" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info"><div class="set-info-t">Where to look for a higher quality copy</div><div class="set-info-d"><strong>Automatic</strong> asks Soulseek first, then Lidarr for what Soulseek cannot find, using whichever of the two is set up.</div><div class="set-info-more">Lidarr fetches whole albums, so Octo borrows the album: it copies out the one song, deletes the other files that search brought in, and puts the album's monitoring back as it was. A song Lidarr already manages is left to Lidarr. While Soulseek is offline, Lidarr is asked alone.</div></div>
+              <select class="set-input" name="LibraryActions.UpgradeSource">
+                <option value="Auto">Automatic</option>
+                <option value="Soulseek">Soulseek only</option>
+                <option value="Lidarr">Lidarr only</option>
+              </select>
             </div>
           </form>
         </div>
@@ -1698,8 +2083,8 @@
             <div class="set-row stack">
               <div class="set-info">
                 <label class="set-info-t" for="f-lidarr-completion">Completion notifications</label>
-                <div class="set-info-d">When a Lidarr heart counts as done: once Lidarr takes it, or once its files arrive.</div>
-                <div class="set-info-more">Accepted stops at a successful handoff to Lidarr. Imported reports completion or failure only after the files appear or the timeout runs out. Neither holds up later hearts.</div>
+                <div class="set-info-d">Which Lidarr notices you get. Either way, a heart waits for the import, and a song that does not land goes to the next source.</div>
+                <div class="set-info-more">When Lidarr accepts it: a notice when the search starts, and one for the album when an album heart lands. When the files are imported: also one when a song heart's album lands, and one when an import fails or runs out of time. Neither holds up playback or later hearts.</div>
               </div>
               <select class="set-input" id="f-lidarr-completion" name="Lidarr.CompletionMode">
                 <option value="Accepted">When Lidarr accepts it</option>
@@ -1797,10 +2182,38 @@
           <p>Octo sits in front of your Navidrome library and adds discovery and downloads to it. Search shows songs you don't own beside your own. Radio on any song finds more through Last.fm and plays previews from YouTube. Heart a song you don't own and Octo fetches it through Soulseek, YouTube or your own Lidarr.</p>
         </div>
 
-        <div class="info-card">
+        <div class="info-card" id="update-card">
           <h3 class="info-card-title">Version</h3>
           <p>This is Octo <code id="meta-version">unknown</code>. Please include it in any bug report. Releases are named by date, so <code>2026.07.29</code> is the release cut that day.</p>
+          <p class="update-line" id="update-line" aria-live="polite">Looking for new releases…</p>
+          <div class="update-actions">
+            <button type="button" class="btn btn-primary" id="update-now" hidden><svg class="icon" aria-hidden="true"><use href="#i-tray-arrow-down"/></svg><span>Update now</span></button>
+            <button type="button" class="btn btn-ghost" id="update-notes" hidden>What's new</button>
+            <button type="button" class="btn btn-ghost" id="update-check"><svg class="icon" aria-hidden="true"><use href="#i-arrows-clockwise"/></svg><span>Check now</span></button>
+          </div>
+          <ol class="update-steps" id="update-steps" hidden></ol>
+          <pre class="update-log" id="update-log" hidden></pre>
+          <div class="update-manual" id="update-manual" hidden>
+            <p id="update-manual-where">To update, run this in your Octo folder:</p>
+            <div class="update-command">
+              <code id="update-command"></code>
+              <button type="button" class="btn btn-ghost" id="update-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button>
+            </div>
+            <p class="update-fine" id="update-image-line">Running the published image instead of building? <code id="update-image-command"></code></p>
+            <p class="update-fine" id="update-helper-hint">On Linux with systemd, <code>scripts/updater/install-updater.sh</code> in the Octo folder installs a small helper, and then Update now does this for you.</p>
+          </div>
         </div>
+
+        <form data-section="updates" class="set-card">
+          <div class="set-row">
+            <div class="set-info">
+              <div class="set-info-t">Look for new releases</div>
+              <div class="set-info-d">Asks GitHub every 6 hours whether a newer Octo is out, and says so here and at the top of every page. On by default.</div>
+              <div class="set-info-more">Off means Octo never contacts GitHub for this. Only dated releases count, never the apps' own releases. A fork with its own releases sets <code>Updates.Repo</code> under Raw config.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="f-updates-check" name="Updates.Check" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+          </div>
+        </form>
 
         <div class="info-card">
           <h3 class="info-card-title">Settings file</h3>
@@ -1832,6 +2245,33 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="signin-cancel">Cancel</button>
         <button type="button" class="btn btn-primary" id="signin-submit">Sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="ask-modal" hidden>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-desc">
+      <div class="modal-title" id="ask-title"></div>
+      <div class="modal-desc ask-desc" id="ask-desc"></div>
+      <div class="modal-fields" id="ask-fields" hidden>
+        <label class="ask-label" id="ask-label" for="ask-input"></label>
+        <input class="set-input" id="ask-input" type="text" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="ask-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ask-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Release notes, from the update banner and the About page. -->
+  <div class="modal-backdrop" id="notes-modal" hidden>
+    <div class="modal notes-modal" role="dialog" aria-modal="true" aria-labelledby="notes-title">
+      <div class="modal-title" id="notes-title">What's new</div>
+      <div class="notes-body" id="notes-body"></div>
+      <div class="modal-actions">
+        <a class="btn btn-ghost" id="notes-link" target="_blank" rel="noopener noreferrer">On GitHub</a>
+        <button type="button" class="btn btn-primary" id="notes-close">Close</button>
       </div>
     </div>
   </div>

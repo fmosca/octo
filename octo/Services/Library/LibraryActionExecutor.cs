@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Octo.Models.Settings;
 using Octo.Services.Common;
@@ -6,9 +7,17 @@ using Octo.Services.Soulseek;
 
 namespace Octo.Services.Library;
 
-public sealed record LibraryActionRequest(LibraryAction Action, string NavidromeId, string Username);
+/// <param name="OnReplacementQueued">Told the provider and external id of the replacement download
+/// the moment it is queued, so the upgrade queue can follow that download's progress.</param>
+public sealed record LibraryActionRequest(LibraryAction Action, string NavidromeId, string Username,
+    Octo.Services.Subsonic.SubsonicCredential? Credential = null,
+    Action<string, string>? OnReplacementQueued = null);
 
-public sealed record LibraryActionOutcome(LibraryActionState State, string? Detail)
+/// <summary>
+/// Code says WHY, for callers that act on the reason: the upgrade queue waits for Soulseek on one
+/// and reports "no FLAC found" on the other. Detail stays the words for people.
+/// </summary>
+public sealed record LibraryActionOutcome(LibraryActionState State, string? Detail, string? Code = null)
 {
     /// <summary>
     /// Whether the request has been consumed. Anything else leaves the track in the playlist
@@ -16,6 +25,21 @@ public sealed record LibraryActionOutcome(LibraryActionState State, string? Deta
     /// operator fixes whatever blocked it.
     /// </summary>
     public bool Consumed => State is LibraryActionState.Applied or LibraryActionState.Skipped;
+
+    /// <summary>For a replacement that went in: the new file, so a caller can say what it is.</summary>
+    public string? NewPath { get; init; }
+
+    /// <summary>For a replacement that went in: where the original waits in quarantine.</summary>
+    public string? QuarantinePath { get; init; }
+}
+
+public static class LibraryActionCodes
+{
+    /// <summary>slskd is not logged in to Soulseek, so a replacement could only fail.</summary>
+    public const string SoulseekOffline = "soulseekOffline";
+
+    /// <summary>The search found no copy good enough to replace the song with.</summary>
+    public const string NoReplacement = "noReplacement";
 }
 
 /// <summary>
@@ -40,7 +64,29 @@ public sealed class LibraryActionExecutor
     private readonly ILogger<LibraryActionExecutor> _logger;
     private readonly NoticeQueue? _notices;
     private readonly Octo.Services.Fingerprint.SpectrumAnalyzer? _spectrum;
+    private readonly StarOnArrival? _stars;
+    private readonly ISoulseekLink? _soulseekLink;
+    private readonly UpgradeSources? _sources;
     private int _reconciled;
+
+    // The songs a library action is working on right now, by the original's full path. The
+    // rating, playlist and weekly upgrade workers all call ApplyAsync, and two replacements of
+    // one song at once share one download: the second could quarantine or delete what the
+    // first had just put in place. A set rather than a lock per song, because nobody waits for
+    // it (the second action is skipped), so an entry can simply be removed when the action ends.
+    private readonly ConcurrentDictionary<string, byte> _busy = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    internal const string BusyText = "Another action on this song is still running, so this one was skipped.";
+    internal const string JoinedText = "Another download of this song was already running, so nothing changed.";
+
+    internal TimeSpan HistoryPoll { get; set; } = TimeSpan.FromSeconds(15);
+    internal int HistoryAttempts { get; set; } = 40;
+    /// <summary>Navidrome shows this id at this file. Tests set it; otherwise the resolver.</summary>
+    internal Func<string, string, CancellationToken, Task<bool>>? ShowsAt { get; set; }
+    internal Func<Task<bool>>? ForceScan { get; set; }
+    internal const string HistoryKeptText = "Navidrome kept it as the same song, so its plays, favorites and playlist places stayed with it.";
+    internal const string HistoryLostText = "Navidrome took it for a new song, so its plays and playlist places stayed with the old entry.";
+    private sealed record Replaced(LibraryActionOutcome Outcome, string? QuarantinePath, string? NewPath);
 
     public LibraryActionExecutor(NavidromeSongPathResolver resolver, LibraryActionQuarantine quarantine,
         LibraryActionJournal journal, ILocalLibraryService library, ExternalIdRegistry ids,
@@ -49,10 +95,16 @@ public sealed class LibraryActionExecutor
         IOptionsMonitor<SubsonicSettings> subsonicSettings,
         ILogger<LibraryActionExecutor> logger,
         NoticeQueue? notices = null,
-        Octo.Services.Fingerprint.SpectrumAnalyzer? spectrum = null)
+        Octo.Services.Fingerprint.SpectrumAnalyzer? spectrum = null,
+        StarOnArrival? stars = null,
+        ISoulseekLink? soulseekLink = null,
+        UpgradeSources? sources = null)
     {
+        _soulseekLink = soulseekLink;
+        _sources = sources;
         _notices = notices;
         _spectrum = spectrum;
+        _stars = stars;
         _resolver = resolver;
         _quarantine = quarantine;
         _journal = journal;
@@ -135,6 +187,49 @@ public sealed class LibraryActionExecutor
             return new(LibraryActionState.Rehearsed, detail);
         }
 
+        // Better quality with every source out could only fail, and before this it was journaled as
+        // "no FLAC found" every sweep. Not consumed, so the request stays and runs once slskd is
+        // back. Nothing is written and no file is touched. With Lidarr also set up, a Soulseek
+        // outage just means Lidarr alone is asked.
+        if (request.Action == LibraryAction.BetterQuality)
+        {
+            var sources = await SourcesForAsync(request.Action, ct);
+            if (sources.Count == 0 && await WaitingForSoulseekAsync(ct))
+                return new(LibraryActionState.Failed, SoulseekLink.OfflineText, LibraryActionCodes.SoulseekOffline);
+            if (sources.Count == 0)
+                return new(LibraryActionState.Failed, "Better quality has no source set up: it needs slskd or Lidarr.");
+        }
+
+        // Taken before the Pending entry is written: a second action on the same file content
+        // has the same journal key and would overwrite the first one's entry.
+        var songKey = Path.GetFullPath(resolved.AbsolutePath);
+        if (!_busy.TryAdd(songKey, 0))
+        {
+            _journal.Record(Entry(request, resolved, LibraryActionState.Skipped, BusyText, dryRun: false) with
+            {
+                Key = LibraryActionJournal.MakeKey(request.Action, request.NavidromeId, $"busy:{DateTime.UtcNow.Ticks}"),
+            });
+            _logger.LogInformation("Library action {Action} by {User} skipped: another action on {Path} is still running",
+                request.Action, request.Username, resolved.AbsolutePath);
+            return new(LibraryActionState.Skipped, BusyText);
+        }
+        try
+        {
+            return await ApplyOnFileAsync(request, resolved, key, pending, ct);
+        }
+        finally
+        {
+            _busy.TryRemove(songKey, out _);
+        }
+    }
+
+    private async Task<LibraryActionOutcome> ApplyOnFileAsync(LibraryActionRequest request, ResolvedSongFile resolved,
+        string key, LibraryActionEntry pending, CancellationToken ct)
+    {
+        // Read now, while Navidrome still knows the song here. Only the acting user's own
+        // favorite can be read, with their own sign-in; anyone else's is out of reach.
+        var carryStar = await WasStarredByRequesterAsync(request);
+
         // Written BEFORE the file is touched. A crash between the two leaves this Pending, and
         // startup reconciles it against the filesystem rather than blindly re-running.
         _journal.Record(pending);
@@ -147,94 +242,263 @@ public sealed class LibraryActionExecutor
         }
 
         var musicRoot = _resolver.MusicRoot();
-        var moved = _quarantine.Move(resolved, musicRoot, request.Action, request.Username);
-        if (!moved.Moved)
+        LibraryActionOutcome outcome;
+        Replaced? replaced = null;
+        string? quarantinePath = null;
+        if (request.Action == LibraryAction.Delete)
         {
-            _journal.Complete(key, LibraryActionState.Failed, moved.Error);
-            return new(LibraryActionState.Failed, moved.Error);
+            var moved = _quarantine.Move(resolved, musicRoot, request.Action, request.Username);
+            if (!moved.Moved)
+            {
+                _journal.Complete(key, LibraryActionState.Failed, moved.Error);
+                return new(LibraryActionState.Failed, moved.Error);
+            }
+            quarantinePath = moved.QuarantinePath;
+            _journal.Complete(key, LibraryActionState.Pending, "Moved to quarantine; finishing.", quarantinePath);
+            _journal.Flush();
+            await _library.ForgetMappingAsync(resolved.AbsolutePath);
+            outcome = new(LibraryActionState.Applied, "Removed. It will not be downloaded again.");
+        }
+        else
+        {
+            // The original stays in place, playable, until its replacement has passed; the two
+            // swap places in one moment (W8).
+            replaced = await ReacquireAsync(request, resolved, key, musicRoot, ct);
+            (outcome, quarantinePath) = (replaced.Outcome, replaced.QuarantinePath);
         }
 
-        // Recorded, and on disk, before the replacement fetch, which can take minutes. Without the
-        // quarantine path on the Pending entry, a crash in that window reconciled as "nothing was
-        // changed" while the file sat in quarantine and the original was never put back.
-        _journal.Complete(key, LibraryActionState.Pending, "Moved to quarantine; finishing.", moved.QuarantinePath);
-        _journal.Flush();
-
-        await _library.ForgetMappingAsync(resolved.AbsolutePath);
-
-        var outcome = request.Action switch
-        {
-            LibraryAction.Delete => new LibraryActionOutcome(LibraryActionState.Applied,
-                "Removed. It will not be downloaded again."),
-            _ => await ReacquireAsync(request, resolved, moved.QuarantinePath!, musicRoot, ct),
-        };
-
-        _journal.Complete(key, outcome.State, outcome.Detail, moved.QuarantinePath);
-        // The file any open question was about has gone or changed, so the question is answered.
+        _journal.Complete(key, outcome.State, outcome.Detail, quarantinePath);
         if (outcome.State == LibraryActionState.Applied) _notices?.MarkActed(request.NavidromeId);
-        // Written now rather than on the next tick: a restart in between would leave this Pending,
-        // and reconciling a finished replacement would put the original back beside it.
         _journal.Flush();
-        return outcome;
+        // Off this call, which the rating and playlist workers wait on: it can take ten minutes.
+        if (outcome.State == LibraryActionState.Applied && replaced?.NewPath is { } newPath)
+            using (ExecutionContext.SuppressFlow())
+                _ = Task.Run(() => ConfirmHistoryKeptAsync(request, resolved, newPath, key, carryStar));
+        return outcome with { NewPath = replaced?.NewPath, QuarantinePath = quarantinePath };
     }
 
-    /// <summary>
-    /// Replace the file that was just quarantined.
-    ///
-    /// This is where "keep the current file until the new one is verified" actually lives, and
-    /// it looks contradictory until you see the ordering: DownloadSongInternalAsync
-    /// short-circuits on an existing file, so a re-acquire that left the original in place
-    /// would be a no-op. Moving it out first is what makes the download happen, and the bytes
-    /// are still recoverable the whole time. If the replacement never arrives or does not pass,
-    /// the original goes back exactly where it was.
-    /// </summary>
-    private async Task<LibraryActionOutcome> ReacquireAsync(LibraryActionRequest request,
-        ResolvedSongFile original, string quarantinePath, string musicRoot, CancellationToken ct)
+    private async Task<Replaced> ReacquireAsync(LibraryActionRequest request, ResolvedSongFile original,
+        string key, string musicRoot, CancellationToken ct)
     {
         if (request.Action == LibraryAction.WrongSong) BlacklistSource(original, request);
+
+        // Read while the original is in place: Navidrome built this song's ids from these tags.
+        var identity = KeptIdentityTags.Read(original.AbsolutePath, original.AlbumArtist);
+        // What the original looked like when the action started. A download takes minutes, and
+        // whatever is at that path by the end may no longer be the file this action was about.
+        var startedLastWrite = File.GetLastWriteTimeUtc(original.AbsolutePath);
+        string? quarantinePath = null;
+        ReplacementHandoff? handoff = null;
+        // What each source tried before the last one said, for the words when all of them miss.
+        var misses = new List<string>();
+        string Earlier() => misses.Count == 0 ? "" : $" Before that, {string.Join("; ", misses)}.";
+
+        // Judges the new file and, only when it passes, moves the original out. Called by the
+        // download just before the replacement moves in, or here for one that ran without the
+        // handoff, so a scan never sees the song missing for the length of a download.
+        async Task<string?> AdmitAsync(string? candidate)
+        {
+            var problem = Unacceptable(request.Action, candidate, original);
+            if (problem is null && request.Action == LibraryAction.BetterQuality)
+                problem = NotReallyLossless(await SpectrumOfAsync(candidate!));
+            if (problem is not null) return problem;
+            var now = new FileInfo(original.AbsolutePath);
+            if (!now.Exists || now.Length != original.SizeBytes || now.LastWriteTimeUtc != startedLastWrite)
+                return "found the original changed while it was downloading";
+            var moved = _quarantine.Move(original, musicRoot, request.Action, request.Username);
+            if (!moved.Moved) return $"could not take the original's place ({moved.Error})";
+            quarantinePath = moved.QuarantinePath;
+            // On disk before the replacement moves in: a crash in between puts the original back.
+            _journal.Complete(key, LibraryActionState.Pending, "Moved to quarantine; finishing.", quarantinePath);
+            _journal.Flush();
+            // Only now that the original is out: a refused replacement leaves it with its
+            // mapping, and so with the record of who sent it.
+            await _library.ForgetMappingAsync(original.AbsolutePath);
+            return null;
+        }
+
+        // Written the moment the replacement is in the original's place, so a restart after it
+        // finds the swap done rather than putting the original back beside it.
+        void Revealed(string path)
+        {
+            _journal.Complete(key, LibraryActionState.Pending, "Replacement placed; finishing.", quarantinePath, revealedPath: path);
+            _journal.Flush();
+        }
 
         try
         {
             var routing = new SoulseekRouting
             {
-                Kind = RoutingKind.Song,
-                Artist = original.Artist,
-                Title = original.Title,
-                Album = original.Album,
-                Duration = original.DurationSeconds,
+                Kind = RoutingKind.Song, Artist = original.Artist, Title = original.Title,
+                Album = original.Album, Duration = original.DurationSeconds,
             };
             var externalId = _ids.Register(routing);
+            try { request.OnReplacementQueued?.Invoke(SoulseekMetadataService.ProviderName, externalId); }
+            catch (Exception ex) { _logger.LogDebug("Replacement listener failed: {M}", ex.Message); }
+            if (identity is null)
+                _logger.LogWarning("Library action {Action}: could not read the tags of {Path}, so Navidrome will treat its replacement as a new song",
+                    request.Action, original.AbsolutePath);
+            handoff = identity is null ? null : HandoffFor(original, identity, AdmitAsync, Revealed);
+            // DownloadSongInternalAsync hands back a file it has a mapping for instead of
+            // fetching. The handoff skips that, so only a download without one needs this.
+            if (handoff is null) await _library.ForgetMappingAsync(original.AbsolutePath);
 
-            var replacement = await _acquisitions.Enqueue(
-                SoulseekMetadataService.ProviderName, externalId, isStar: true,
-                triggerAlbumDownload: false, forcePermanent: true,
-                sourceOverride: null, notifyOnFailure: false,
-                // The person who asked for the replacement owns the new file the same way
-                // they would have owned a star for it.
-                requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy
-                    ? request.Username : null);
-
-            var problem = Unacceptable(request.Action, replacement, original);
-            if (problem is null && request.Action == LibraryAction.BetterQuality)
-                problem = NotReallyLossless(await SpectrumOfAsync(replacement!));
-            if (problem is null)
+            // In order, and on to the next when one finds nothing or its copy fails the checks:
+            // Soulseek first, then Lidarr, for Better quality with both set up.
+            var sources = await SourcesForAsync(request.Action, ct);
+            var upgradeSearch = request.Action == LibraryAction.BetterQuality;
+            string? replacement = null;
+            for (var attempt = 0; ; attempt++)
             {
-                if (!_settings.CurrentValue.KeepReplacedOriginals) TryDelete(quarantinePath);
-                return new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(replacement)}.");
+                var source = sources[attempt];
+                try
+                {
+                    replacement = await _acquisitions.Enqueue(
+                        SoulseekMetadataService.ProviderName, externalId, isStar: true,
+                        triggerAlbumDownload: false, forcePermanent: true,
+                        sourceOverride: source, notifyOnFailure: false,
+                        requestedBy: _subsonicSettings.CurrentValue.RecordRequestedBy ? request.Username : null,
+                        upgradeSearch: upgradeSearch, replacement: handoff);
+                    break;
+                }
+                catch (Exception ex) when (attempt < sources.Count - 1 && handoff?.RevealedPath is null
+                                           && ex is FileNotFoundException or ReplacementRejectedException
+                                               or InvalidOperationException)
+                {
+                    var why = ex is ReplacementRejectedException rejected ? rejected.Problem : ex.Message;
+                    misses.Add($"{UpgradeSources.Word(source ?? DownloadSource.Soulseek)}: {why}");
+                    _logger.LogInformation("Library action {Action}: {Source} had no copy of '{Artist} - {Title}' ({Why}); trying {Next}",
+                        request.Action, UpgradeSources.Word(source ?? DownloadSource.Soulseek), original.Artist, original.Title,
+                        why, UpgradeSources.Word(sources[attempt + 1] ?? DownloadSource.Soulseek));
+                }
             }
 
-            _logger.LogInformation(
-                "Library action {Action}: the replacement for '{Artist} - {Title}' {Problem}; putting the original back",
-                request.Action, original.Artist, original.Title, problem);
-            TryDelete(replacement);
-            return RestoreOriginal(quarantinePath, $"The replacement {problem}, so nothing changed.");
+            // A handoff that was never used: this joined a download of the same song already in
+            // flight, whose file belongs to whoever started it. Judging it here could quarantine
+            // or delete a replacement that action had just put in place, so nothing is touched.
+            if (handoff is not null && handoff.RevealedPath is null)
+            {
+                LogRefused(request, original, "was another action's download");
+                return new(new(LibraryActionState.Failed, JoinedText), null, null);
+            }
+            // Without the handoff the file is already in the library under its own name: judged now.
+            if (handoff is null && await AdmitAsync(replacement) is { } late)
+            {
+                LogRefused(request, original, late);
+                if (!string.IsNullOrEmpty(replacement)) TryDelete(replacement);
+                return new(new(LibraryActionState.Failed, $"The replacement {late}, so nothing changed."), null, null);
+            }
+            if (!_settings.CurrentValue.KeepReplacedOriginals) TryDelete(quarantinePath!);
+            return new(new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(replacement)}."),
+                quarantinePath, replacement);
+        }
+
+        catch (ReplacementRejectedException rejected)
+        {
+            // Refused before it was ever in the library; the original never moved.
+            LogRefused(request, original, rejected.Problem);
+            return new(new(LibraryActionState.Failed, $"The replacement {rejected.Problem}, so nothing changed.{Earlier()}"), null, null);
         }
         catch (Exception ex)
         {
-            return RestoreOriginal(quarantinePath,
-                $"Could not find a replacement ({ex.Message}), so nothing changed.");
+            if (handoff?.RevealedPath is { } revealed)
+            {
+                // The replacement already took the original's place and only the bookkeeping
+                // after it failed. Putting the original back now would undo a finished swap.
+                _logger.LogWarning("Library action {Action}: the replacement for '{Artist} - {Title}' is in place at {Path}, but what followed failed: {Message}",
+                    request.Action, original.Artist, original.Title, revealed, ex.Message);
+                if (!_settings.CurrentValue.KeepReplacedOriginals && quarantinePath is not null) TryDelete(quarantinePath);
+                return new(new(LibraryActionState.Applied, $"Replaced with {Path.GetFileName(revealed)}."), quarantinePath, revealed);
+            }
+            // A search that found nothing usable throws FileNotFoundException, passed through the
+            // queue unchanged, and the upgrade queue reports exactly that case as "no FLAC found".
+            if (quarantinePath is null)
+                return new(new(LibraryActionState.Failed, $"Could not find a replacement ({ex.Message}), so nothing changed.{Earlier()}",
+                    ex is FileNotFoundException ? LibraryActionCodes.NoReplacement : null), null, null);
+            // Out, and nothing moved in: back to its exact path, whose row Navidrome still has.
+            return new(RestoreOriginal(quarantinePath, $"Could not finish the replacement ({ex.Message}), so nothing changed."),
+                quarantinePath, null);
         }
     }
+
+    internal static ReplacementHandoff HandoffFor(ResolvedSongFile original, KeptIdentity identity,
+        Func<string, Task<string?>> admit, Action<string>? revealed = null) =>
+        new() { OriginalPath = original.AbsolutePath, Identity = identity, BeforeReveal = admit, OnRevealed = revealed };
+
+    private void LogRefused(LibraryActionRequest request, ResolvedSongFile original, string problem) =>
+        _logger.LogInformation("Library action {Action}: the replacement for '{Artist} - {Title}' {Problem}; the original stays",
+            request.Action, original.Artist, original.Title, problem);
+
+    /// <summary>
+    /// One scan, then watch the ORIGINAL id until it shows the replacement (W8): proof that the
+    /// plays, favorites and playlist places stayed with the song. About ten minutes, scanning
+    /// again every two in case Navidrome was busy. If not shown, the rater's favorite (W6).
+    /// </summary>
+    internal async Task<bool> ConfirmHistoryKeptAsync(LibraryActionRequest request, ResolvedSongFile original,
+        string newPath, string key, bool carryStar)
+    {
+        var kept = false;
+        try
+        {
+            var showsAt = ShowsAt ?? _resolver.ShowsAtAsync;
+            var scan = ForceScan ?? (() => _library.TriggerLibraryScanAsync(force: true));
+            for (var attempt = 0; attempt < Math.Max(1, HistoryAttempts) && !kept; attempt++)
+            {
+                if (attempt % 8 == 0) await scan();
+                await Task.Delay(HistoryPoll);
+                kept = await showsAt(original.NavidromeId, newPath, CancellationToken.None);
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug("History check for {Id} failed: {M}", original.NavidromeId, ex.Message); }
+
+        _journal.Complete(key, LibraryActionState.Applied,
+            $"Replaced with {Path.GetFileName(newPath)}. {(kept ? HistoryKeptText : HistoryLostText)}", historyKept: kept);
+        _journal.Flush();
+        if (kept)
+        {
+            _logger.LogInformation("Navidrome kept '{Artist} - {Title}' as the same song after {Action}", original.Artist, original.Title, request.Action);
+            return true;
+        }
+        _logger.LogWarning("Navidrome did not keep '{Artist} - {Title}' as the same song after {Action}; its plays and playlist places stay with the old entry",
+            original.Artist, original.Title, request.Action);
+        if (carryStar && _stars is not null && request.Credential is { } credential)
+            _stars.StarWhenVisible(credential, request.Username, original.Artist, original.Title, newPath);
+        return false;
+    }
+
+    /// <summary>
+    /// Where a replacement may come from, in the order tried. Better quality uses the upgrade
+    /// sources that are set up and can search now (never YouTube, whose MP3 a lossless check
+    /// refuses anyway), and searches the slow way, because nobody is waiting (#70). Wrong song and
+    /// wrong version use the download source, except that Lidarr there means Lidarr too: before,
+    /// those replacements went to Soulseek whatever was configured. A null entry is the default.
+    /// </summary>
+    internal async Task<IReadOnlyList<DownloadSource?>> SourcesForAsync(LibraryAction action, CancellationToken ct)
+    {
+        if (action == LibraryAction.BetterQuality)
+        {
+            // Without the plan (hosts that build the executor by hand): Soulseek, as it always was.
+            if (_sources is null) return await SoulseekOutAsync(ct) ? [] : [DownloadSource.Soulseek];
+            return (await _sources.AvailableAsync(ct)).Select(s => (DownloadSource?)s).ToList();
+        }
+        var lidarrHearts = _subsonicSettings.CurrentValue.DownloadSource == DownloadSource.Lidarr
+                           && _sources?.Plan().Contains(DownloadSource.Lidarr) == true;
+        return lidarrHearts ? [DownloadSource.Lidarr, null] : [null];
+    }
+
+    private async Task<bool> WaitingForSoulseekAsync(CancellationToken ct) =>
+        _sources is not null ? await _sources.WaitingForSoulseekAsync(ct) : await SoulseekOutAsync(ct);
+
+    private async Task<bool> SoulseekOutAsync(CancellationToken ct) =>
+        _soulseekLink is not null && (await _soulseekLink.ReadAsync(fresh: false, ct))?.Link == SoulseekLinkState.NotLoggedIn;
+
+    /// <summary>Whether the person asking for a replacement had favorited the song. False when
+    /// nothing will replace it, when the request carries no sign-in (playlist actions never
+    /// do), or when Navidrome cannot say.</summary>
+    internal async Task<bool> WasStarredByRequesterAsync(LibraryActionRequest request) =>
+        request.Action is LibraryAction.WrongSong or LibraryAction.WrongVersion or LibraryAction.BetterQuality
+        && request.Credential is { } credential && _stars is not null
+        && await _stars.IsStarredAsync(credential, request.NavidromeId);
 
     /// <summary>Why a replacement is not good enough to keep, or null when it is.</summary>
     private static string? Unacceptable(LibraryAction action, string? path, ResolvedSongFile original)

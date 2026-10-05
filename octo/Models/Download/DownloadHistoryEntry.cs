@@ -30,6 +30,10 @@ public class DownloadHistoryEntry
     /// </summary>
     public string? TranscodedFrom { get; set; }
 
+    /// <summary>How the file was tagged: the release that won, by how much, and where each field
+    /// came from. Null for entries written before this existed.</summary>
+    public Octo.Services.Tagging.TagReport? Tagging { get; set; }
+
     /// <summary>When it was saved (ISO 8601, UTC).</summary>
     public string DownloadedAt { get; set; } = string.Empty;
 

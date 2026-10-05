@@ -535,8 +535,12 @@ public sealed class LastFmRadioControllerTests
         await stream.ReadExactlyAsync(bytes);
         Assert.Equal("MP3", Encoding.ASCII.GetString(bytes));
         Assert.Equal(192, fixture.Transcoder.LastBitrateKbps);
-        for (var attempt = 0; attempt < 50 && fixture.State.GetUser("alice").Plays.Count == 0;
-             attempt++)
+        // The play and its relayed scrobble are recorded off the streaming request. Waited for
+        // together, up to ten seconds: half a second for the play and no wait for the scrobble
+        // failed whenever the whole suite was loading the machine.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline
+               && (fixture.State.GetUser("alice").Plays.Count == 0 || fixture.Handler.RelayedScrobbleIds.Count == 0))
             await Task.Delay(10);
         Assert.NotEmpty(fixture.State.GetUser("alice").Plays);
         Assert.NotEmpty(fixture.Handler.RelayedScrobbleIds);

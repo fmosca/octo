@@ -30,8 +30,11 @@ public enum VerificationVerdict
 }
 
 /// <summary>
-/// Why a verdict was Inconclusive. Only the last three are questions a person can settle by
-/// listening, so only those reach the Review playlist (#47). The others are Octo not asking.
+/// Why a verdict was Inconclusive, or, for the last two, why the library sweep asks about a file
+/// whose verdict was not. NoEntry, BelowThreshold and SourceDisagreed are questions a person can
+/// settle by listening, so only those reach the Review playlist from a download (#47). The sweep
+/// also asks about a confident answer, because it never acts on one (#72). Appended, never
+/// inserted: the notice queue stores these by name, but order is still what the code reads.
 /// </summary>
 public enum InconclusiveReason
 {
@@ -42,6 +45,8 @@ public enum InconclusiveReason
     NoEntry,
     BelowThreshold,
     SourceDisagreed,
+    SoundsLikeAnother,
+    LengthOff,
 }
 
 public sealed record VerificationResult
@@ -64,6 +69,13 @@ public sealed record VerificationResult
     /// <summary>Kept so a person's confirmation can be sent back to AcoustID (#47).</summary>
     public string? Fingerprint { get; init; }
     public int DurationSeconds { get; init; }
+
+    /// <summary>The whole answer, every result and release, so the chooser can weigh them all.
+    /// Set whenever the service answered, even below the threshold.</summary>
+    public AcoustIdLookup? Lookup { get; init; }
+
+    /// <summary>The service's id for the fingerprint that confirmed the recording.</summary>
+    public string? AcoustId { get; init; }
 
     /// <summary>
     /// The one recording AcoustID proposed below the threshold that agrees with the request on
@@ -223,8 +235,11 @@ public sealed class DownloadVerificationService
     /// No CancellationToken parameter, deliberately. There must be no way for a caller who
     /// has already given up to skip verification on a file that is about to enter the library.
     /// </summary>
+    /// <param name="refuseLive">A download that did not ask for a live take: a recording
+    /// MusicBrainz only ever lists on live albums is the wrong file. Off for songs already in the
+    /// library, which may be live on purpose.</param>
     public async Task<VerificationResult> VerifyAsync(string path, string? requestedArtist, string? requestedTitle,
-        string? requestedIsrc = null)
+        string? requestedIsrc = null, bool refuseLive = false)
     {
         if (!RemembersRejections) return VerificationResult.Inconclusive;
 
@@ -235,7 +250,7 @@ public sealed class DownloadVerificationService
         var taggedMatch = isrc is not null && tagged.Contains(isrc);
 
         var verdict = HasApiKey
-            ? await IdentifyAsync(path, requestedArtist, requestedTitle, isrc, taggedMatch)
+            ? await IdentifyAsync(path, requestedArtist, requestedTitle, isrc, taggedMatch, refuseLive)
             : VerificationResult.Inconclusive;
 
         verdict = WithTaggedIsrc(verdict, isrc, taggedMatch);
@@ -273,7 +288,7 @@ public sealed class DownloadVerificationService
     /// The question VerifyAsync asked alone before ISRCs were evidence.
     /// </summary>
     private async Task<VerificationResult> IdentifyAsync(string path, string? requestedArtist, string? requestedTitle,
-        string? isrc, bool taggedMatch)
+        string? isrc, bool taggedMatch, bool refuseLive = false)
     {
         var settings = _options.CurrentValue;
         var fingerprint = await _fingerprinter.FingerprintAsync(path,
@@ -317,6 +332,7 @@ public sealed class DownloadVerificationService
                 Reason = InconclusiveReason.NoEntry,
                 Fingerprint = fingerprint.Fingerprint,
                 DurationSeconds = seconds,
+                Lookup = lookup,
             };
         }
 
@@ -324,7 +340,7 @@ public sealed class DownloadVerificationService
         // source is exactly the split it exists to remove (#48).
         var verdict = Decide(lookup, requestedArtist, requestedTitle,
             settings.EffectiveMinScoreFraction, settings.TagFromMusicBrainz || settings.NameFromMatch,
-            seconds) with
+            seconds, refuseLive) with
         {
             Fingerprint = fingerprint.Fingerprint,
             DurationSeconds = seconds,
@@ -413,10 +429,11 @@ public sealed class DownloadVerificationService
         var agreed = best.Recordings.FirstOrDefault(recording =>
             recordingIsrcs.TryGetValue(recording.RecordingId, out var isrcs) && isrcs.Contains(isrc));
         if (agreed is not null)
-            return Confirm(best.Score, agreed, tagsAuthoritative) with
+            return Confirm(best, agreed, tagsAuthoritative) with
             {
                 Fingerprint = verdict.Fingerprint,
                 DurationSeconds = verdict.DurationSeconds,
+                Lookup = lookup,
                 Evidence = $"MusicBrainz lists the requested ISRC {isrc} on '{agreed.ArtistCredit} - {agreed.Title}'",
             };
 
@@ -438,7 +455,28 @@ public sealed class DownloadVerificationService
     /// above make the orchestration awkward to mock for no benefit.
     /// </summary>
     internal static VerificationResult Decide(AcoustIdLookup lookup, string? requestedArtist,
-        string? requestedTitle, double threshold, bool tagsAuthoritative, int durationSeconds = 0)
+        string? requestedTitle, double threshold, bool tagsAuthoritative, int durationSeconds = 0,
+        bool refuseLive = false) =>
+        DecideCore(lookup, requestedArtist, requestedTitle, threshold, tagsAuthoritative, durationSeconds, refuseLive)
+            with { Lookup = lookup };
+
+    /// <summary>
+    /// Whether MusicBrainz lists this recording only on live albums: every release group it is on
+    /// is typed Live. A studio recording that also appears on a live album is not one; a
+    /// recording with no albums listed is not judged.
+    /// </summary>
+    internal static bool OnlyOnLiveAlbums(AcoustIdRecording recording)
+    {
+        var groups = recording.Releases
+            .GroupBy(release => release.ReleaseGroupId ?? release.GroupTitle ?? release.Title)
+            .Select(group => group.First())
+            .ToList();
+        return groups.Count > 0 && groups.All(release =>
+            release.SecondaryTypes.Any(type => string.Equals(type, "Live", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static VerificationResult DecideCore(AcoustIdLookup lookup, string? requestedArtist,
+        string? requestedTitle, double threshold, bool tagsAuthoritative, int durationSeconds, bool refuseLive = false)
     {
         var qualifying = lookup.Results
             .Where(result => result.Score >= threshold && result.Recordings.Count > 0)
@@ -464,11 +502,30 @@ public sealed class DownloadVerificationService
         // Any, not first: one AcoustID id maps to several MusicBrainz recordings when the
         // same audio ships on an album and a compilation, and demanding the first would
         // reject correct files.
-        var agreed = best.Recordings.FirstOrDefault(recording =>
+        var agreeing = best.Recordings.Where(recording =>
             TrackMatchComparer.TitleMatches(requestedTitle, recording.Title)
-            && TrackMatchComparer.ArtistMatches(requestedArtist, recording.ArtistCredit, recording.Artists));
+            && TrackMatchComparer.ArtistMatches(requestedArtist, recording.ArtistCredit, recording.Artists)).ToList();
+        // The studio recording first, when the same audio is listed under both.
+        var agreed = agreeing.FirstOrDefault(recording => !OnlyOnLiveAlbums(recording)) ?? agreeing.FirstOrDefault();
 
-        if (agreed is not null) return Confirm(best.Score, agreed, tagsAuthoritative);
+        // The right song and artist, but a live take the request never asked for: the same
+        // title and nearly the same length, so only the albums it is on tell it apart.
+        if (agreed is not null && refuseLive && OnlyOnLiveAlbums(agreed))
+            return new VerificationResult
+            {
+                Verdict = VerificationVerdict.Mismatch,
+                Score = best.Score,
+                MatchedTitle = agreed.Title,
+                MatchedArtist = agreed.ArtistCredit,
+                MatchedAlbum = agreed.AlbumTitle,
+                MatchedYear = agreed.Year,
+                RecordingId = agreed.RecordingId,
+                DenyReason = string.IsNullOrEmpty(agreed.AlbumTitle)
+                    ? "is a live recording"
+                    : $"is a live recording, from '{agreed.AlbumTitle}'",
+            };
+
+        if (agreed is not null) return Confirm(best, agreed, tagsAuthoritative);
 
         var actual = best.Recordings[0];
         return new VerificationResult
@@ -484,10 +541,11 @@ public sealed class DownloadVerificationService
         };
     }
 
-    private static VerificationResult Confirm(double score, AcoustIdRecording recording, bool tagsAuthoritative) => new()
+    private static VerificationResult Confirm(AcoustIdResult result, AcoustIdRecording recording, bool tagsAuthoritative) => new()
     {
         Verdict = VerificationVerdict.Confirmed,
-        Score = score,
+        Score = result.Score,
+        AcoustId = result.Id,
         MatchedTitle = recording.Title,
         MatchedArtist = recording.ArtistCredit,
         MatchedAlbum = recording.AlbumTitle,

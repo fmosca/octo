@@ -258,9 +258,11 @@ public sealed class NoticePlaylistWorker : BackgroundService
     /// Only what AcoustID could not place: a track it confidently named as something else was
     /// kept for a reason that is not "AcoustID is missing this". And only the standard 120-second
     /// fingerprint AcoustID's own tools make, so a shortened one never lands beside them.
+    /// Never a library sweep question: its tags were never confirmed by anyone.
     /// </summary>
     internal static bool Submittable(NoticeEntry entry, SoulseekSettings soulseek) =>
-        entry.Cause is InconclusiveReason.NoEntry or InconclusiveReason.BelowThreshold
+        entry.Origin == NoticeOrigin.Download
+        && entry.Cause is InconclusiveReason.NoEntry or InconclusiveReason.BelowThreshold
         && soulseek.FingerprintSeconds == 120
         && entry.DurationSeconds > 0
         && !string.IsNullOrEmpty(entry.Fingerprint);
