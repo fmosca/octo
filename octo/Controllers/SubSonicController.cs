@@ -3763,11 +3763,15 @@ public class SubsonicController : ControllerBase
         var count = int.TryParse(parameters.GetValueOrDefault("count", "20"), out var parsed) ? parsed : 20;
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
 
-        // Library (or unknown) ids: nothing to add. Navidrome's own answer would be empty
-        // too — getTopSongs is an OpenSubsonic extension Subsonic-origin servers do not
-        // answer with rows for.
+        // Library ids are Navidrome's to answer: it knows the artist's plays, and the
+        // relay is also what checks the caller's credentials.
         if (!isExternal)
-            return _responseBuilder.CreateResponse(format, "topSongs", new { });
+        {
+            var relay = await _proxyService.RelaySafeAsync("rest/getTopSongs", parameters);
+            return relay.Success && relay.Body is not null
+                ? File(relay.Body, relay.ContentType ?? $"application/{format}")
+                : _responseBuilder.CreateResponse(format, "topSongs", new { });
+        }
 
         var songs = await _metadataService.TopTracksAsync(provider!, externalId!, count);
         if (songs is null)
