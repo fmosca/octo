@@ -53,6 +53,7 @@ public class SubsonicController : ControllerBase
     private readonly Octo.Services.Library.LibraryActionPlaylistProvisioner? _actionPlaylists;
     private readonly CoverArtService? _coverArtService;
     private readonly CoverArtAggregator? _coverArtAggregator;
+    private readonly CoverResponseCache _coverResponses;
     private readonly ExternalIdRegistry _idRegistry;
     private readonly Octo.Services.Common.TrackAcquisitionQueue _acquisitions;
     private readonly HeartAcquisitionCoordinator _heartAcquisitions;
@@ -117,6 +118,7 @@ public class SubsonicController : ControllerBase
         LastFmService? lastFmService = null,
         CoverArtService? coverArtService = null,
         CoverArtAggregator? coverArtAggregator = null,
+        CoverResponseCache? coverResponses = null,
         LastFmRadioStateStore? radioStateStore = null,
         LastFmRadioRefreshQueue? radioRefreshQueue = null,
         Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null,
@@ -184,6 +186,7 @@ public class SubsonicController : ControllerBase
         _actionPlaylists = actionPlaylists;
         _coverArtService = coverArtService;
         _coverArtAggregator = coverArtAggregator;
+        _coverResponses = coverResponses ?? new CoverResponseCache();
         _logger = logger;
         _radioStateStore = radioStateStore;
         _radioRefreshQueue = radioRefreshQueue;
@@ -2053,6 +2056,7 @@ public class SubsonicController : ControllerBase
     {
         var parameters = await ExtractAllParameters();
         var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
 
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -2128,6 +2132,13 @@ public class SubsonicController : ControllerBase
         var routing = _idRegistry.Lookup(id);
         if (routing != null)
         {
+            // The composed bytes depend on the id and on who is asking (the Octo app
+            // shows its own mark and wants covers plain), not on the requested size:
+            // the response is always the source art at its own dimensions. A repeat —
+            // an app refreshing a list, a re-fetch after the client dropped the
+            // connection — must not re-decode and re-encode the whole picture.
+            if (_coverResponses.ExternalCover(id, plain) is { } composed)
+                return File(composed, "image/jpeg");
             try
             {
                 var raw = _coverArtAggregator != null ? await _coverArtAggregator.GetCoverAsync(routing) : null;
@@ -2139,6 +2150,7 @@ public class SubsonicController : ControllerBase
                 }
 
                 var watermarked = plain ? raw : _coverArtService?.AddOctoBadge(raw) ?? raw;
+                _coverResponses.RememberExternalCover(id, plain, watermarked);
                 return File(watermarked, "image/jpeg");
             }
             catch (Exception ex)
@@ -2178,6 +2190,7 @@ public class SubsonicController : ControllerBase
                 {
                     var imageBytes = await response.Content.ReadAsByteArrayAsync();
                     var watermarked = plain ? imageBytes : _coverArtService?.AddOctoBadge(imageBytes) ?? imageBytes;
+                    _coverResponses.RememberExternalCover(id, plain, watermarked);
                     return File(watermarked, "image/jpeg");
                 }
             }
@@ -2187,8 +2200,24 @@ public class SubsonicController : ControllerBase
         // Local library — proxy to Navidrome unchanged.
         try
         {
+            // The relay is what checks the sign-in: Navidrome validates the caller's
+            // credentials on every call it answers. On a cache hit there is no relayed
+            // call, so the check must happen here first, never skipped in favor of the
+            // cached bytes. Navidrome's verdict is kept for ten minutes (CredentialCheck),
+            // so a repeated fetch does not add a ping per hit — and an outage refuses
+            // nobody here: the fetch below then fails like it always has, into the
+            // placeholder, and an error envelope is what makes a client drop the row.
+            if (await RefuseIfWrongCredentialsAsync(parameters, format) is { } refused) return refused;
+
+            // Navidrome sizes the cover to the size parameter, so the bytes are per
+            // (id, size); the answer for one caller is the answer for any of them —
+            // and its content type rides along, since Navidrome serves PNG as well.
+            if (_coverResponses.RelayedCover(id, RequestedCoverSize(parameters)) is { } cached)
+                return File(cached.Bytes, cached.ContentType);
+
             var result = await _proxyService.RelayAsync("rest/getCoverArt", parameters);
             var contentType = result.ContentType ?? "image/jpeg";
+            _coverResponses.RememberRelayedCover(id, RequestedCoverSize(parameters), result.Body, contentType);
             return File(result.Body, contentType);
         }
         catch (Exception ex)
@@ -3520,6 +3549,23 @@ public class SubsonicController : ControllerBase
         if (!IsSuccessfulSubsonicResponse(check.Body, "json"))
             return _responseBuilder.CreateError("json", 40, "Wrong username or password");
         return null;
+    }
+
+    /// <summary>
+    /// Which callers to refuse outright: null when the verdict is anything but refused.
+    /// Wrong credentials are sent Navidrome's own error; an outage is left to the caller —
+    /// outside content still relays and fails the same way it always has ("an outage
+    /// refuses too" — the comment on <see cref="RefuseUnlessSignedInAsync"/>), and the
+    /// cover path falls through to its placeholder rather than dropping a row.
+    /// </summary>
+    private async Task<IActionResult?> RefuseIfWrongCredentialsAsync(
+        IReadOnlyDictionary<string, string> parameters, string format)
+    {
+        var verdict = await _credentialCheck.CheckAsync(SubsonicCredential.From(parameters),
+            _proxyService, HttpContext.RequestAborted);
+        return verdict == CredentialVerdict.Refused
+            ? _responseBuilder.CreateError(format, 40, "Wrong username or password")
+            : null;
     }
 
     /// <summary>

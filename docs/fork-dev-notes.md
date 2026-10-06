@@ -169,3 +169,46 @@ warming and times out, per the `AlbumTrackCountAsync` comment. Last.fm's API ter
 require attributing their data — the summaries and names come from Last.fm; our
 own iOS app shows them inside octo-served pages, and the sources are named here
 for any future surface.
+
+## getCoverArt caches (2026-10-06)
+
+The memory-incident review left octo serving every getCoverArt with fresh work:
+a registry id re-decoded and re-badged the source art (full RGBA32 decode plus
+re-encode per repeat), and a library id re-relayed the whole body from Navidrome.
+The bursts behind it — an app refreshing a queue or re-fetching after dropping
+the connection — now hit `CoverResponseCache` (Services/CoverArt/, singleton):
+
+- **Badged external art** (registry branch): keyed by id plus plain/badged, not
+  by size — the source art is fetched at a fixed upstream resolution and the
+  response is the same picture regardless of the `size` the client asked at.
+- **Relayed library art** (the local-id branch): keyed by id plus size, because
+  Navidrome sizes the bytes to the request; the answer is caller-independent, so
+  it is cached only after `RefuseUnlessSignedInAsync` has accepted the caller on
+  that very request. A cache hit never skips the sign-in check — Navidrome's
+  verdict is itself memoized for ten minutes (`CredentialCheck`), so a repeat
+  costs no upstream ping either.
+- Bounds: the budget is bytes, and the cache owns the accounting the way the
+  aggregator's does — 128 MiB `SizeLimit`, each entry charged its length,
+  least-recent entries evicted by MemoryCache when an addition would exceed it
+  (probed on net9.0: compaction is synchronous at `Set`, and may overshoot the
+  trim, dropping more than needed). Empty bodies and bodies larger than the
+  whole budget never enter.
+- Expiry: a hit slides the entry's one-hour expiry back, but never past a
+  six-hour absolute floor, so a cover whose art changes underneath is corrected
+  at worst six hours late however hot the entry is. The relayed library entry
+  also carries the content type Navidrome answered under (it serves PNG covers
+  as well as JPEG), so a cached PNG is still labelled PNG.
+- The credential gate on the library branch refuses only wrong credentials.
+  An unreachable Navidrome is NOT an error there: the fetch below fails into
+  the existing unbranded placeholder, exactly as before the cache — an error
+  envelope is what makes a client drop the row, and a placeholder keeps it.
+
+Tests: `CoverResponseCacheTests` (fast: keying, empty and oversized
+rejection, a budget that holds realistic 50 KB covers, trim at the bound)
+and `CoverCacheEndpointTests` (boot, a Navidrome fake that counts
+getCoverArt calls: a repeat relays once, a different size is a different
+response, wrong credentials after a warm cache still get the refusal and no
+second relay, a PNG answer keeps its content type on the cached repeat, and
+an unreachable Navidrome serves the placeholder rather than an error). The
+boot tests assert against the response bytes and content types the fake
+serves per size, which is what would catch a keying slip.

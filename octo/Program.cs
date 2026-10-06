@@ -430,6 +430,9 @@ builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource>(sp =>
     sp.GetRequiredService<Octo.Services.CoverArt.ITunesCoverArtLookup>());
 builder.Services.AddSingleton<Octo.Services.CoverArt.ICoverArtSource, Octo.Services.CoverArt.LastFmCoverArtLookup>();
 builder.Services.AddSingleton<Octo.Services.CoverArt.CoverArtAggregator>();
+// Composed cover responses (badged external art, relayed library art) kept for repeat
+// requests; bounded, see CoverResponseCache.
+builder.Services.AddSingleton<Octo.Services.CoverArt.CoverResponseCache>();
 
 // The download-time cover chain (#51). The Cover Art Archive answers a known MusicBrainz release
 // directly; it redirects to archive.org, which the default handler follows. Short timeout because
