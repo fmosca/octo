@@ -20,3 +20,14 @@ Key conventions:
 - Song-identity rules are shared with the Android app through
   `docs/song-identity-cases.json`: change a rule in the .NET server, the app,
   and that file together. Every case note says why it expects what it does.
+- Tests (this machine hosts production services — run them so they stay quiet):
+  the `Host=Boot` trait marks every test class that boots a
+  `WebApplicationFactory` host. Develop against the fast slice
+  (`dotnet test --filter "Host!=Boot"`), and run the full suite only before
+  pushing, under a resource cap and low priority:
+  `systemd-run --user --scope -p CPUQuota=100% -p MemoryMax=2G -- nice -n 19
+  dotnet test -c Release` (wall ~7 min; uncapped it is ~2.5 min but the burn is
+  multi-core). Note `systemd-run` does not inherit the shell's cwd unless
+  `--scope` is used — pass an absolute project path or use the script wrapper.
+  See `docs/fork-dev-notes.md` §"Test suite and host resources" for why the
+  suite needs this treatment.
