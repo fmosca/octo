@@ -426,6 +426,7 @@ public class NavidromePlaylistApiTests
 /// Where a star counts as a command (#47). With Review on, a star is a command only on a track
 /// Octo asked the person about; everywhere else it is just a rating, relayed and left alone.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class SetRatingScopeTests
 {
     private sealed class OkNavidrome : HttpMessageHandler

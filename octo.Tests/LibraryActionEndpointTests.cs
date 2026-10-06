@@ -17,6 +17,7 @@ namespace Octo.Tests;
 /// libraryAction removes a song through the same executor the Delete playlist uses, checked
 /// against Navidrome with the caller's own credentials. Nothing here goes through a rating.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class LibraryActionEndpointTests
 {
     private const string SongId = "nd-teardrop";

@@ -427,6 +427,7 @@ public class DuplicateNoticeTests
     }
 }
 
+[Trait("Host", "Boot")]
 public class DuplicateSettingsTests
 {
     [Fact]

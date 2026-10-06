@@ -18,6 +18,7 @@ namespace Octo.Tests;
 /// song, run up to as many at once as downloads may, waiting through a Soulseek outage, and the
 /// page's endpoints only for a signed-in admin on the allowed list.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class UpgradeQueueTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "octo-upgrades-" + Guid.NewGuid().ToString("N"));

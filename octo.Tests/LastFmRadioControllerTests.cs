@@ -18,6 +18,7 @@ using Octo.Services.Soulseek;
 
 namespace Octo.Tests;
 
+[Trait("Host", "Boot")]
 public sealed class LastFmRadioControllerTests
 {
     [Theory]
@@ -675,16 +676,19 @@ public sealed class LastFmRadioControllerTests
     }
 }
 
-public sealed class LastFmRadioNativeApiTests
+[Trait("Host", "Boot")]
+public sealed class LastFmRadioNativeApiTests : IClassFixture<RadioWebFactory>
 {
+    private readonly RadioWebFactory _fixture;
+    public LastFmRadioNativeApiTests(RadioWebFactory fixture) => _fixture = fixture;
+
     [Fact]
     public async Task FeishinListDetailAndPagedTracks_HaveNativeShapeHeadersAndOwnership()
     {
-        await using var fixture = new RadioWebFactory();
-        fixture.InstallStation();
-        fixture.Identity.CaptureLogin(Encoding.UTF8.GetBytes(
+        _fixture.InstallStation();
+        _fixture.Identity.CaptureLogin(Encoding.UTF8.GetBytes(
             "{\"token\":\"native-token\",\"username\":\"alice\",\"isAdmin\":false}"));
-        using var client = fixture.CreateClient();
+        using var client = _fixture.CreateClient();
         client.DefaultRequestHeaders.TryAddWithoutValidation("X-Nd-Authorization", "Bearer native-token");
 
         using var listResponse = await client.GetAsync("/api/playlist?_start=0&_end=20");
@@ -692,16 +696,16 @@ public sealed class LastFmRadioNativeApiTests
         Assert.Equal("2", listResponse.Headers.GetValues("X-Total-Count").Single());
         using var list = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
         Assert.Equal(2, list.RootElement.GetArrayLength());
-        var radio = list.RootElement.EnumerateArray().Single(row => row.GetProperty("id").GetString() == fixture.StationId);
+        var radio = list.RootElement.EnumerateArray().Single(row => row.GetProperty("id").GetString() == _fixture.StationId);
         Assert.True(radio.GetProperty("readonly").GetBoolean());
 
-        using var detailResponse = await client.GetAsync($"/api/playlist/{fixture.StationId}");
+        using var detailResponse = await client.GetAsync($"/api/playlist/{_fixture.StationId}");
         detailResponse.EnsureSuccessStatusCode();
         using var detail = JsonDocument.Parse(await detailResponse.Content.ReadAsStringAsync());
         Assert.Equal("Your Mix", detail.RootElement.GetProperty("name").GetString());
 
         using var tracksResponse = await client.GetAsync(
-            $"/api/playlist/{fixture.StationId}/tracks?_start=1&_end=2");
+            $"/api/playlist/{_fixture.StationId}/tracks?_start=1&_end=2");
         tracksResponse.EnsureSuccessStatusCode();
         Assert.Equal("4", tracksResponse.Headers.GetValues("X-Total-Count").Single());
         using var tracks = JsonDocument.Parse(await tracksResponse.Content.ReadAsStringAsync());
@@ -712,10 +716,9 @@ public sealed class LastFmRadioNativeApiTests
     [Fact]
     public async Task NativeReservedMutationIsReadOnlyAndOrdinaryDetailRelays()
     {
-        await using var fixture = new RadioWebFactory();
-        fixture.InstallStation();
-        using var client = fixture.CreateClient();
-        using var mutation = await client.PutAsync($"/api/playlist/{fixture.StationId}",
+        _fixture.InstallStation();
+        using var client = _fixture.CreateClient();
+        using var mutation = await client.PutAsync($"/api/playlist/{_fixture.StationId}",
             new StringContent("{}", Encoding.UTF8, "application/json"));
         Assert.Equal(HttpStatusCode.MethodNotAllowed, mutation.StatusCode);
 
@@ -726,13 +729,13 @@ public sealed class LastFmRadioNativeApiTests
 }
 
 /// <summary>Tune-in start the tests can pin. 0 keeps snapshot order, the pre-rotation behaviour.</summary>
-internal sealed class FixedTuneInSelector : IRadioTuneInSelector
+public sealed class FixedTuneInSelector : IRadioTuneInSelector
 {
     public int Next { get; set; }
     public int Start(int candidateCount) => candidateCount <= 0 ? 0 : Next % candidateCount;
 }
 
-internal sealed class RadioWebFactory : WebApplicationFactory<Program>
+public sealed class RadioWebFactory : WebApplicationFactory<Program>
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "octo-radio-web-" + Guid.NewGuid());
     public RadioUpstreamHandler Handler { get; } = new();
@@ -762,7 +765,11 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     /// /app/config, where a test run has no business writing.</summary>
     public string SettingsPath => Path.Combine(_directory, "settings.json");
 
-    public RadioWebFactory(string explicitFilter = "All", bool exposePlaylists = true,
+    // xUnit class-fixture activation (v2) requires a true parameterless constructor;
+    // variant-configuring tests use the option-bearing one, kept internal.
+    public RadioWebFactory() : this("All", true, true, true, null, false, true) { }
+
+    internal RadioWebFactory(string explicitFilter = "All", bool exposePlaylists = true,
         bool exposeStreams = true, bool enableIcyMetadata = true,
         int? starterPublishTimeoutSeconds = null, bool lastFmScrobbling = false,
         bool lastFmLibraryPlays = true)
@@ -896,7 +903,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
         public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
     }
 
-    internal sealed class BlockingRadioTranscoder : ILastFmRadioAudioTranscoder
+    public sealed class BlockingRadioTranscoder : ILastFmRadioAudioTranscoder
     {
         public int LastBitrateKbps { get; private set; }
         public int FailuresBeforeSuccess { get; set; }
@@ -932,7 +939,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     }
 }
 
-internal sealed class RadioUpstreamHandler : HttpMessageHandler
+public sealed class RadioUpstreamHandler : HttpMessageHandler
 {
     public IReadOnlyList<string> RelayedScrobbleIds { get; private set; } = [];
     public IReadOnlyList<string> RelayedScrobbleTimes { get; private set; } = [];

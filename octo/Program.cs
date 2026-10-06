@@ -25,7 +25,13 @@ builder.Logging.AddCredentialRedaction();
 // The /app/config directory is bind-mounted in docker-compose so settings
 // survive container recreate.
 const string SettingsFilePath = "/app/config/settings.json";
-builder.Configuration.AddJsonFile(SettingsFilePath, optional: true, reloadOnChange: true);
+// Every host construction creates the file watcher for this source. A production
+// process builds the host once, so reload costs nothing there; test suites build
+// dozens, and with inotify instances capped at 128 per user the watchers
+// accumulate until the suite exhausts them mid-run (measured on this repo's
+// octo.Tests, 2026-10-06). Development and staging therefore read the file once.
+builder.Configuration.AddJsonFile(SettingsFilePath, optional: true,
+    reloadOnChange: builder.Environment.IsProduction());
 
 builder.Services.AddControllers();
 builder.Services.AddHttpClient();
@@ -607,3 +613,8 @@ app.UseCors();
 app.MapControllers();
 
 app.Run();
+
+// Makes Program a public type so test fixtures can derive
+// WebApplicationFactory<Program> / subclass it publicly (xUnit class fixtures inject
+// the fixture; the fixture classes must be public).
+public partial class Program { }

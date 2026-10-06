@@ -432,6 +432,7 @@ internal sealed class LengthFixture
 /// What a client actually receives: search3 and a station's getPlaylist, through the real
 /// metadata service, with Navidrome owning none of the songs.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class SongLengthEndpointTests
 {
     [Fact]

@@ -17,6 +17,7 @@ namespace Octo.Tests;
 /// reads JSON, and an XML client used to get Navidrome's own XML back, without the outside part:
 /// half an album. Both formats must now carry the same songs.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class MergedFormatTests
 {
     private static readonly XNamespace Ns = "http://subsonic.org/restapi";

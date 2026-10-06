@@ -576,6 +576,7 @@ public sealed class LastFmScrobbleServiceTests : IDisposable
 }
 
 /// <summary>A played song reaching Octo's /rest/scrobble, all the way to what Last.fm is sent.</summary>
+[Trait("Host", "Boot")]
 public sealed class LastFmScrobbleEndpointTests
 {
     private static string RegisterOutsideSong(RadioWebFactory fixture) =>
@@ -812,6 +813,7 @@ public sealed class LastFmScrobbleEndpointTests
 }
 
 /// <summary>The dashboard's Connect, Finish and Disconnect, and what the admin API shows of them.</summary>
+[Trait("Host", "Boot")]
 public sealed class LastFmScrobbleAdminTests
 {
     [Theory]
@@ -1034,7 +1036,7 @@ internal sealed class ScrobbleAdminFactory : WebApplicationFactory<Program>
 /// Last.fm's web service as far as Octo uses it. Refuses a wrong signature with error 13 as the
 /// real one does, so every call a test sees was signed correctly.
 /// </summary>
-internal sealed class FakeLastFm : HttpMessageHandler
+public sealed class FakeLastFm : HttpMessageHandler
 {
     public const string ApiKey = "0123456789abcdef0123456789abcdef";
     public const string Secret = "s3cr3t";

@@ -21,6 +21,7 @@ namespace Octo.Tests;
 /// A star or a stream of a song from outside the library never reaches Navidrome, so Octo
 /// checks the sign-in itself before it fetches or plays anything for it.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class OutsideSongSignInTests
 {
     /// <summary>Navidrome as these calls need it: a ping that accepts the token "good" or the

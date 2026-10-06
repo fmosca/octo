@@ -18,6 +18,7 @@ namespace Octo.Tests;
 /// so Navidrome saw ONE id and refused every savePlayQueueByIndex. These go through the whole
 /// app to a fake Navidrome and check what it received.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class RelayedRepeatsTests
 {
     /// <summary>One request as Navidrome saw it: its query, and its form body if any.</summary>

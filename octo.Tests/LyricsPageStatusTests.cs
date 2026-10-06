@@ -13,6 +13,7 @@ namespace Octo.Tests;
 /// all (two properties named "busy"), so the page showed nothing while a scan ran; the cover
 /// page's status is asked too, as the same kind of page.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class LyricsPageStatusTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "octo-lyrics-status-" + Guid.NewGuid().ToString("N"));
@@ -27,6 +28,9 @@ public sealed class LyricsPageStatusTests : IDisposable
     private static WebApplicationFactory<Program> Factory(LyricsLibraryStore store) =>
         new AdminWebFactory().WithWebHostBuilder(builder => builder.ConfigureServices(services =>
         {
+            // Program's background workers (including the lyrics library sweep this
+            // API reports on) come from state files; the store under test is injected.
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>();
             // In memory: the real ones live beside the settings file.
             services.RemoveAll<LyricsLibraryStore>();
             services.AddSingleton(store);

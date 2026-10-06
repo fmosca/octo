@@ -13,6 +13,7 @@ namespace Octo.Tests;
 /// such a listener learned nothing from a scrobble and shared one search order with every
 /// other key user.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class RequestIdentityTests
 {
     private static string RegisterOutsideSong(RadioWebFactory fixture) =>

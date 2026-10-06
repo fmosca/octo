@@ -36,12 +36,58 @@ so a fresh session knows where each thing belongs.
 The octo service lives in `files/opt/fmosca.dev/docker-compose.yml` (services
 `octo` and `octo-ytdlp-shim`, both `ghcr.io/fmosca/...` images, no host port,
 Authelia via Caddy in front), deployed by playbooks `06-docker-compose-file.yml`
-and `09-docker-compose-run.yml`. Until 2026-10-05 the shim was *vendored* into
+and `09-docker-compose-run.yml`. The compose service carries `mem_limit: 1g`
+(since 2026-10-06) — .NET Server GC plus a day of cache growth reached ~450 MiB
+on a host that otherwise runs with a full swap, where unbounded growth turns any
+leak into machine-wide pressure; the VictoriaMetrics rule `OctoMemoryTrend`
+(alerts.yaml) warns when octo's working set would cross 95% of that cap within
+6 hours. Until 2026-10-05 the shim was *vendored* into
 that repo at `files/opt/fmosca.dev/yt-dlp-shim/` and built on the deploy host;
 the vendoring was retired when CI started publishing the shim image, because
 the two copies had already drifted twice (the loudness worker existed only in
 the vendored copy; the live-ranking fix only in the fork). The single source of
 truth for shim code is now this repo's `yt-dlp-shim/`.
+
+## Test suite and host resources (2026-10-06)
+
+`octo.Tests` runs 3,460 tests, and the boot-flavoured ones each used to build
+and dispose a full `WebApplicationFactory<Program>` host — a real ASP.NET Core
+container with the DI tree of the production app. Three measured consequences:
+
+- **CPU:** the dominant cost is JIT-compiling a fresh host per test; xUnit's
+  default parallelism (all collections at once) turned that into a sustained
+  multi-core burn on the 4-core homelab box. `octo.Tests/xunit.runner.json`
+  (new, copied to output by the csproj) caps `maxParallelThreads` at 2.
+- **Memory:** concurrent host boots peaked at ~1.2–1.5 GiB extra RSS and drove
+  the saturated host into swap. Run capped slices when developing locally:
+  `systemd-run --user --scope -p CPUQuota=100% -p MemoryMax=1G -- nice -n 19
+  dotnet test ...`, or run a filtered subset. CI runners are unaffected.
+- **inotify:** every boot creates watchers that are never fully released
+  (upstream dotnet/runtime#115557 — `HostBuilder`'s `SetBasePath`-created
+  `PhysicalFileProvider` is not disposed; fix merged for a later 9.0.x, and
+  `WebApplicationFactory` inherits the path). Against the 128-instance
+  per-user cap, a full run exhausted instances mid-suite (ENOSPC) and failed
+  unrelated tests. Two app-side mitigations:
+  - `octo/Program.cs` gates the settings-file `reloadOnChange` watcher on
+    `IsProduction()` — a production process builds the host once, so nothing
+    changes there; test and dev hosts read `/app/config/settings.json` once.
+  - Boot-heavy test classes that proved stateless share one host via
+    `IClassFixture<>` (`AdminContractTests`: 22 tests on one boot;
+    `LastFmRadioNativeApiTests`: 2) instead of one boot per test.
+  - Parameterized factory families (per-test settings variants, counter or
+    request-log asserts — `Navidrome.Pings`, `Only("/rest/...")`,
+    `Metadata.Verify(Times.Once)`) deliberately keep per-test boots: their
+    asserts assume virgin state, and sharing would trade reliability for
+    speed. xUnit v2 fixture activation requires a true parameterless
+    constructor — default arguments on an optioned one do not count
+    (`RadioWebFactory` carries a `public` parameterless delegating to the
+    `internal` optioned one for this reason).
+- `Program` is now `public partial class Program { }` at the foot of
+  `octo/Program.cs`: fixture classes must be `public`, and `public sealed class
+  X : WebApplicationFactory<Program>` requires a public base type. CI's
+  `DOTNET_HOST_FACTORY_RESOLVER_DEFAULT_TIMEOUT_IN_SECONDS` stays.
+- `AdminWebFactory` and friends write settings into their own temp directories,
+  not `/app/config`; the gating above does not affect what they assert.
 
 ## Debugging against the running server
 

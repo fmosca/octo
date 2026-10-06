@@ -22,6 +22,7 @@ using Octo.Services.Subsonic;
 
 namespace Octo.Tests;
 
+[Trait("Host", "Boot")]
 public sealed class SyncCatalogTests
 {
     // -------------------------------------------------------------------------------

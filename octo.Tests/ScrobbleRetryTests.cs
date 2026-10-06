@@ -4,6 +4,7 @@ namespace Octo.Tests;
 /// A finished play sent twice is learned from once, but only once something did learn from it.
 /// When the song could not be looked up the first time, the client's retry is the play.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class ScrobbleRetryTests
 {
     [Fact]

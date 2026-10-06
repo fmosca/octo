@@ -393,6 +393,7 @@ public class GeneratedPlaylistResponseTests
 }
 
 /// <summary>Mixes through the Subsonic API, as a client sees them.</summary>
+[Trait("Host", "Boot")]
 public sealed class GeneratedPlaylistControllerTests
 {
     private sealed class MixWebFactory : Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>

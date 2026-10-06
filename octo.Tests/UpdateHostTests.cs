@@ -162,6 +162,7 @@ public sealed class UpdateHostTests : IDisposable
 }
 
 /// <summary>The update card's API, with a release check that knows a newer release.</summary>
+[Trait("Host", "Boot")]
 public sealed class UpdateEndpointTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "octo-update-api-" + Guid.NewGuid());
@@ -195,6 +196,9 @@ public sealed class UpdateEndpointTests : IDisposable
             }));
             builder.ConfigureServices(services =>
             {
+                // The real Program registers a dozen background workers; none of them
+                // belongs in a test that checks the update card's API contract.
+                services.RemoveAll<IHostedService>();
                 services.RemoveAll<ReleaseCheck>();
                 services.AddSingleton(check);
                 services.RemoveAll<UpdateHost>();

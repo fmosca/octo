@@ -19,6 +19,7 @@ namespace Octo.Tests;
 /// Navidrome with the caller's own credentials, scoped to what that caller hearted, and in the
 /// exact JSON shape the app parses. Plus the extension that tells the app to ask at all.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class AcquisitionEndpointTests
 {
     /// <summary>Navidrome as far as these calls need it: a ping that accepts the token

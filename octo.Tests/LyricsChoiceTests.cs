@@ -23,6 +23,7 @@ namespace Octo.Tests;
 /// credentials checked against Navidrome, strict clients answered as before, the extensions
 /// listed truthfully, and the library job stopping and resuming where it was.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class LyricsChoiceTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "octo-lyrics-choice-" + Guid.NewGuid().ToString("N"));

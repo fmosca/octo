@@ -2,6 +2,7 @@ using System.Net;
 using System.Reflection;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Octo.Controllers;
 using Octo.Middleware;
 using Octo.Models.Settings;
@@ -17,8 +18,11 @@ namespace Octo.Tests;
 /// the latest instance. Checking every settings property by reflection makes the next one fail
 /// here instead of on someone's server.
 /// </summary>
-public class AdminContractTests
+[Trait("Host", "Boot")]
+public class AdminContractTests : IClassFixture<AdminWebFactory>
 {
+    private readonly AdminWebFactory _factory;
+    public AdminContractTests(AdminWebFactory factory) => _factory = factory;
     private static readonly (string Section, Type Type)[] Sections =
     [
         ("Subsonic", typeof(SubsonicSettings)),
@@ -56,8 +60,7 @@ public class AdminContractTests
     [Fact]
     public async Task GetSettings_ExposesEverySettingsProperty()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         var document = JsonDocument.Parse(await client.GetStringAsync("/api/admin/settings")).RootElement;
 
@@ -67,8 +70,7 @@ public class AdminContractTests
     [Fact]
     public async Task GetRawConfig_ExposesEverySettingsProperty()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         var document = JsonDocument.Parse(await client.GetStringAsync("/api/admin/raw-config")).RootElement;
 
@@ -82,8 +84,7 @@ public class AdminContractTests
     [InlineData("/api/admin/raw-config")]
     public async Task AdminPassword_IsNeverReturned(string url)
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         var body = await client.GetStringAsync(url);
 
@@ -97,8 +98,7 @@ public class AdminContractTests
     [Fact]
     public async Task TestHost_PointsAtAClosedPortNotARealServer()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         var document = JsonDocument.Parse(await client.GetStringAsync("/api/admin/settings")).RootElement;
 
@@ -108,8 +108,7 @@ public class AdminContractTests
     [Fact]
     public async Task Settings_ReportRestartPendingAsAList()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         var meta = JsonDocument.Parse(await client.GetStringAsync("/api/admin/settings"))
             .RootElement.GetProperty("_meta");
@@ -123,8 +122,7 @@ public class AdminContractTests
     [Fact]
     public async Task AdminWrite_WithoutTheHeader_IsRefused()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         using var response = await client.PostAsync("/api/admin/soulseek/rejected-peers/clear", null);
 
@@ -134,8 +132,7 @@ public class AdminContractTests
     [Fact]
     public async Task AdminRead_FromAnotherOrigin_CarriesNoCorsHeaders()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Get, "/api/admin/genre/presets");
         request.Headers.Add("Origin", "http://evil.example");
 
@@ -148,8 +145,7 @@ public class AdminContractTests
     [Fact]
     public async Task AdminPreflight_IsNotApproved()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Options, "/api/admin/settings");
         request.Headers.Add("Origin", "http://evil.example");
         request.Headers.Add("Access-Control-Request-Method", "POST");
@@ -166,8 +162,7 @@ public class AdminContractTests
     [Fact]
     public async Task SubsonicRoute_FromAnotherOrigin_KeepsCors()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Get, "/rest/ping.view?u=a&p=b&v=1.16.1&c=test&f=json");
         request.Headers.Add("Origin", "http://player.example");
 
@@ -263,9 +258,8 @@ public class AdminContractTests
     [InlineData("/etc/passwd")]
     public async Task TagPreview_PathOutsideTheMusicFolder_IsRefused(string path)
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
-        var token = factory.Services.GetRequiredService<Octo.Services.Admin.BrowseSessionStore>().Create("admin");
+        using var client = _factory.CreateClient();
+        var token = _factory.Services.GetRequiredService<Octo.Services.Admin.BrowseSessionStore>().Create("admin");
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/tags/preview");
         request.Headers.Add(AdminRequestGuard.HeaderName, "1");
         request.Headers.Add("X-Octo-Browse-Token", token);
@@ -280,9 +274,8 @@ public class AdminContractTests
     [Fact]
     public async Task TagPreview_NeitherAPathNorAName_IsRefused()
     {
-        using var factory = new AdminWebFactory();
-        using var client = factory.CreateClient();
-        var token = factory.Services.GetRequiredService<Octo.Services.Admin.BrowseSessionStore>().Create("admin");
+        using var client = _factory.CreateClient();
+        var token = _factory.Services.GetRequiredService<Octo.Services.Admin.BrowseSessionStore>().Create("admin");
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/tags/preview");
         request.Headers.Add(AdminRequestGuard.HeaderName, "1");
         request.Headers.Add("X-Octo-Browse-Token", token);

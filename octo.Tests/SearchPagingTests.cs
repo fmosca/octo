@@ -22,6 +22,7 @@ namespace Octo.Tests;
 /// is the library's best matches, then outside songs; each later page has to carry on from
 /// there, where it used to go straight to Navidrome and lose every outside song past page one.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class SearchPagingTests
 {
     // The library has 30 matches and Last.fm 25 outside songs, one of which (the third) is a

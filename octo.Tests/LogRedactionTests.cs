@@ -17,6 +17,7 @@ namespace Octo.Tests;
 /// apiKey are worse, so each is sent on its own and the whole captured log is searched for it:
 /// ASP.NET's request lines, HttpClient's lines and a line of Octo's own.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class LogRedactionTests
 {
     public static TheoryData<string> SecretNames => new() { "t", "s", "p", "apiKey", "token", "api_key", "client", "sk", "api_sig", "T", "APIKEY", "Token", "API_KEY", "Client", "user", "User" };

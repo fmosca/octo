@@ -213,6 +213,7 @@ public class GenreBackfillJournalTests
 /// library cannot be the second unauthenticated destructive surface. Every backfill endpoint
 /// is gated on a verified Navidrome admin session.
 /// </summary>
+[Trait("Host", "Boot")]
 public class GenreBackfillEndpointTests
 {
     public static TheoryData<string, string> Endpoints => new()
@@ -283,7 +284,7 @@ public class GenreBackfillEndpointTests
     }
 }
 
-internal sealed class AdminWebFactory : WebApplicationFactory<Program>
+public sealed class AdminWebFactory : WebApplicationFactory<Program>
 {
     private readonly string _directory =
         Path.Combine(Path.GetTempPath(), "octo-admin-web-" + Guid.NewGuid());
@@ -312,6 +313,15 @@ internal sealed class AdminWebFactory : WebApplicationFactory<Program>
         });
         return base.CreateHost(builder);
     }
+
+    // Program's background workers are stripped here, on the web host's service
+    // collection (ConfigureWebHost runs before GenericWebHostService is added, so
+    // removing IHostedService on the generic host would kill the TestServer itself).
+    // None of the auth/contract assertions exercise a worker, and the sweep workers
+    // write state files behind the tests' backs.
+    protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder) =>
+        builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>());
 
     protected override void Dispose(bool disposing)
     {

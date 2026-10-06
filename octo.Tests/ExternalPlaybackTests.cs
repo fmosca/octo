@@ -12,6 +12,7 @@ using Octo.Services.Local;
 
 namespace Octo.Tests;
 
+[Trait("Host", "Boot")]
 public sealed class ExternalPlaybackTests
 {
     [Fact]

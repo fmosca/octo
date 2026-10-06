@@ -19,6 +19,7 @@ namespace Octo.Tests;
 /// Lyrics (#52): synced before plain, NetEase's credit block removed, a busy service never
 /// remembered as "no lyrics", and a file that already has lyrics left alone.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class LyricsTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "octo-lyrics-" + Guid.NewGuid().ToString("N"));

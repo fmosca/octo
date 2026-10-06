@@ -21,6 +21,7 @@ namespace Octo.Tests;
 /// the relay runs first, and the catalog answers only when Navidrome returned no
 /// rows for that name. Arpeggi's id form is not affected by the precedence.
 /// </summary>
+[Trait("Host", "Boot")]
 public sealed class TopSongsByNameTests
 {
     private sealed class UpstreamHandler : HttpMessageHandler
