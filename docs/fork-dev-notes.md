@@ -241,9 +241,10 @@ and 8.7 MB with only what the line needs. On the deployed instance (image built
 from `fc7573c`), the live heap fell from 129.2 MB to 42.2 MB and the parsed
 faces from nine to three — the three Inter cuts — with the boot warmup and every
 station and mix cover drawn since. The pre-fix image (`188a78f`, still on disk)
-and the new one, given the same state and the same `getCoverArt` request, return
-byte-identical JPEGs for all seven station covers this instance has: the
-fallbacks were parsed, never consulted.
+and the new one, each on its own copy of one frozen `/app/config` and answering
+with a cold cache, return byte-identical JPEGs for the same `getCoverArt`
+request on all seven station covers this instance has: the fallbacks were
+parsed, never consulted.
 
 `For` now returns only the families the line actually needs:
 
