@@ -225,12 +225,19 @@ ends: a Latin line with nothing attached costs 3.6 MB (the primary's own
 parse), the same line with six families attached costs +108.6 MB, and the
 line measured afterwards costs +0.0 MB because everything was already parsed.
 So octo's first cover — the boot `Warm()` draw, whose name is Latin — parsed
-all nine faces and held ~120 MB of glyph tables for the life of the process
-(the finding behind the 2026-10-07 GC work), on a library where every name
+all nine faces and held the glyph tables for the life of the process (the
+finding behind the 2026-10-07 GC work), on a library where every name
 that reaches a cover is Inter-covered: the stations are `Your Mix`,
 `Discovery Mix`, `<artist> Radio` and `<tag> Radio`, mixes are named from
 genre and decade tags, and none of the 2,068 artists or the 188 genres that
 clear the mix threshold needs a fallback font.
+
+Measured against the app's own assembly, one Latin line at title size:
+132.0 MB allocated and 111.9 MB retained with the whole installed list
+attached, 12.6 MB and 8.7 MB with only what the line needs. On the deployed
+instance (image built from `fc7573c`), the live heap fell from 129.2 MB to
+42.2 MB and the parsed faces from nine to three — the three Inter cuts —
+with the boot warmup and every station and mix cover drawn since.
 
 `For` now returns only the families the line actually needs:
 
