@@ -215,9 +215,11 @@ serves per size, which is what would catch a keying slip.
 
 ## Cover fonts load only when a name needs them (2026-10-07)
 
-`CoverFonts.For` sets every line of a drawn cover and used to attach the whole
+`CoverFonts.For` sets every line of a drawn cover and used to hand the whole
 installed fallback list (`Fallbacks`: the four Noto CJK faces, DejaVu Sans and
-Symbola in this image) to the `RichTextOptions` of every measured line.
+Symbola in this image) to both the `TextOptions` of every measured line and the
+`RichTextOptions` of every drawn one, since the one list in `For`'s result
+feeds `Advance` and `Paint` alike.
 SixLabors.Fonts parses a family in full the first time a line that needs it is
 measured — and it parses every *attached* family even when the text is Latin.
 A probe against SixLabors.Fonts 2.1.3 inside the octo image measured both
@@ -232,12 +234,16 @@ that reaches a cover is Inter-covered: the stations are `Your Mix`,
 genre and decade tags, and none of the 2,068 artists or the 188 genres that
 clear the mix threshold needs a fallback font.
 
-Measured against the app's own assembly, one Latin line at title size:
-132.0 MB allocated and 111.9 MB retained with the whole installed list
-attached, 12.6 MB and 8.7 MB with only what the line needs. On the deployed
-instance (image built from `fc7573c`), the live heap fell from 129.2 MB to
-42.2 MB and the parsed faces from nine to three — the three Inter cuts —
-with the boot warmup and every station and mix cover drawn since.
+Measured with the app's own measure call (`CoverFonts.For` into `TextOptions`
+for `TextMeasurer.MeasureAdvance`), one Latin line at title size: 132.0 MB
+allocated and 111.9 MB retained with the whole installed list attached, 12.6 MB
+and 8.7 MB with only what the line needs. On the deployed instance (image built
+from `fc7573c`), the live heap fell from 129.2 MB to 42.2 MB and the parsed
+faces from nine to three — the three Inter cuts — with the boot warmup and every
+station and mix cover drawn since. The pre-fix image (`188a78f`, still on disk)
+and the new one, given the same state and the same `getCoverArt` request, return
+byte-identical JPEGs for all seven station covers this instance has: the
+fallbacks were parsed, never consulted.
 
 `For` now returns only the families the line actually needs:
 
