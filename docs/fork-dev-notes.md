@@ -212,3 +212,54 @@ second relay, a PNG answer keeps its content type on the cached repeat, and
 an unreachable Navidrome serves the placeholder rather than an error). The
 boot tests assert against the response bytes and content types the fake
 serves per size, which is what would catch a keying slip.
+
+## Cover fonts load only when a name needs them (2026-10-07)
+
+`CoverFonts.For` sets every line of a drawn cover and used to attach the whole
+installed fallback list (`Fallbacks`: the four Noto CJK faces, DejaVu Sans and
+Symbola in this image) to the `RichTextOptions` of every measured line.
+SixLabors.Fonts parses a family in full the first time a line that needs it is
+measured — and it parses every *attached* family even when the text is Latin.
+A probe against SixLabors.Fonts 2.1.3 inside the octo image measured both
+ends: a Latin line with nothing attached costs 3.6 MB (the primary's own
+parse), the same line with six families attached costs +108.6 MB, and the
+line measured afterwards costs +0.0 MB because everything was already parsed.
+So octo's first cover — the boot `Warm()` draw, whose name is Latin — parsed
+all nine faces and held ~120 MB of glyph tables for the life of the process
+(the finding behind the 2026-10-07 GC work), on a library where every name
+that reaches a cover is Inter-covered: the stations are `Your Mix`,
+`Discovery Mix`, `<artist> Radio` and `<tag> Radio`, mixes are named from
+genre and decade tags, and none of the 2,068 artists or the 188 genres that
+clear the mix threshold needs a fallback font.
+
+`For` now returns only the families the line actually needs:
+
+- The leading family is still the installed one covering most of the letters
+  Inter lacks, but the scan stops at the first family that covers **all** of
+  them, so a Japanese name parses one face, not four.
+- `Behind` collects the characters of the text the leading family cannot draw
+  and attaches one family for each, in the design's order; a character that is
+  not a letter asks Symbola and DejaVu Sans first (the fonts installed for
+  symbols and emoji), and a character an already attached family draws
+  attaches nothing. The question parses the font, so the order is the cost: a
+  Latin name asks no installed family at all, and a name nothing installed can
+  draw asks each once, as it did before.
+- When a non-Inter family leads, Inter stays first behind it, so the Latin in
+  a Japanese name still sets in Inter.
+
+The `Choices` cache holds the per-(text, weight) verdicts, so the asking
+happens once per distinct name. `Warm()` still draws its one cover at boot;
+that cover now parses Inter and nothing else, and what stays resident is the
+design's own three Inter cuts rather than Inter plus six installed faces.
+
+Tests: `NamesInterDraws_AttachNoOtherFont` (a Latin name attaches nothing and
+is set in Inter; an emoji attaches at most one family, and that family holds
+the emoji) and `UnicodeNames_DrawTheirLetters`, which now asserts the
+*returned* chain draws every character of the name, not that some installed
+font somewhere would.
+
+Known bound, left as-is: the fallback list still leads with the CJK faces, so
+the first Hebrew or Arabic name parses the four CJK faces before DejaVu
+answers — once per process, and only on an image with no Noto Hebrew or
+Arabic. Reordering by the missing script is the follow-up if that ever
+matters.

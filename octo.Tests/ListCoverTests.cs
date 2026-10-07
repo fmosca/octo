@@ -694,13 +694,13 @@ public class ListCoverTests : IDisposable
     {
         var fonts = CoverFonts.Fallbacks.Count;
         if (fonts == 0) return;
-        var (font, _) = CoverFonts.For(name, 600, 96);
+        var (font, behind) = CoverFonts.For(name, 600, 96);
         var hasLetters = name.EnumerateRunes().Any(System.Text.Rune.IsLetter);
         if (hasLetters) Assert.False(font.Family.Equals(CoverFonts.ForWeight(600)), $"{name} is set in Inter");
         foreach (var rune in name.EnumerateRunes())
         {
             var cp = new SixLabors.Fonts.Unicode.CodePoint(rune.Value);
-            var found = CoverFonts.Has(font, cp) || CoverFonts.Fallbacks.Any(f => CoverFonts.Has(f.CreateFont(96), cp));
+            var found = CoverFonts.Has(font, cp) || behind.Any(f => CoverFonts.Has(f.CreateFont(96), cp));
             Assert.True(found, $"no installed font draws U+{rune.Value:X4}");
         }
 
@@ -713,6 +713,27 @@ public class ListCoverTests : IDisposable
         for (var x = (int)box[0]; x < (int)box[2]; x++)
             if (image[x, y] is { R: > 235, G: > 235, B: > 235 }) white++;
         Assert.True(white > 1500, $"{name}: only {white} white pixels in the name");
+    }
+
+    /// <summary>
+    /// A name Inter draws whole attaches nothing behind it: an attached family is parsed in full
+    /// the first time its line is measured, and a Latin name used to carry every installed family
+    /// (~120 MB for the boot warmup alone). A symbol takes the one family that holds it and no
+    /// others.
+    /// </summary>
+    [Fact]
+    public void NamesInterDraws_AttachNoOtherFont()
+    {
+        var (latin, behind) = CoverFonts.For("Warm Radio", 600, 96);
+        Assert.True(latin.Family.Equals(CoverFonts.ForWeight(600)), "a Latin name is not set in Inter");
+        Assert.Empty(behind);
+
+        if (CoverFonts.Fallbacks.Count == 0) return;
+        var (_, forEmoji) = CoverFonts.For("Your Mix \U0001F534", 600, 96);
+        Assert.True(forEmoji.Count <= 1, $"{forEmoji.Count} families attached for one emoji");
+        Assert.All(forEmoji, family => Assert.True(
+            CoverFonts.Has(family.CreateFont(96), new SixLabors.Fonts.Unicode.CodePoint(0x1F534)),
+            $"{family.Name} is attached but does not hold the emoji"));
     }
 
     // ------------------------------------------------------------ contrast
