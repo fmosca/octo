@@ -1,5 +1,5 @@
 """
-yt-dlp shim — a tiny Flask service that wraps yt-dlp behind two endpoints.
+yt-dlp shim — a tiny Flask service that wraps yt-dlp behind HTTP.
 
 Why this is a separate container instead of in-process inside Octo:
   Spawning yt-dlp from .NET via System.Diagnostics.Process inside an LXC
@@ -14,6 +14,12 @@ Endpoints:
       the SAME extraction, so a later /stream is a deterministic cache hit.
       With a hint it picks the closest-length of several flat candidates
       (cheap, no per-video extraction), then resolves the winner's URL.
+
+  GET /candidates?q=<query>[&limit=<n>]
+      A JSON array of flat hits, in yt-dlp's own ytsearchN order, not
+      ranked: [{video_id, title, duration, channel}, ...]. duration is
+      whole seconds, or null. limit defaults to 5 and is capped at 10.
+      A caller that wants one closest-length hit still uses /search.
 
   GET /stream?id=<videoId>
       Resolves the best-audio URL (cached), then proxies bytes from
@@ -343,11 +349,60 @@ def search():
     return jsonify(**_with_loudness(dict(payload)))
 
 
+# spotify-import re-ranks this list itself. Octo's /search stays one object.
+_CANDIDATES_DEFAULT_LIMIT = 5
+_CANDIDATES_MAX_LIMIT = 10
+
+
+def _candidates_limit(raw: str) -> int:
+    raw = raw.strip()
+    if not raw:
+        return _CANDIDATES_DEFAULT_LIMIT
+    # isdigit rejects a sign, a fraction and any trailing junk. 0 is not a search.
+    if not raw.isdigit() or int(raw) < 1:
+        abort(400, "invalid limit")
+    return min(int(raw), _CANDIDATES_MAX_LIMIT)
+
+
+@app.get("/candidates")
+def candidates():
+    q = request.args.get("q", "").strip()
+    if not q:
+        abort(400, "missing q")
+    limit = _candidates_limit(request.args.get("limit", ""))
+
+    rows = _flat_search(q, limit, _is_bg())
+    if rows is None:
+        return jsonify(error="search_failed"), 502
+    return jsonify([_candidate_row(row) for row in rows[:limit]])
+
+
 def _payload_from(data: dict) -> dict:
     return {
         "video_id": data.get("id"),
         "title": data.get("title"),
         "duration": data.get("duration"),
+        "channel": data.get("channel"),
+    }
+
+
+def _duration_seconds(value) -> Optional[int]:
+    """Seconds, as an int. Missing or not a finite number is null.
+
+    bool is an int in Python, and it is not a duration.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return int(value)
+
+
+def _candidate_row(data: dict) -> dict:
+    return {
+        "video_id": data.get("id"),
+        "title": data.get("title"),
+        "duration": _duration_seconds(data.get("duration")),
         "channel": data.get("channel"),
     }
 
@@ -405,6 +460,37 @@ def _rank_by_length(candidates: list, q: str, duration_hint: int) -> list:
     return sorted(candidates, key=key)
 
 
+def _flat_search(q: str, n: int, bg: bool = False) -> Optional[list]:
+    """ytsearchN flat rows, in the order yt-dlp printed them.
+
+    None means the run failed. An empty list means it returned nothing.
+    This does not rank: /search sorts when a duration hint is present,
+    /candidates returns this order unchanged.
+    """
+    out = _run(
+        [
+            f"ytsearch{n}:{q}",
+            "--flat-playlist",
+            "--print", "%(.{id,title,duration,channel})j",
+        ],
+        timeout=20,
+        label=f"search{n}",
+        bg=bg,
+    )
+    if out is None:
+        return None
+    rows = []
+    for ln in out.strip().split("\n"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            rows.append(json.loads(ln))
+        except json.JSONDecodeError:
+            pass
+    return rows
+
+
 def _search_with_hint(q: str, duration_hint: int, bg: bool = False) -> Optional[dict]:
     """Duration hint present: pick the closest-length of 5 flat candidates
     (cheap, no per-video extraction), then resolve the winner's URL once.
@@ -412,27 +498,9 @@ def _search_with_hint(q: str, duration_hint: int, bg: bool = False) -> Optional[
     Note this path costs TWO gated yt-dlp runs per track (search5 then resolve),
     where the no-hint path gets both from one extraction.
     """
-    out = _run(
-        [
-            f"ytsearch5:{q}",
-            "--flat-playlist",
-            "--print", "%(.{id,title,duration,channel})j",
-        ],
-        timeout=20,
-        label="search5",
-        bg=bg,
-    )
-    if out is None:
+    candidates = _flat_search(q, 5, bg)
+    if candidates is None:
         return None
-    candidates = []
-    for ln in out.strip().split("\n"):
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            candidates.append(json.loads(ln))
-        except json.JSONDecodeError:
-            pass
     if not candidates:
         return {}
     # Closest duration wins, live takes last; candidates without a duration sort
