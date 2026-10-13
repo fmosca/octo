@@ -1203,6 +1203,41 @@ def stream():
     return Response(generator(), headers=headers, status=response_status)
 
 
+# Substrings of yt-dlp's stderr that mean this video cannot be fetched.
+# A hit is HTTP 404 video_unavailable; every other failure stays 502.
+#
+# yt-dlp 2026.08.19, yt_dlp/extractor/youtube/_video.py (the same wording
+# is on master 89734124, 2026-10-10). The extractor forwards YouTube's
+# playability reason, and its tests record these as the error text:
+#   skip "Video unavailable"
+#   skip "Private video"
+#   skip "This video has been removed for violating YouTube's policy on hate speech."
+#   skip "This video is not available."
+# Age gating matches "confirm your age" (_is_agegated, AGE_GATE_REASONS).
+# A country block is the subreason passed to raise_geo_restricted, which
+# starts "The uploader has not made this video available in your country".
+# Membership is YouTube's "members-only content" reason; the extractor's
+# own badge literal in youtube/_base.py is "members only". A copyright
+# block is YouTube's "blocked it in your country", which raise_no_formats
+# forwards as the reason rather than hard-coding. "Your IP is likely being
+# blocked by Youtube" is a broken session, not a dead video, and is absent
+# so it stays 502. "age-restricted" is also an AGE_GATE_REASONS entry, but
+# the extractor prints it while some formats may still download, so a later
+# unrelated failure would be called unavailable; "confirm your age" is the
+# reason text for a video that cannot be fetched.
+_VIDEO_UNAVAILABLE_MESSAGES = (
+    "Video unavailable",
+    "Private video",
+    "This video has been removed",
+    "This video is not available",
+    "confirm your age",
+    "members-only",
+    "members only",
+    "The uploader has not made this video available in your country",
+    "blocked it in your country",
+)
+
+
 def _download_dest(dest: str) -> str:
     """Resolve dest and refuse a path that lands outside the download root.
 
@@ -1226,7 +1261,10 @@ def download():
     """Download a YouTube video as a tagged MP3 to <dest>.mp3.
 
     GET /download?id=<videoId>&dest=<path_no_ext>[&artist=<a>&title=<t>]
-    Returns {"path": "<dest>.mp3"} on success.
+    Returns {"path": "<dest>.mp3"} on success. An unavailable, private,
+    removed, or blocked video is 404 {"error": "video_unavailable",
+    "expected": path}. Any other yt-dlp failure is 502
+    {"error": "download_failed", "expected": path}.
     """
     video_id = request.args.get("id", "").strip()
     dest = request.args.get("dest", "").strip()
@@ -1267,19 +1305,23 @@ def download():
         return _run(ytdlp_args, timeout=300, label="download", bg=True, capture=True)
 
     cp = _attempt()
+    stderr = (cp.stderr if cp is not None else "") or ""
     if cp is None or cp.returncode != 0 or not os.path.exists(path):
         # Downloads can be the only thing exercising YouTube on an instance with
         # DownloadSource=YouTube, so this path needs its own rung of the ladder
         # rather than waiting for a play to notice the binary went stale. Gated
         # on a 403 in stderr so an unavailable or private video never triggers a
-        # binary fetch.
-        stderr = (cp.stderr if cp is not None else "") or ""
+        # binary fetch. This stays ahead of the unavailable classification: a
+        # stale binary can mention a video that the updated one can fetch.
         if "403" in stderr and _maybe_self_update("download: yt-dlp refused with 403"):
             _sweep_partials()
             cp = _attempt()
+            stderr = (cp.stderr if cp is not None else "") or ""
 
     if cp is None or cp.returncode != 0 or not os.path.exists(path):
         _sweep_partials()
+        if any(phrase in stderr for phrase in _VIDEO_UNAVAILABLE_MESSAGES):
+            return jsonify(error="video_unavailable", expected=path), 404
         return jsonify(error="download_failed", expected=path), 502
 
     # Overwrite yt-dlp's video-derived title/artist with the clean values Octo
