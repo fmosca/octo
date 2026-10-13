@@ -102,3 +102,38 @@ def test_a_symlink_inside_the_root_cannot_point_the_write_outside(tmp_path, monk
 
     assert resp.status_code == 400
     assert not (outside / "video-5.mp3").exists()
+
+
+def test_a_relative_destination_is_written_under_the_download_root(tmp_path, monkeypatch):
+    """spotify-import sends dest=spotify-import-youtube/<id> from a process whose cwd is not the root."""
+    root, client = _under(tmp_path, monkeypatch)
+    _accepting_run(monkeypatch)
+    elsewhere = tmp_path / "app"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    resp = client.get(
+        "/download",
+        query_string={"id": "video-rel", "dest": "spotify-import-youtube/video-rel"},
+    )
+
+    expected = os.path.realpath(str(root / "spotify-import-youtube" / "video-rel")) + ".mp3"
+    assert resp.status_code == 200
+    assert resp.get_json() == {"path": expected}
+    assert os.path.isfile(expected)
+    assert not (elsewhere / "spotify-import-youtube" / "video-rel.mp3").exists()
+
+
+def test_a_relative_dotdot_is_rejected_even_from_inside_the_root(tmp_path, monkeypatch):
+    """'../escaped' joined onto the root leaves it, even when the cwd would keep the walk inside."""
+    root, client = _under(tmp_path, monkeypatch)
+    _refusing_run(monkeypatch)
+    inside = root / "spotify-import-youtube"
+    inside.mkdir()
+    monkeypatch.chdir(inside)
+
+    resp = client.get("/download", query_string={"id": "video-esc", "dest": "../escaped"})
+
+    assert resp.status_code == 400
+    assert not (root / "escaped.mp3").exists()
+    assert not (inside / "escaped.mp3").exists()

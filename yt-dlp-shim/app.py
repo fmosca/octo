@@ -1203,6 +1203,24 @@ def stream():
     return Response(generator(), headers=headers, status=response_status)
 
 
+def _download_dest(dest: str) -> str:
+    """Resolve dest and refuse a path that lands outside the download root.
+
+    A relative dest is joined onto the root. spotify-import sends
+    `spotify-import-youtube/<id>`, and this process's working directory is
+    /app, so resolving that string on its own puts the file outside the music
+    mount and the write is refused before yt-dlp runs. An absolute dest is
+    resolved as given, which is what Octo's resolver sends.
+    """
+    if os.path.isabs(dest):
+        full_dest = os.path.realpath(dest)
+    else:
+        full_dest = os.path.realpath(os.path.join(_DOWNLOAD_ROOT, dest))
+    if not (full_dest == _DOWNLOAD_ROOT or full_dest.startswith(_DOWNLOAD_ROOT + os.sep)):
+        abort(400, "dest outside download root")
+    return full_dest
+
+
 @app.get("/download")
 def download():
     """Download a YouTube video as a tagged MP3 to <dest>.mp3.
@@ -1217,10 +1235,7 @@ def download():
     if not video_id or not dest:
         abort(400, "missing id or dest")
 
-    # Confine writes to the shared music root.
-    full_dest = os.path.realpath(dest)
-    if not (full_dest == _DOWNLOAD_ROOT or full_dest.startswith(_DOWNLOAD_ROOT + os.sep)):
-        abort(400, "dest outside download root")
+    full_dest = _download_dest(dest)
     os.makedirs(os.path.dirname(full_dest) or ".", exist_ok=True)
 
     ytdlp_args = [
